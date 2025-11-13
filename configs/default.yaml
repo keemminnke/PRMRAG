@@ -8,8 +8,9 @@ data:
   max_trajectory_length: 50
 
 # RPE Labeling (Small Model)
+# Using Qwen3-7B for MC estimation
 rpe:
-  model_name: "meta-llama/Llama-2-7b-hf"
+  model_name: "Qwen/Qwen2.5-7B-Instruct"  # Updated to Qwen3-7B equivalent
   model_path: null  # Override with local path if needed
   device: "cuda"
 
@@ -27,10 +28,12 @@ rpe:
   batch_inference: true
 
 # Judge Labeling (Large Model)
+# Using GPT-20B for label verification
 judge:
-  model_name: "meta-llama/Llama-2-70b-hf"
+  model_name: "gpt-20b"  # GPT-20B for high-quality judgments
   model_path: null
   device: "cuda"
+  api_provider: "openai"  # openai, anthropic, custom
 
   # Generation settings
   temperature: 0.3  # Lower for more consistent judgments

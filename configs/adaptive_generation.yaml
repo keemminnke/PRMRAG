@@ -7,9 +7,10 @@ data:
   output_path: "data/generated/adaptive_trajectories.jsonl"
   limit: null  # Limit number of questions (for testing)
 
-# Policy model (small model for CoT generation)
+# Policy model (small model for CoT generation and MC estimation)
+# Using Qwen3-7B for step-by-step reasoning
 policy_model:
-  model_name: "meta-llama/Llama-2-7b-hf"
+  model_name: "Qwen/Qwen2.5-7B-Instruct"  # Updated to Qwen3-7B equivalent
   model_path: null
   device: "cuda"
   temperature: 0.8
@@ -47,6 +48,14 @@ adaptive:
 
   # RAG intervention
   num_rag_queries: 3   # Number of query candidates to try
+
+  # Step forcing (structured generation)
+  use_step_forcing: true  # Force "Step N:" format for semantic boundaries
+
+  # Multi-path sampling
+  max_paths: 2048      # Maximum paths to sample per problem
+  min_correct_paths: 1  # Minimum correct paths required
+  min_incorrect_paths: 1  # Minimum incorrect paths required
 
 # Logging
 logging:

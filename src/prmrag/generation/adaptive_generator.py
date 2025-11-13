@@ -1,9 +1,10 @@
 """Adaptive MC-CoT + RAG trajectory generation.
 
 This module implements the core Stage 1 logic:
-- Generate CoT steps with MC monitoring
+- Generate CoT steps with MC monitoring using step forcing
 - Intervene with RAG when MC drops
 - Track mc_before, mc_after for each step
+- Support multi-path sampling (up to 2048 paths per problem)
 """
 
 from dataclasses import dataclass, field
@@ -14,6 +15,13 @@ from tqdm import tqdm
 
 from ..data.schemas import ActionType
 from ..retrieval import BM25Retriever
+from .step_forcing import (
+    ForcedStep,
+    StepForcingPrompt,
+    StepParser,
+    MultiPathSampler,
+    format_trajectory_with_steps,
+)
 
 
 class StepType(str, Enum):
@@ -28,10 +36,12 @@ class AdaptiveStep:
     """A step in an adaptive MC-CoT + RAG trajectory.
 
     This includes MC values before/after for monitoring.
+    Uses step forcing format: "Step N: {content}"
     """
     step_id: int
     step_type: StepType
-    text: str                           # The reasoning/retrieval text
+    text: str                           # The reasoning/retrieval text (with "Step N:" prefix)
+    content: str                        # Just the content (without "Step N:" prefix)
     used_passages: List[Dict[str, Any]] # Retrieved passages (if RAG)
     mc_before: float                    # MC(s_{t-1})
     mc_after: float                     # MC(s_t)
@@ -44,6 +54,7 @@ class AdaptiveStep:
             'step_id': self.step_id,
             'step_type': self.step_type.value,
             'text': self.text,
+            'content': self.content,
             'used_passages': self.used_passages,
             'mc_before': self.mc_before,
             'mc_after': self.mc_after,
@@ -107,6 +118,8 @@ class AdaptiveTrajectoryGenerator:
                 - max_steps: Maximum steps per trajectory
                 - num_rag_queries: Number of RAG query candidates
                 - top_k_passages: Number of passages to retrieve
+                - use_step_forcing: Whether to use step forcing (default: True)
+                - max_paths: Maximum paths to sample per problem (default: 2048)
         """
         self.policy_model = policy_model
         self.retriever = retriever
@@ -118,6 +131,15 @@ class AdaptiveTrajectoryGenerator:
         self.num_rag_queries = config.get('num_rag_queries', 3)
         self.top_k_passages = config.get('top_k_passages', 5)
         self.temperature = config.get('temperature', 0.8)
+
+        # Step forcing settings
+        self.use_step_forcing = config.get('use_step_forcing', True)
+        self.step_forcing_prompt = StepForcingPrompt()
+        self.step_parser = StepParser()
+
+        # Multi-path sampling
+        self.max_paths = config.get('max_paths', 2048)
+        self.multi_path_sampler = MultiPathSampler(max_paths=self.max_paths)
 
     def generate_trajectory(
         self,
@@ -143,6 +165,7 @@ class AdaptiveTrajectoryGenerator:
         current_state = {
             'question': question,
             'reasoning_history': [],
+            'forced_steps': [],  # Track ForcedStep objects
             'passages': [],
         }
 
@@ -150,11 +173,18 @@ class AdaptiveTrajectoryGenerator:
         mc_prev = self._monte_carlo_estimate(current_state, gold_answer)
 
         for t in range(self.max_steps):
-            # (A) Try CoT step
-            cot_step_text = self._generate_cot_step(current_state)
+            step_num = t + 1
+
+            # (A) Try CoT step with step forcing
+            if self.use_step_forcing:
+                cot_step_content = self._generate_cot_step_forced(current_state, step_num)
+                cot_step_text = f"Step {step_num}: {cot_step_content}"
+            else:
+                cot_step_content = self._generate_cot_step(current_state)
+                cot_step_text = cot_step_content
 
             # Create temporary state with CoT step
-            cot_state = self._apply_cot_step(current_state, cot_step_text)
+            cot_state = self._apply_cot_step(current_state, cot_step_text, step_num)
             mc_cot = self._monte_carlo_estimate(cot_state, gold_answer)
 
             # Compute RPE for CoT
@@ -167,6 +197,7 @@ class AdaptiveTrajectoryGenerator:
                     step_id=t,
                     step_type=StepType.COT,
                     text=cot_step_text,
+                    content=cot_step_content,
                     used_passages=[],
                     mc_before=mc_prev,
                     mc_after=mc_cot,
@@ -178,21 +209,21 @@ class AdaptiveTrajectoryGenerator:
                 mc_prev = mc_cot
 
                 # Check if we have an answer
-                if self._has_answer(cot_step_text):
-                    final_answer = self._extract_answer(cot_step_text)
+                if self._has_answer(cot_step_content):
+                    final_answer = self._extract_answer(cot_step_content)
                     break
 
             else:
                 # (C) CoT failed, try RAG intervention
-                print(f"  Step {t}: CoT RPE={rpe_cot:.3f} < {1-self.delta:.3f}, trying RAG...")
+                print(f"  Step {step_num}: CoT RPE={rpe_cot:.3f} < {1-self.delta:.3f}, trying RAG...")
 
                 rag_result = self._try_rag_intervention(
-                    current_state, mc_prev, gold_answer
+                    current_state, mc_prev, gold_answer, step_num
                 )
 
                 if rag_result is None:
                     # RAG also failed, terminate trajectory
-                    print(f"  Step {t}: RAG intervention failed, terminating")
+                    print(f"  Step {step_num}: RAG intervention failed, terminating")
                     return None
 
                 # RAG succeeded
@@ -201,6 +232,7 @@ class AdaptiveTrajectoryGenerator:
                     step_id=t,
                     step_type=StepType.RAG,
                     text=rag_step['text'],
+                    content=rag_step['content'],
                     used_passages=rag_step['passages'],
                     mc_before=mc_prev,
                     mc_after=mc_rag,
@@ -235,6 +267,7 @@ class AdaptiveTrajectoryGenerator:
         current_state: Dict[str, Any],
         mc_prev: float,
         gold_answer: Optional[str],
+        step_num: int,
     ) -> Optional[Tuple[Dict[str, Any], Dict[str, Any], float]]:
         """Try RAG intervention when CoT fails.
 
@@ -252,17 +285,20 @@ class AdaptiveTrajectoryGenerator:
             passages = self.retriever.retrieve(query, top_k=self.top_k_passages)
 
             # Create state with retrieved passages
-            rag_state = self._apply_rag_step(current_state, query, passages)
+            rag_state = self._apply_rag_step(current_state, query, passages, step_num)
 
             # Compute MC
             mc_rag = self._monte_carlo_estimate(rag_state, gold_answer)
 
             if mc_rag > best_mc:
                 best_mc = mc_rag
+                passage_text = self._format_passages(passages)
+                rag_content = f"Based on retrieved information: {passage_text}"
                 best_rag = {
                     'query': query,
                     'passages': passages,
-                    'text': self._format_rag_step(query, passages),
+                    'text': f"Step {step_num}: {rag_content}",
+                    'content': rag_content,
                     'state': rag_state,
                 }
 
@@ -274,7 +310,7 @@ class AdaptiveTrajectoryGenerator:
             return None
 
     def _generate_cot_step(self, state: Dict[str, Any]) -> str:
-        """Generate next CoT reasoning step."""
+        """Generate next CoT reasoning step (legacy, without step forcing)."""
         if self.policy_model is None:
             # Placeholder
             return "[Reasoning step generated by LLM]"
@@ -288,6 +324,42 @@ class AdaptiveTrajectoryGenerator:
 
         # Placeholder
         return "Let me think about this step by step..."
+
+    def _generate_cot_step_forced(self, state: Dict[str, Any], step_num: int) -> str:
+        """Generate next CoT step with step forcing.
+
+        Args:
+            state: Current state
+            step_num: Step number to generate
+
+        Returns:
+            Step content (without "Step N:" prefix)
+        """
+        if self.policy_model is None:
+            # Placeholder
+            return f"This is reasoning step {step_num} [generated by LLM]"
+
+        # Build step forcing prompt
+        forced_steps = state.get('forced_steps', [])
+        if step_num == 1:
+            prompt = self.step_forcing_prompt.build_initial_prompt(
+                question=state['question'],
+                context=""
+            )
+        else:
+            prompt = self.step_forcing_prompt.build_continuation_prompt(
+                question=state['question'],
+                previous_steps=forced_steps,
+                context=""
+            )
+
+        # Generate with model
+        # In real implementation, use:
+        # response = self.policy_model.generate(prompt, temperature=self.temperature)
+        # return self.step_parser.parse_single_step_response(response, step_num)
+
+        # Placeholder
+        return f"Analyzing the problem carefully..."
 
     def _generate_rag_queries(self, state: Dict[str, Any]) -> List[str]:
         """Generate query candidates for RAG retrieval."""
@@ -304,17 +376,38 @@ class AdaptiveTrajectoryGenerator:
 
         return [state['question']]  # Fallback to question
 
-    def _format_rag_step(self, query: str, passages: List[Dict[str, Any]]) -> str:
-        """Format RAG step text."""
-        text = f"Retrieved information for: {query}\n\n"
+    def _format_passages(self, passages: List[Dict[str, Any]]) -> str:
+        """Format retrieved passages for display."""
+        text_parts = []
         for i, passage in enumerate(passages, 1):
-            text += f"[{i}] {passage['title']}: {passage['text'][:200]}...\n"
+            title = passage.get('title', 'Document')
+            content = passage.get('text', '')[:200]
+            text_parts.append(f"[{i}] {title}: {content}...")
+        return "\n".join(text_parts)
+
+    def _format_rag_step(self, query: str, passages: List[Dict[str, Any]]) -> str:
+        """Format RAG step text (legacy)."""
+        text = f"Retrieved information for: {query}\n\n"
+        text += self._format_passages(passages)
         return text
 
-    def _apply_cot_step(self, state: Dict[str, Any], step_text: str) -> Dict[str, Any]:
+    def _apply_cot_step(
+        self,
+        state: Dict[str, Any],
+        step_text: str,
+        step_num: int,
+    ) -> Dict[str, Any]:
         """Apply CoT step to state."""
         new_state = state.copy()
         new_state['reasoning_history'] = state['reasoning_history'] + [step_text]
+
+        # Update forced steps if using step forcing
+        if self.use_step_forcing:
+            # Extract content from "Step N: content"
+            content = step_text.replace(f"Step {step_num}: ", "", 1)
+            forced_step = ForcedStep(step_number=step_num, content=content)
+            new_state['forced_steps'] = state.get('forced_steps', []) + [forced_step]
+
         return new_state
 
     def _apply_rag_step(
@@ -322,13 +415,23 @@ class AdaptiveTrajectoryGenerator:
         state: Dict[str, Any],
         query: str,
         passages: List[Dict[str, Any]],
+        step_num: int,
     ) -> Dict[str, Any]:
         """Apply RAG step to state."""
         new_state = state.copy()
         new_state['passages'] = state['passages'] + passages
-        new_state['reasoning_history'] = state['reasoning_history'] + [
-            self._format_rag_step(query, passages)
-        ]
+
+        # Format RAG step
+        if self.use_step_forcing:
+            passage_text = self._format_passages(passages)
+            rag_content = f"Based on retrieved information: {passage_text}"
+            rag_step_text = f"Step {step_num}: {rag_content}"
+            forced_step = ForcedStep(step_number=step_num, content=rag_content)
+            new_state['forced_steps'] = state.get('forced_steps', []) + [forced_step]
+        else:
+            rag_step_text = self._format_rag_step(query, passages)
+
+        new_state['reasoning_history'] = state['reasoning_history'] + [rag_step_text]
         return new_state
 
     def _monte_carlo_estimate(
