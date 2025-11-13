@@ -46,7 +46,7 @@ RAG-CoT Trajectories (HotpotQA)
 ### 1. MC-based RPE Labeling (작은 모델)
 - Prefix 고정 후 K번 rollout
 - MC(s_t, a_t) / MC(s_t) 계산
-- Threshold 기반 자동 라벨링
+- Binary threshold 기반 자동 라벨링 (GOOD/BAD)
 
 ### 2. LLM Judge Labeling (큰 모델)
 - VersaPRM 스타일 평가
@@ -54,9 +54,9 @@ RAG-CoT Trajectories (HotpotQA)
 - Step별 GOOD/BAD 판정
 
 ### 3. Consensus-based Filtering
-- **합의된 긍정**: MC=GOOD + Judge=GOOD → label=1
-- **합의된 부정**: MC=BAD + Judge=BAD → label=0
-- **충돌/애매**: 제거 (데이터셋에서 제외)
+- **합의된 긍정**: RPE=GOOD + Judge=GOOD → label=1
+- **합의된 부정**: RPE=BAD + Judge=BAD → label=0
+- **불일치**: RPE와 Judge가 다르면 → 제거 (데이터셋에서 제외)
 
 ## 설치
 
@@ -117,8 +117,7 @@ labeling:
   rpe:
     model_name: "llama-2-7b"
     num_rollouts: 5
-    threshold_good: 0.8
-    threshold_bad: 0.3
+    threshold: 0.5  # Binary: >= 0.5 → GOOD, < 0.5 → BAD
 
   judge:
     model_name: "llama-2-70b"
@@ -126,8 +125,8 @@ labeling:
     max_retries: 3
 
   consensus:
-    strategy: "strict"  # strict, lenient, balanced
-    min_agreement: 0.9
+    strategy: "strict"  # Both must agree
+    min_agreement: 0.8
     trajectory_level: true  # trajectory 전체 버리기
 ```
 

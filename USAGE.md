@@ -73,8 +73,7 @@ Edit `configs/default.yaml` to customize:
 rpe:
   model_name: "meta-llama/Llama-2-7b-hf"
   num_rollouts: 5
-  threshold_good: 0.8  # P_t >= 0.8 → GOOD
-  threshold_bad: 0.3   # P_t <= 0.3 → BAD
+  threshold: 0.5  # Binary: P_t >= 0.5 → GOOD, P_t < 0.5 → BAD
 ```
 
 ### Judge Labeling (Large Model)
@@ -91,25 +90,17 @@ judge:
 
 ```yaml
 consensus:
-  strategy: "strict"  # strict, lenient, or balanced
+  strategy: "strict"  # Both must agree (only option with binary labels)
   trajectory_level: true  # Filter entire trajectory if any step conflicts
   min_agreement: 0.8
 ```
 
-#### Strategies:
+#### Binary Consensus Strategy:
 
-**Strict** (default):
-- Positive: RPE=GOOD + Judge=GOOD → label=1
-- Negative: RPE=BAD + Judge=BAD → label=0
-- Everything else → filtered
-
-**Lenient**:
-- Positive: RPE∈{GOOD, BORDERLINE} + Judge=GOOD → label=1
-- Negative: RPE∈{BAD, BORDERLINE} + Judge=BAD → label=0
-
-**Balanced**:
-- Positive: RPE∈{GOOD, BORDERLINE} + Judge=GOOD → label=1
-- Negative: RPE=BAD + Judge=BAD → label=0
+With binary RPE labels (GOOD/BAD only):
+- **Positive consensus**: RPE=GOOD + Judge=GOOD → label=1
+- **Negative consensus**: RPE=BAD + Judge=BAD → label=0
+- **Disagreement**: RPE≠Judge → filtered (removed from dataset)
 
 ## Output Format
 
@@ -173,7 +164,7 @@ Edit `configs/default.yaml`:
 consensus:
   rules:
     positive_consensus:
-      rpe: ["GOOD", "BORDERLINE"]
+      rpe: ["GOOD"]
       judge: ["GOOD"]
       label: 1
     negative_consensus:
@@ -226,7 +217,7 @@ labeler = RPELabeler(config, model=model, tokenizer=tokenizer)
 
 1. **Start small**: Use `--limit 10` to test on a small subset first
 2. **Monitor agreement**: High agreement (>80%) indicates good labeling quality
-3. **Adjust thresholds**: If too much data is filtered, try "lenient" strategy
+3. **Adjust threshold**: If too much data is filtered, adjust RPE `threshold`
 4. **Use trajectory-level filtering**: More conservative but higher quality
 5. **Check disagreement patterns**: Use `consensus_analysis.py` to identify issues
 
@@ -234,11 +225,11 @@ labeler = RPELabeler(config, model=model, tokenizer=tokenizer)
 
 **Issue**: Too much data filtered
 
-**Solution**: Try lenient strategy or lower `min_agreement`
+**Solution**: Adjust RPE `threshold` (e.g., 0.4 or 0.6) or lower `min_agreement`
 
 **Issue**: Low agreement between RPE and Judge
 
-**Solution**: Check RPE thresholds, judge prompt, or model quality
+**Solution**: Check RPE threshold (try 0.4 or 0.6), judge prompt, or model quality
 
 **Issue**: Out of memory
 

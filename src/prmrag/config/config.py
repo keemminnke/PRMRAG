@@ -26,8 +26,7 @@ class RPEConfig:
     max_rollout_steps: int = 20
     temperature: float = 0.8
     top_p: float = 0.95
-    threshold_good: float = 0.8
-    threshold_bad: float = 0.3
+    threshold: float = 0.5  # Binary threshold: >= 0.5 → GOOD, < 0.5 → BAD
     use_cache: bool = True
     batch_inference: bool = True
 

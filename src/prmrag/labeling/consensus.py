@@ -64,49 +64,22 @@ class ConsensusModule:
         self.rules = config.get("rules", self._get_default_rules())
 
     def _get_default_rules(self) -> Dict[str, Any]:
-        """Get default consensus rules based on strategy."""
-        if self.strategy == "strict":
-            return {
-                "positive_consensus": {
-                    "rpe": ["GOOD"],
-                    "judge": ["GOOD"],
-                    "label": 1,
-                },
-                "negative_consensus": {
-                    "rpe": ["BAD"],
-                    "judge": ["BAD"],
-                    "label": 0,
-                },
-                "filter_disagreement": True,
-            }
-        elif self.strategy == "lenient":
-            return {
-                "positive_consensus": {
-                    "rpe": ["GOOD", "BORDERLINE"],
-                    "judge": ["GOOD"],
-                    "label": 1,
-                },
-                "negative_consensus": {
-                    "rpe": ["BAD", "BORDERLINE"],
-                    "judge": ["BAD"],
-                    "label": 0,
-                },
-                "filter_disagreement": True,
-            }
-        else:  # balanced
-            return {
-                "positive_consensus": {
-                    "rpe": ["GOOD", "BORDERLINE"],
-                    "judge": ["GOOD"],
-                    "label": 1,
-                },
-                "negative_consensus": {
-                    "rpe": ["BAD"],
-                    "judge": ["BAD"],
-                    "label": 0,
-                },
-                "filter_disagreement": True,
-            }
+        """Get default consensus rules based on strategy (binary labels only)."""
+        # All strategies are the same now with binary labels
+        # Only keep consensus when both agree (strict)
+        return {
+            "positive_consensus": {
+                "rpe": ["GOOD"],
+                "judge": ["GOOD"],
+                "label": 1,
+            },
+            "negative_consensus": {
+                "rpe": ["BAD"],
+                "judge": ["BAD"],
+                "label": 0,
+            },
+            "filter_disagreement": True,
+        }
 
     def create_consensus_labels(
         self,

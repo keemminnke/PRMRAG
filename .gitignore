@@ -34,9 +34,9 @@ ENV/
 *~
 
 # Data & outputs (large files)
-data/
-models/
-outputs/
+/data/
+/models/
+/outputs/
 *.pt
 *.pth
 *.bin

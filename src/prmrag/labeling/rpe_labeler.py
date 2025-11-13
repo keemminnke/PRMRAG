@@ -32,8 +32,7 @@ class RPELabeler(BaseLabeler):
             config: Configuration dictionary with keys:
                 - num_rollouts: Number of MC rollouts
                 - max_rollout_steps: Max steps per rollout
-                - threshold_good: RPE threshold for GOOD label
-                - threshold_bad: RPE threshold for BAD label
+                - threshold: RPE threshold (>= threshold: GOOD, < threshold: BAD)
                 - temperature: Sampling temperature
                 - device: Device for model inference
             model: Pre-loaded model (optional)
@@ -43,8 +42,7 @@ class RPELabeler(BaseLabeler):
 
         self.num_rollouts = config.get("num_rollouts", 5)
         self.max_rollout_steps = config.get("max_rollout_steps", 20)
-        self.threshold_good = config.get("threshold_good", 0.8)
-        self.threshold_bad = config.get("threshold_bad", 0.3)
+        self.threshold = config.get("threshold", 0.5)
         self.temperature = config.get("temperature", 0.8)
         self.device = config.get("device", "cuda" if torch.cuda.is_available() else "cpu")
 
@@ -110,13 +108,8 @@ class RPELabeler(BaseLabeler):
         # Add small epsilon to avoid division by zero
         rpe = mc_s_t_a_t / (mc_s_t + 1e-8)
 
-        # Assign label based on thresholds
-        if rpe >= self.threshold_good:
-            label_type = LabelType.GOOD
-        elif rpe <= self.threshold_bad:
-            label_type = LabelType.BAD
-        else:
-            label_type = LabelType.BORDERLINE
+        # Assign binary label based on threshold
+        label_type = LabelType.GOOD if rpe >= self.threshold else LabelType.BAD
 
         return RPELabel(
             step_id=step_idx,
@@ -127,8 +120,7 @@ class RPELabeler(BaseLabeler):
             confidence=1.0,  # Can be refined based on variance
             metadata={
                 "num_rollouts": self.num_rollouts,
-                "threshold_good": self.threshold_good,
-                "threshold_bad": self.threshold_bad,
+                "threshold": self.threshold,
             },
         )
 

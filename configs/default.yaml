@@ -19,10 +19,8 @@ rpe:
   temperature: 0.8
   top_p: 0.95
 
-  # RPE threshold for labeling
-  threshold_good: 0.8  # P_t >= 0.8 → GOOD
-  threshold_bad: 0.3   # P_t <= 0.3 → BAD
-  # Between: BORDERLINE
+  # RPE threshold for binary labeling
+  threshold: 0.5  # P_t >= 0.5 → GOOD, P_t < 0.5 → BAD
 
   # Efficiency
   use_cache: true
@@ -53,14 +51,14 @@ judge:
 
 # Consensus Module
 consensus:
-  # Strategy: strict, lenient, balanced
+  # Strategy: With binary labels, only one strategy (both must agree)
   strategy: "strict"
 
-  # Strict rules for consensus
+  # Binary consensus rules
   rules:
     # Case 1: Both agree it's GOOD
     positive_consensus:
-      rpe: ["GOOD", "BORDERLINE"]
+      rpe: ["GOOD"]
       judge: ["GOOD"]
       label: 1
 
@@ -70,7 +68,7 @@ consensus:
       judge: ["BAD"]
       label: 0
 
-    # Case 3: Disagreement → Filter out
+    # Case 3: Disagreement (RPE=GOOD, Judge=BAD or vice versa) → Filter out
     filter_disagreement: true
 
   # Minimum agreement score (0-1)
