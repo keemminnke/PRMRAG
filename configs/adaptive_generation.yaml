@@ -18,10 +18,16 @@ policy_model:
 
 # Retrieval settings
 retrieval:
-  method: "bm25"  # bm25, dense, hybrid
+  method: "wikipedia"  # bm25, wikipedia, hybrid
   top_k_passages: 5
 
-  # BM25 specific
+  # Wikipedia specific
+  wikipedia:
+    lang: "en"
+    user_agent: "PRMRAG/1.0"
+    extract_sentences: 5  # Number of sentences per page
+
+  # BM25 specific (if using BM25)
   bm25:
     tokenizer: "simple"  # simple, bert, custom
 

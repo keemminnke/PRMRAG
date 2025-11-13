@@ -6,7 +6,23 @@ from rank_bm25 import BM25Okapi
 from collections import defaultdict
 
 
-class BM25Retriever:
+class BaseRetriever:
+    """Base class for all retrievers."""
+
+    def retrieve(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+        """Retrieve top-k documents for a query.
+
+        Args:
+            query: Search query
+            top_k: Number of documents to retrieve
+
+        Returns:
+            List of dicts with keys: doc_id, title, text, score
+        """
+        raise NotImplementedError
+
+
+class BM25Retriever(BaseRetriever):
     """BM25-based retriever for RAG intervention."""
 
     def __init__(self, corpus: List[Dict[str, Any]], tokenize_fn=None):
@@ -140,3 +156,16 @@ class HybridRetriever:
         )
 
         return [item['doc'] for item in ranked[:top_k]]
+
+
+# Import Wikipedia retriever
+from .wikipedia_retriever import WikipediaRetriever, create_retriever
+
+__all__ = [
+    'BaseRetriever',
+    'BM25Retriever',
+    'WikipediaRetriever',
+    'load_hotpotqa_corpus',
+    'HybridRetriever',
+    'create_retriever',
+]

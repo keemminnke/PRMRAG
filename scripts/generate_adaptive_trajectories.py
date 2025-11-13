@@ -20,7 +20,7 @@ from typing import List, Dict, Any
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from prmrag.generation import AdaptiveTrajectoryGenerator
-from prmrag.retrieval import BM25Retriever, load_hotpotqa_corpus
+from prmrag.retrieval import BM25Retriever, WikipediaRetriever, load_hotpotqa_corpus, create_retriever
 from prmrag.utils import setup_logger, load_config
 
 
@@ -76,8 +76,14 @@ def main():
     parser.add_argument(
         "--corpus",
         type=Path,
-        required=True,
-        help="Path to document corpus (JSONL)",
+        default=None,
+        help="Path to document corpus (JSONL) - only needed for BM25",
+    )
+    parser.add_argument(
+        "--retrieval-method",
+        type=str,
+        default=None,
+        help="Retrieval method: bm25 or wikipedia (overrides config)",
     )
     parser.add_argument(
         "--output",
@@ -121,12 +127,35 @@ def main():
     logger.info(f"Loaded {len(questions)} questions")
 
     # Load corpus and build retriever
-    logger.info(f"\n[2/4] Loading corpus and building BM25 index...")
-    corpus = load_hotpotqa_corpus(args.corpus)
-    logger.info(f"Loaded {len(corpus)} documents")
+    logger.info(f"\n[2/4] Building retriever...")
 
-    retriever = BM25Retriever(corpus)
-    logger.info("BM25 index ready!")
+    retrieval_method = args.retrieval_method or config['retrieval']['method']
+    logger.info(f"Retrieval method: {retrieval_method}")
+
+    if retrieval_method == "bm25":
+        if not args.corpus:
+            raise ValueError("--corpus is required for BM25 retrieval")
+
+        logger.info(f"Loading corpus from {args.corpus}")
+        corpus = load_hotpotqa_corpus(args.corpus)
+        logger.info(f"Loaded {len(corpus)} documents")
+
+        retriever = BM25Retriever(corpus)
+        logger.info("BM25 index ready!")
+
+    elif retrieval_method == "wikipedia":
+        logger.info("Initializing Wikipedia retriever...")
+        wiki_config = config['retrieval'].get('wikipedia', {})
+
+        retriever = WikipediaRetriever(
+            lang=wiki_config.get('lang', 'en'),
+            user_agent=wiki_config.get('user_agent', 'PRMRAG/1.0'),
+            extract_sentences=wiki_config.get('extract_sentences', 5),
+        )
+        logger.info("Wikipedia retriever ready!")
+
+    else:
+        raise ValueError(f"Unknown retrieval method: {retrieval_method}")
 
     # Initialize generator
     logger.info(f"\n[3/4] Initializing adaptive trajectory generator...")
