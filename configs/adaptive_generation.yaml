@@ -1,0 +1,54 @@
+# Configuration for Adaptive MC-CoT + RAG trajectory generation
+
+# Data settings
+data:
+  hotpotqa_path: "data/raw/hotpotqa_dev.jsonl"  # HotpotQA questions
+  corpus_path: "data/raw/hotpotqa_corpus.jsonl"  # Document corpus for retrieval
+  output_path: "data/generated/adaptive_trajectories.jsonl"
+  limit: null  # Limit number of questions (for testing)
+
+# Policy model (small model for CoT generation)
+policy_model:
+  model_name: "meta-llama/Llama-2-7b-hf"
+  model_path: null
+  device: "cuda"
+  temperature: 0.8
+  top_p: 0.95
+  max_tokens: 200  # Per step
+
+# Retrieval settings
+retrieval:
+  method: "bm25"  # bm25, dense, hybrid
+  top_k_passages: 5
+
+  # BM25 specific
+  bm25:
+    tokenizer: "simple"  # simple, bert, custom
+
+# Adaptive generation settings
+adaptive:
+  # MC estimation
+  num_rollouts: 5
+  max_rollout_steps: 10
+
+  # Adaptive thresholds
+  delta: 0.1           # CoT acceptance: P_cot >= 1-δ (0.9)
+  epsilon: 0.1         # RAG improvement: P_rag >= 1+ε (1.1)
+
+  # Generation limits
+  max_steps: 15        # Max steps per trajectory
+  num_trajectories_per_question: 3  # Sample multiple trajectories
+
+  # RAG intervention
+  num_rag_queries: 3   # Number of query candidates to try
+
+# Logging
+logging:
+  level: "INFO"
+  log_to_file: true
+  log_dir: "outputs/logs"
+  save_intermediate: true  # Save after each batch
+
+# Misc
+seed: 42
+batch_size: 16  # Questions per batch
