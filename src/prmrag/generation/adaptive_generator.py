@@ -511,77 +511,66 @@ class AdaptiveTrajectoryGenerator:
         return self.step_parser.parse_single_step_response(response, step_num)
 
     def _generate_rag_queries(self, state: Dict[str, Any]) -> List[str]:
-        """Generate query candidates for RAG retrieval.
+        """Generate query candidates for RAG retrieval using LLM.
+
+        Uses the policy model to generate focused search queries based on
+        the question and current reasoning state.
 
         Args:
             state: Current state with question and reasoning history
 
         Returns:
-            List of search queries for retrieval
+            List of search queries for retrieval (up to num_rag_queries)
         """
         queries = []
 
-        # Strategy 1: Use the question itself
-        queries.append(state['question'])
+        if self.policy_model is None:
+            # Fallback: use question as-is
+            return [state['question']]
 
-        # Strategy 2: Generate sub-queries using LLM if available
-        if self.policy_model is not None:
-            # Build prompt for query generation
-            prompt_lines = [f"Question: {state['question']}\n"]
+        # Build prompt for query generation
+        prompt_lines = [f"Question: {state['question']}\n"]
 
-            if state.get('reasoning_history'):
-                prompt_lines.append("Reasoning so far:")
-                for step in state['reasoning_history']:
-                    prompt_lines.append(step)
+        if state.get('reasoning_history'):
+            prompt_lines.append("Reasoning so far:")
+            for step in state['reasoning_history']:
+                prompt_lines.append(step)
 
-            prompt_lines.append(
-                "\nWhat specific information do we need to retrieve to answer this question? "
-                "Generate 2-3 focused search queries."
+        prompt_lines.append(
+            "\nWhat specific information do we need to retrieve to answer this question? "
+            f"Generate {self.num_rag_queries} focused search queries."
+        )
+
+        prompt = "\n".join(prompt_lines)
+
+        try:
+            response = self.policy_model.generate_with_chat_template(
+                user_message=prompt,
+                max_tokens=150,
+                temperature=0.7,  # Some diversity for queries
             )
 
-            prompt = "\n".join(prompt_lines)
+            # Parse queries from response (simple splitting)
+            # Look for numbered list or newlines
+            import re
+            query_matches = re.findall(r'(?:^|\n)\s*(?:\d+\.|[-*])\s*(.+?)(?=\n|$)', response, re.MULTILINE)
+            if query_matches:
+                queries = [q.strip() for q in query_matches[:self.num_rag_queries]]
+            else:
+                # Fallback: split by newlines
+                query_lines = [line.strip() for line in response.split('\n') if line.strip()]
+                queries = query_lines[:self.num_rag_queries]
 
-            try:
-                response = self.policy_model.generate_with_chat_template(
-                    user_message=prompt,
-                    max_tokens=150,
-                    temperature=0.7,  # Some diversity for queries
-                )
+        except Exception as e:
+            # If query generation fails, use question as fallback
+            print(f"Warning: Query generation failed: {e}")
+            queries = [state['question']]
 
-                # Parse queries from response (simple splitting)
-                # Look for numbered list or newlines
-                import re
-                query_matches = re.findall(r'(?:^|\n)\s*(?:\d+\.|[-*])\s*(.+?)(?=\n|$)', response, re.MULTILINE)
-                if query_matches:
-                    queries.extend([q.strip() for q in query_matches[:2]])
-                else:
-                    # Fallback: split by newlines
-                    query_lines = [line.strip() for line in response.split('\n') if line.strip()]
-                    queries.extend(query_lines[:2])
+        # Ensure we always return at least one query
+        if not queries:
+            queries = [state['question']]
 
-            except Exception as e:
-                # If query generation fails, use fallback
-                print(f"Warning: Query generation failed: {e}")
-
-        # Strategy 3: Simple keyword extraction as fallback
-        # Extract capitalized words (likely entities)
-        import re
-        words = state['question'].split()
-        entities = [w for w in words if w and w[0].isupper() and len(w) > 2]
-        if len(entities) >= 2:
-            # Create queries from entity pairs
-            queries.append(f"{entities[0]} {entities[1]}")
-
-        # Deduplicate and limit to num_rag_queries
-        seen = set()
-        unique_queries = []
-        for q in queries:
-            q_normalized = q.lower().strip()
-            if q_normalized and q_normalized not in seen:
-                seen.add(q_normalized)
-                unique_queries.append(q)
-
-        return unique_queries[:self.num_rag_queries]
+        return queries[:self.num_rag_queries]
 
     def _format_passages(self, passages: List[Dict[str, Any]]) -> str:
         """Format retrieved passages for display."""
