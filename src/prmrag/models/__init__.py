@@ -1,6 +1,8 @@
 """Model loading and inference utilities."""
 
-# Placeholder for model utilities
-# To be expanded with actual model loading code
+from .policy_model import PolicyModel, load_policy_model
 
-__all__ = []
+__all__ = [
+    'PolicyModel',
+    'load_policy_model',
+]
