@@ -223,11 +223,15 @@ class AdaptiveTrajectoryGenerator:
     """Generator for adaptive MC-CoT + RAG trajectories.
 
     Algorithm:
-    1. Start with CoT reasoning
-    2. Monitor MC at each step
-    3. If MC drops (P_t^cot < 1-δ), rollback and try RAG
-    4. If RAG improves MC (P_t^rag >= 1+ε), continue
-    5. Otherwise, terminate trajectory
+    1. Generate CoT step and compute RPE
+    2. If RPE >= 0.8: accept as 'good' step
+    3. If RPE < 0.8: try RAG intervention
+       - If RAG RPE >= 0.8: accept as 'good' step
+       - If RAG RPE < 0.8: accept as 'bad' step (no termination)
+    4. Continue until max_steps or answer found
+
+    All steps are kept in trajectory with binary labels ('good'/'bad')
+    for PRM training.
     """
 
     def __init__(
@@ -243,13 +247,15 @@ class AdaptiveTrajectoryGenerator:
             retriever: BM25 retriever for RAG
             config: Configuration dict with:
                 - num_rollouts: Number of MC rollouts
-                - delta: CoT acceptance threshold (1-δ)
-                - epsilon: RAG improvement threshold (1+ε)
                 - max_steps: Maximum steps per trajectory
                 - num_rag_queries: Number of RAG query candidates
                 - top_k_passages: Number of passages to retrieve
                 - use_step_forcing: Whether to use step forcing (default: True)
                 - max_paths: Maximum paths to sample per problem (default: 2048)
+                - temperature: Sampling temperature (default: 0.8)
+
+                Note: delta and epsilon parameters are deprecated.
+                Fixed threshold of 0.8 is used for RPE-based labeling.
         """
         self.policy_model = policy_model
         self.retriever = retriever
@@ -320,12 +326,9 @@ class AdaptiveTrajectoryGenerator:
             # Compute RPE for CoT
             rpe_cot = mc_cot / (mc_prev + 1e-8)
 
-            # (B) Check if CoT is acceptable (new threshold: 0.5)
-            if rpe_cot >= 0.5:
-                # Accept CoT step
-                # Label as 'good' if RPE >= 0.8, else 'bad'
-                label = 'good' if rpe_cot >= 0.8 else 'bad'
-
+            # (B) Check if CoT is acceptable (threshold: 0.8)
+            if rpe_cot >= 0.8:
+                # Accept CoT step with 'good' label
                 step = AdaptiveStep(
                     step_id=t,
                     step_type=StepType.COT,
@@ -335,8 +338,8 @@ class AdaptiveTrajectoryGenerator:
                     mc_before=mc_prev,
                     mc_after=mc_cot,
                     rpe=rpe_cot,
-                    label=label,
-                    metadata={'accepted': 'cot', 'threshold': 0.5},
+                    label='good',
+                    metadata={'accepted': 'cot', 'threshold': 0.8},
                 )
                 steps.append(step)
                 current_state = cot_state
@@ -348,19 +351,14 @@ class AdaptiveTrajectoryGenerator:
                     break
 
             else:
-                # (C) CoT failed (RPE < 0.5), try RAG intervention
-                print(f"  Step {step_num}: CoT RPE={rpe_cot:.3f} < 0.5, trying RAG...")
+                # (C) CoT below threshold (RPE < 0.8), try RAG intervention
+                print(f"  Step {step_num}: CoT RPE={rpe_cot:.3f} < 0.8, trying RAG...")
 
                 rag_result = self._try_rag_intervention(
                     current_state, mc_prev, gold_answer, step_num
                 )
 
-                if rag_result is None:
-                    # RAG also failed, terminate trajectory
-                    print(f"  Step {step_num}: RAG intervention failed, terminating")
-                    return None
-
-                # RAG succeeded
+                # RAG always returns a result (never None)
                 rag_step, rag_state, mc_rag = rag_result
                 rpe_rag = mc_rag / (mc_prev + 1e-8)
 
@@ -377,7 +375,7 @@ class AdaptiveTrajectoryGenerator:
                     mc_after=mc_rag,
                     rpe=rpe_rag,
                     label=label,
-                    metadata={'accepted': 'rag', 'threshold': 1 + self.epsilon},
+                    metadata={'accepted': 'rag', 'threshold': 0.8},
                 )
                 steps.append(step)
                 current_state = rag_state
@@ -408,11 +406,14 @@ class AdaptiveTrajectoryGenerator:
         mc_prev: float,
         gold_answer: Optional[str],
         step_num: int,
-    ) -> Optional[Tuple[Dict[str, Any], Dict[str, Any], float]]:
-        """Try RAG intervention when CoT fails.
+    ) -> Tuple[Dict[str, Any], Dict[str, Any], float]:
+        """Try RAG intervention when CoT is below threshold.
+
+        Always returns the best RAG result found (never None).
+        The caller decides whether to label it 'good' or 'bad' based on RPE >= 0.8.
 
         Returns:
-            Tuple of (rag_step_info, new_state, mc_rag) or None if failed
+            Tuple of (rag_step_info, new_state, mc_rag)
         """
         # Generate multiple query candidates
         query_candidates = self._generate_rag_queries(current_state)
@@ -442,12 +443,8 @@ class AdaptiveTrajectoryGenerator:
                     'state': rag_state,
                 }
 
-        # Check if best RAG meets threshold
-        rpe_rag = best_mc / (mc_prev + 1e-8)
-        if rpe_rag >= (1 + self.epsilon):
-            return (best_rag, best_rag['state'], best_mc)
-        else:
-            return None
+        # Always return best RAG result (no threshold check)
+        return (best_rag, best_rag['state'], best_mc)
 
     def _generate_cot_step(self, state: Dict[str, Any]) -> str:
         """Generate next CoT reasoning step (legacy, without step forcing)."""
