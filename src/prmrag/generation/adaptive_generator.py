@@ -690,14 +690,18 @@ class AdaptiveTrajectoryGenerator:
         return self._extract_answer(response)
 
     def _check_answer(self, predicted: str, gold: str) -> bool:
-        """Check if answer is correct using SQuAD-style EM/F1.
+        """Check if answer is correct using substring inclusion.
+
+        Uses exact substring matching after normalization (lowercase, remove
+        articles/punctuation). No paraphrasing or partial similarity - only
+        checks if normalized gold answer is contained in normalized prediction.
 
         Args:
             predicted: Predicted answer (raw)
             gold: Gold answer (raw)
 
         Returns:
-            True if EM or F1 > 0.7 (common threshold in RAG papers)
+            True if normalized gold is substring of normalized prediction
         """
         # Extract answer parts first
         pred_extracted = extract_answer_from_text(predicted)
@@ -707,13 +711,8 @@ class AdaptiveTrajectoryGenerator:
         pred_norm = normalize_answer(pred_extracted)
         gold_norm = normalize_answer(gold_extracted)
 
-        # Check EM
-        if compute_em(pred_norm, gold_norm):
-            return True
-
-        # Check F1 (threshold: 0.7 is common in RAG papers)
-        f1 = compute_f1(pred_norm, gold_norm)
-        return f1 > 0.7
+        # Check substring inclusion
+        return gold_norm in pred_norm
 
     def _format_cot_prompt(self, state: Dict[str, Any]) -> str:
         """Format prompt for CoT generation."""
