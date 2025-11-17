@@ -3,7 +3,7 @@
 import json
 import jsonlines
 from pathlib import Path
-from typing import List, Union, Iterator
+from typing import List, Union, Iterator, Dict, Any
 from .schemas import Trajectory, LabeledTrajectory
 
 
@@ -141,3 +141,33 @@ def save_training_samples(
         raise ValueError(f"Unsupported format: {format}")
 
     print(f"Saved {len(all_samples)} training samples to {file_path}")
+
+
+def load_hotpotqa_questions(
+    file_path: Union[str, Path],
+    limit: int = None,
+) -> List[Dict[str, Any]]:
+    """Load HotpotQA questions from file.
+
+    Args:
+        file_path: Path to HotpotQA JSONL file
+        limit: Maximum number of questions to load
+
+    Returns:
+        List of question dictionaries with keys:
+            - _id: Question ID
+            - question: Question text
+            - answer: Gold answer
+            - context: List of [title, sentences] pairs
+            - supporting_facts: List of supporting fact indices
+    """
+    file_path = Path(file_path)
+    questions = []
+
+    with jsonlines.open(file_path) as reader:
+        for i, obj in enumerate(reader):
+            if limit and i >= limit:
+                break
+            questions.append(obj)
+
+    return questions

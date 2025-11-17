@@ -47,10 +47,7 @@ def load_hotpotqa_questions(file_path: Path, limit: int = None) -> List[Dict[str
                 'id': obj.get('_id', f"q_{i}"),
                 'question': obj['question'],
                 'gold_answer': obj.get('answer', ''),
-                'supporting_facts': [
-                    f"{title}: {text}"
-                    for title, sent_id in obj.get('supporting_facts', [])
-                ],
+                'supporting_facts': obj.get('supporting_facts', []),
                 'context': obj.get('context', []),
             })
 
@@ -164,12 +161,14 @@ def main():
     logger.info(f"  Delta (CoT threshold): {config['adaptive']['delta']}")
     logger.info(f"  Epsilon (RAG threshold): {config['adaptive']['epsilon']}")
 
-    # Note: In production, load actual model here
-    # from transformers import AutoModelForCausalLM
-    # policy_model = AutoModelForCausalLM.from_pretrained(...)
+    # Load policy model
+    from prmrag.models import load_policy_model
+    logger.info("Loading policy model...")
+    policy_model = load_policy_model(config['policy_model'])
+    logger.info("Policy model loaded!")
 
     generator = AdaptiveTrajectoryGenerator(
-        policy_model=None,  # Placeholder
+        policy_model=policy_model,
         retriever=retriever,
         config=config['adaptive'],
     )
@@ -195,9 +194,16 @@ def main():
 
     logger.info(f"\nStatistics:")
     logger.info(f"  Total steps: {total_steps}")
-    logger.info(f"  CoT steps: {cot_steps} ({cot_steps/total_steps*100:.1f}%)")
-    logger.info(f"  RAG steps: {rag_steps} ({rag_steps/total_steps*100:.1f}%)")
-    logger.info(f"  Correct answers: {correct}/{len(trajectories)} ({correct/len(trajectories)*100:.1f}%)")
+    if total_steps > 0:
+        logger.info(f"  CoT steps: {cot_steps} ({cot_steps/total_steps*100:.1f}%)")
+        logger.info(f"  RAG steps: {rag_steps} ({rag_steps/total_steps*100:.1f}%)")
+    else:
+        logger.info(f"  CoT steps: {cot_steps}")
+        logger.info(f"  RAG steps: {rag_steps}")
+    if len(trajectories) > 0:
+        logger.info(f"  Correct answers: {correct}/{len(trajectories)} ({correct/len(trajectories)*100:.1f}%)")
+    else:
+        logger.info(f"  Correct answers: 0/0")
 
     # Save trajectories
     logger.info(f"\nSaving trajectories to {args.output}")
