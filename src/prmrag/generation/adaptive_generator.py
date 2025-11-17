@@ -46,6 +46,7 @@ class AdaptiveStep:
     mc_before: float                    # MC(s_{t-1})
     mc_after: float                     # MC(s_t)
     rpe: float                          # mc_after / mc_before
+    label: Optional[str] = None         # RPE-based label: 'good' if rpe >= 0.8, None otherwise
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -59,6 +60,7 @@ class AdaptiveStep:
             'mc_before': self.mc_before,
             'mc_after': self.mc_after,
             'rpe': self.rpe,
+            'label': self.label,
             'metadata': self.metadata,
         }
 
@@ -190,9 +192,12 @@ class AdaptiveTrajectoryGenerator:
             # Compute RPE for CoT
             rpe_cot = mc_cot / (mc_prev + 1e-8)
 
-            # (B) Check if CoT is acceptable
-            if rpe_cot >= (1 - self.delta):
+            # (B) Check if CoT is acceptable (new threshold: 0.5)
+            if rpe_cot >= 0.5:
                 # Accept CoT step
+                # Label as 'good' if RPE >= 0.8
+                label = 'good' if rpe_cot >= 0.8 else None
+
                 step = AdaptiveStep(
                     step_id=t,
                     step_type=StepType.COT,
@@ -202,7 +207,8 @@ class AdaptiveTrajectoryGenerator:
                     mc_before=mc_prev,
                     mc_after=mc_cot,
                     rpe=rpe_cot,
-                    metadata={'accepted': 'cot', 'threshold': 1 - self.delta},
+                    label=label,
+                    metadata={'accepted': 'cot', 'threshold': 0.5},
                 )
                 steps.append(step)
                 current_state = cot_state
@@ -214,8 +220,8 @@ class AdaptiveTrajectoryGenerator:
                     break
 
             else:
-                # (C) CoT failed, try RAG intervention
-                print(f"  Step {step_num}: CoT RPE={rpe_cot:.3f} < {1-self.delta:.3f}, trying RAG...")
+                # (C) CoT failed (RPE < 0.5), try RAG intervention
+                print(f"  Step {step_num}: CoT RPE={rpe_cot:.3f} < 0.5, trying RAG...")
 
                 rag_result = self._try_rag_intervention(
                     current_state, mc_prev, gold_answer, step_num
@@ -228,6 +234,11 @@ class AdaptiveTrajectoryGenerator:
 
                 # RAG succeeded
                 rag_step, rag_state, mc_rag = rag_result
+                rpe_rag = mc_rag / (mc_prev + 1e-8)
+
+                # Label as 'good' if RPE >= 0.8
+                label = 'good' if rpe_rag >= 0.8 else None
+
                 step = AdaptiveStep(
                     step_id=t,
                     step_type=StepType.RAG,
@@ -236,7 +247,8 @@ class AdaptiveTrajectoryGenerator:
                     used_passages=rag_step['passages'],
                     mc_before=mc_prev,
                     mc_after=mc_rag,
-                    rpe=mc_rag / (mc_prev + 1e-8),
+                    rpe=rpe_rag,
+                    label=label,
                     metadata={'accepted': 'rag', 'threshold': 1 + self.epsilon},
                 )
                 steps.append(step)

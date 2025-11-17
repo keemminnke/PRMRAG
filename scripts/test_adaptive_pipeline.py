@@ -128,6 +128,7 @@ def main():
             print(f"  MC Before: {step.mc_before:.3f}")
             print(f"  MC After:  {step.mc_after:.3f}")
             print(f"  RPE:       {step.rpe:.3f}")
+            print(f"  Label:     {step.label if step.label else 'None'} {'✓ Good step!' if step.label == 'good' else ''}")
             print(f"  Threshold: {step.metadata.get('threshold', 'N/A')}")
             print(f"  Decision:  {step.metadata.get('accepted', 'N/A')}")
 
