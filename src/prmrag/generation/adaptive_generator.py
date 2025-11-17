@@ -261,10 +261,10 @@ class AdaptiveTrajectoryGenerator:
         self.retriever = retriever
 
         self.num_rollouts = config.get('num_rollouts', 5)
-        self.delta = config.get('delta', 0.1)           # CoT tolerance
-        self.epsilon = config.get('epsilon', 0.1)       # RAG improvement threshold
+        self.delta = config.get('delta', 0.1)           # CoT tolerance (deprecated)
+        self.epsilon = config.get('epsilon', 0.1)       # RAG improvement threshold (deprecated)
         self.max_steps = config.get('max_steps', 10)
-        self.num_rag_queries = config.get('num_rag_queries', 3)
+        self.num_rag_queries = config.get('num_rag_queries', 1)  # Default to 1 query
         self.top_k_passages = config.get('top_k_passages', 5)
         self.temperature = config.get('temperature', 0.8)
 
@@ -538,7 +538,7 @@ class AdaptiveTrajectoryGenerator:
 
         prompt_lines.append(
             "\nWhat specific information do we need to retrieve to answer this question? "
-            f"Generate {self.num_rag_queries} focused search queries."
+            "Generate a focused search query."
         )
 
         prompt = "\n".join(prompt_lines)
@@ -672,9 +672,10 @@ class AdaptiveTrajectoryGenerator:
             lines.append("Reasoning so far:")
             for step_text in state['reasoning_history']:
                 lines.append(step_text)
-            lines.append("\nContinue solving to reach the final answer.")
+            lines.append("\nContinue solving and end with: 'Therefore, the answer is [your answer].'")
         else:
-            lines.append("Solve this problem step by step and provide your final answer.")
+            lines.append("Solve this problem step by step.")
+            lines.append("End your response with: 'Therefore, the answer is [your answer].'")
 
         prompt = "\n".join(lines)
 
