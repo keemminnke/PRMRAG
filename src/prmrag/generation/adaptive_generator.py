@@ -46,7 +46,7 @@ class AdaptiveStep:
     mc_before: float                    # MC(s_{t-1})
     mc_after: float                     # MC(s_t)
     rpe: float                          # mc_after / mc_before
-    label: Optional[str] = None         # RPE-based label: 'good' if rpe >= 0.8, None otherwise
+    label: Optional[str] = None         # RPE-based label: 'good' if rpe >= 0.8, 'bad' if rpe < 0.8
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -195,8 +195,8 @@ class AdaptiveTrajectoryGenerator:
             # (B) Check if CoT is acceptable (new threshold: 0.5)
             if rpe_cot >= 0.5:
                 # Accept CoT step
-                # Label as 'good' if RPE >= 0.8
-                label = 'good' if rpe_cot >= 0.8 else None
+                # Label as 'good' if RPE >= 0.8, else 'bad'
+                label = 'good' if rpe_cot >= 0.8 else 'bad'
 
                 step = AdaptiveStep(
                     step_id=t,
@@ -236,8 +236,8 @@ class AdaptiveTrajectoryGenerator:
                 rag_step, rag_state, mc_rag = rag_result
                 rpe_rag = mc_rag / (mc_prev + 1e-8)
 
-                # Label as 'good' if RPE >= 0.8
-                label = 'good' if rpe_rag >= 0.8 else None
+                # Label as 'good' if RPE >= 0.8, else 'bad'
+                label = 'good' if rpe_rag >= 0.8 else 'bad'
 
                 step = AdaptiveStep(
                     step_id=t,
