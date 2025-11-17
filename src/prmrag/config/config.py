@@ -22,7 +22,7 @@ class RPEConfig:
     model_name: str = "meta-llama/Llama-2-7b-hf"
     model_path: Optional[str] = None
     device: str = "cuda"
-    num_rollouts: int = 5
+    num_rollouts: int = 32
     max_rollout_steps: int = 20
     temperature: float = 0.8
     top_p: float = 0.95

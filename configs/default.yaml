@@ -15,7 +15,7 @@ rpe:
   device: "cuda"
 
   # Monte Carlo rollout settings
-  num_rollouts: 
+  num_rollouts: 32
   max_rollout_steps: 20
   temperature: 0.8
   top_p: 0.95
