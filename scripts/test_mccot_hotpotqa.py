@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Test MC-CoT with HotpotQA-style questions."""
+"""Test MC-CoT with real HotpotQA data."""
 
 import sys
+import json
 from pathlib import Path
 
 # Add src to path
@@ -11,60 +12,31 @@ from prmrag.models import load_policy_model
 from prmrag.utils import load_config
 
 
-def get_test_questions():
-    """Get 10 test questions (HotpotQA style)."""
-    return [
-        {
-            "id": "q1",
-            "question": "What is the capital of France?",
-            "answer": "Paris",
-        },
-        {
-            "id": "q2",
-            "question": "Who wrote Romeo and Juliet?",
-            "answer": "William Shakespeare",
-        },
-        {
-            "id": "q3",
-            "question": "What is the largest planet in our solar system?",
-            "answer": "Jupiter",
-        },
-        {
-            "id": "q4",
-            "question": "What is the speed of light in vacuum?",
-            "answer": "299,792,458 meters per second",
-        },
-        {
-            "id": "q5",
-            "question": "Who painted the Mona Lisa?",
-            "answer": "Leonardo da Vinci",
-        },
-        {
-            "id": "q6",
-            "question": "What is the chemical symbol for gold?",
-            "answer": "Au",
-        },
-        {
-            "id": "q7",
-            "question": "What year did World War II end?",
-            "answer": "1945",
-        },
-        {
-            "id": "q8",
-            "question": "What is the smallest prime number?",
-            "answer": "2",
-        },
-        {
-            "id": "q9",
-            "question": "What is the capital of Japan?",
-            "answer": "Tokyo",
-        },
-        {
-            "id": "q10",
-            "question": "How many continents are there?",
-            "answer": "7",
-        },
-    ]
+def load_hotpotqa_questions(data_path, num_questions=10):
+    """Load questions from HotpotQA dataset.
+
+    Args:
+        data_path: Path to hotpotqa_train.jsonl
+        num_questions: Number of questions to load
+
+    Returns:
+        List of question dicts with 'id', 'question', 'answer'
+    """
+    questions = []
+
+    with open(data_path, 'r', encoding='utf-8') as f:
+        for i, line in enumerate(f):
+            if i >= num_questions:
+                break
+
+            data = json.loads(line)
+            questions.append({
+                'id': data.get('_id', f'q{i+1}'),
+                'question': data['question'],
+                'answer': data['answer'],
+            })
+
+    return questions
 
 
 def generate_step_by_step(policy_model, question, max_steps=3):
@@ -196,7 +168,7 @@ def check_answer(predicted, gold):
 
 def main():
     print("=" * 70)
-    print("MC-CoT Test with HotpotQA-style Questions")
+    print("MC-CoT Test with Real HotpotQA Data")
     print("=" * 70)
 
     # Load config
@@ -208,9 +180,15 @@ def main():
     policy_model = load_policy_model(config['policy_model'])
     print("✓ Model loaded")
 
-    # Get test questions
-    questions = get_test_questions()
-    print(f"\n[2] Testing on {len(questions)} questions")
+    # Load real HotpotQA data
+    data_path = Path("/root/.local/PRMRAG/data/raw/hotpotqa_train.jsonl")
+    if not data_path.exists():
+        # Fallback to local path
+        data_path = Path("data/raw/hotpotqa_train.jsonl")
+
+    print(f"\n[2] Loading questions from {data_path}")
+    questions = load_hotpotqa_questions(data_path, num_questions=10)
+    print(f"✓ Loaded {len(questions)} questions")
 
     # Generate for each question
     results = []
