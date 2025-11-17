@@ -64,9 +64,13 @@ def main():
     print(f"  - delta (CoT tolerance): {generator.delta}")
     print(f"  - epsilon (RAG threshold): {generator.epsilon}")
 
-    # Test question
-    question = "What is the capital of France?"
-    gold_answer = "Paris"
+    # Test question - Use a harder multi-hop question from HotpotQA
+    question = "Were Scott Derrickson and Ed Wood of the same nationality?"
+    gold_answer = "yes"
+
+    # Alternative hard questions:
+    # question = "What government position was held by the woman who portrayed Corliss Archer in the film Kiss and Tell?"
+    # gold_answer = "Chief of Protocol"
 
     print("\n" + "=" * 70)
     print("GENERATING TRAJECTORY")
