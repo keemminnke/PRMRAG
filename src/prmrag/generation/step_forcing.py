@@ -82,6 +82,11 @@ Step 1:"""
 
 {steps_text}
 
+Continue solving. You MUST respond with EXACTLY ONE step in this format:
+"Step {next_step_num}: [your reasoning]"
+
+Do NOT write multiple steps. Write ONLY Step {next_step_num}.
+
 Step {next_step_num}:"""
 
         if context:
@@ -91,6 +96,11 @@ Step {next_step_num}:"""
 
 Retrieved Information:
 {context}
+
+Continue solving using the retrieved information. You MUST respond with EXACTLY ONE step in this format:
+"Step {next_step_num}: [your reasoning]"
+
+Do NOT write multiple steps. Write ONLY Step {next_step_num}.
 
 Step {next_step_num}:"""
 

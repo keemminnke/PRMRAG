@@ -326,8 +326,8 @@ class AdaptiveTrajectoryGenerator:
             # Compute RPE for CoT
             rpe_cot = mc_cot / (mc_prev + 1e-8)
 
-            # (B) Check if CoT is acceptable (threshold: 0.8)
-            if rpe_cot >= 0.8:
+            # (B) Check if CoT is acceptable (threshold: 0.8, using > 0.79 to avoid floating point issues)
+            if rpe_cot > 0.79:
                 # Accept CoT step with 'good' label
                 step = AdaptiveStep(
                     step_id=t,
@@ -362,8 +362,8 @@ class AdaptiveTrajectoryGenerator:
                 rag_step, rag_state, mc_rag = rag_result
                 rpe_rag = mc_rag / (mc_prev + 1e-8)
 
-                # Label as 'good' if RPE >= 0.8, else 'bad'
-                label = 'good' if rpe_rag >= 0.8 else 'bad'
+                # Label as 'good' if RPE > 0.79 (effective 0.8 with floating point tolerance), else 'bad'
+                label = 'good' if rpe_rag > 0.79 else 'bad'
 
                 step = AdaptiveStep(
                     step_id=t,
