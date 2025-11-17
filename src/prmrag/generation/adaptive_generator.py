@@ -12,6 +12,9 @@ from typing import List, Dict, Any, Optional, Tuple
 from enum import Enum
 import numpy as np
 from tqdm import tqdm
+import re
+import string
+from collections import Counter
 
 from ..data.schemas import ActionType
 from ..retrieval import BM25Retriever
@@ -22,6 +25,131 @@ from .step_forcing import (
     MultiPathSampler,
     format_trajectory_with_steps,
 )
+
+
+# ============================================================================
+# SQuAD-style Answer Normalization and Matching
+# ============================================================================
+
+def normalize_answer(text: str) -> str:
+    """Normalize answer text using SQuAD-style normalization.
+
+    This is the standard normalization used in RAG/QA papers for datasets like
+    HotpotQA, Natural Questions, TriviaQA.
+
+    Steps:
+    1. Lowercase
+    2. Remove articles (a, an, the)
+    3. Remove punctuation
+    4. Remove extra whitespace
+
+    Args:
+        text: Raw answer text
+
+    Returns:
+        Normalized answer text
+    """
+    # Lowercase
+    text = text.lower()
+
+    # Remove articles
+    text = re.sub(r'\b(a|an|the)\b', ' ', text)
+
+    # Remove punctuation
+    text = text.translate(str.maketrans('', '', string.punctuation))
+
+    # Remove extra whitespace
+    text = ' '.join(text.split())
+
+    return text.strip()
+
+
+def extract_answer_from_text(text: str) -> str:
+    """Extract answer part from model output.
+
+    Common patterns in RAG outputs:
+    - "Answer: ..."
+    - "The answer is ..."
+    - "(answer)" or "answer."
+    - First sentence
+
+    Args:
+        text: Model output text
+
+    Returns:
+        Extracted answer
+    """
+    text = text.strip()
+
+    # Pattern 1: "Answer: ..." or "The answer is ..."
+    answer_patterns = [
+        r'(?:final\s+)?answer\s*(?:is)?\s*:?\s*(.+?)(?:\.|$)',
+        r'therefore,?\s+(.+?)(?:\.|$)',
+        r'(?:in\s+)?conclusion,?\s+(.+?)(?:\.|$)',
+        r'the\s+answer\s+is\s+\(?(.+?)\)?(?:\.|$)',
+    ]
+
+    for pattern in answer_patterns:
+        match = re.search(pattern, text.lower())
+        if match:
+            answer = match.group(1).strip()
+            # Remove parentheses
+            answer = re.sub(r'[()]', '', answer)
+            return answer
+
+    # Pattern 2: Check for content in parentheses at the end
+    paren_match = re.search(r'\(([^)]+)\)[.,;]?\s*$', text)
+    if paren_match:
+        return paren_match.group(1).strip()
+
+    # Pattern 3: Take first sentence as fallback
+    sentences = re.split(r'[.!?]\s+', text)
+    if sentences:
+        return sentences[0].strip()
+
+    return text
+
+
+def compute_f1(predicted: str, gold: str) -> float:
+    """Compute token-level F1 score (SQuAD-style).
+
+    Args:
+        predicted: Predicted answer (normalized)
+        gold: Gold answer (normalized)
+
+    Returns:
+        F1 score (0.0 to 1.0)
+    """
+    pred_tokens = predicted.split()
+    gold_tokens = gold.split()
+
+    if len(pred_tokens) == 0 or len(gold_tokens) == 0:
+        return int(pred_tokens == gold_tokens)
+
+    common = Counter(pred_tokens) & Counter(gold_tokens)
+    num_common = sum(common.values())
+
+    if num_common == 0:
+        return 0.0
+
+    precision = num_common / len(pred_tokens)
+    recall = num_common / len(gold_tokens)
+    f1 = 2 * precision * recall / (precision + recall)
+
+    return f1
+
+
+def compute_em(predicted: str, gold: str) -> bool:
+    """Compute exact match (SQuAD-style).
+
+    Args:
+        predicted: Predicted answer (normalized)
+        gold: Gold answer (normalized)
+
+    Returns:
+        True if exact match
+    """
+    return predicted == gold
 
 
 class StepType(str, Enum):
@@ -366,11 +494,13 @@ class AdaptiveTrajectoryGenerator:
             )
 
         # Generate with model (use chat template for Qwen)
+        # Stop sequences prevent generating multiple steps at once
         response = self.policy_model.generate_with_chat_template(
             user_message=prompt,
-            max_tokens=200,  # Moderate length for single step
+            max_tokens=800,  # Allow longer reasoning for complex steps
             temperature=self.temperature,
             top_p=0.95,
+            stop_sequences=["\nStep", "\n\n"],  # Stop at next step or double newline
         )
 
         # Parse response to extract step content (removes "Step N:" if present)
@@ -574,10 +704,30 @@ class AdaptiveTrajectoryGenerator:
         return self._extract_answer(response)
 
     def _check_answer(self, predicted: str, gold: str) -> bool:
-        """Check if answer is correct."""
-        pred_norm = predicted.strip().lower()
-        gold_norm = gold.strip().lower()
-        return pred_norm == gold_norm or gold_norm in pred_norm
+        """Check if answer is correct using SQuAD-style EM/F1.
+
+        Args:
+            predicted: Predicted answer (raw)
+            gold: Gold answer (raw)
+
+        Returns:
+            True if EM or F1 > 0.7 (common threshold in RAG papers)
+        """
+        # Extract answer parts first
+        pred_extracted = extract_answer_from_text(predicted)
+        gold_extracted = extract_answer_from_text(gold)
+
+        # Normalize both
+        pred_norm = normalize_answer(pred_extracted)
+        gold_norm = normalize_answer(gold_extracted)
+
+        # Check EM
+        if compute_em(pred_norm, gold_norm):
+            return True
+
+        # Check F1 (threshold: 0.7 is common in RAG papers)
+        f1 = compute_f1(pred_norm, gold_norm)
+        return f1 > 0.7
 
     def _format_cot_prompt(self, state: Dict[str, Any]) -> str:
         """Format prompt for CoT generation."""
@@ -603,20 +753,50 @@ class AdaptiveTrajectoryGenerator:
         return any(marker in text_lower for marker in answer_markers)
 
     def _extract_answer(self, text: str) -> str:
-        """Extract answer from text."""
-        # Simple extraction (can be improved)
-        if 'answer is' in text.lower():
-            return text.split('answer is')[-1].strip()
-        return text.strip()
+        """Extract answer from text using SQuAD-style extraction.
+
+        Args:
+            text: Model output text
+
+        Returns:
+            Extracted answer
+        """
+        return extract_answer_from_text(text)
 
     def _extract_final_answer(self, steps: List[AdaptiveStep]) -> str:
-        """Extract final answer from trajectory."""
+        """Extract final answer from trajectory.
+
+        Tries to find answer from:
+        1. Last step (most likely to contain final answer)
+        2. Any step with answer markers (fallback)
+        3. Concatenated content (last resort)
+
+        Args:
+            steps: List of adaptive steps
+
+        Returns:
+            Extracted final answer
+        """
         if not steps:
             return ""
 
-        # Try to extract from last step
-        last_text = steps[-1].text
-        return self._extract_answer(last_text)
+        # Try to extract from last step first
+        last_content = steps[-1].content
+        extracted = extract_answer_from_text(last_content)
+
+        # If we got a meaningful answer, return it
+        if extracted and len(extracted) > 0:
+            return extracted
+
+        # Fallback: try all steps in reverse order
+        for step in reversed(steps):
+            if self._has_answer(step.content):
+                extracted = extract_answer_from_text(step.content)
+                if extracted and len(extracted) > 0:
+                    return extracted
+
+        # Last resort: return last step content
+        return steps[-1].content if steps else ""
 
     def generate_batch(
         self,
