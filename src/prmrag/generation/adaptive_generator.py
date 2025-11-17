@@ -553,7 +553,7 @@ class AdaptiveTrajectoryGenerator:
         # Generate complete solution (longer max_tokens for rollout)
         response = self.policy_model.generate_with_chat_template(
             user_message=prompt,
-            max_tokens=400,  # Allow longer generation for complete solution
+            max_tokens=800,  # Allow longer generation for multi-hop reasoning
             temperature=self.temperature,
             top_p=0.95,
         )
