@@ -435,7 +435,8 @@ class AdaptiveTrajectoryGenerator:
                 passage_text,
                 "\nBased on the retrieved information above, provide the first reasoning step.",
                 f"Respond with EXACTLY ONE step in this format:",
-                f'"Step {step_num}: [your reasoning based on the documents]"\n',
+                f'"Step {step_num}: [your reasoning based on the documents]"',
+                '\nIf this is your final step, include: "Final Answer: [your answer]"\n',
                 f"Step {step_num}:"
             ]
         else:
@@ -449,6 +450,7 @@ class AdaptiveTrajectoryGenerator:
                 f"\nBased on the retrieved information above, continue solving.",
                 f"You MUST respond with EXACTLY ONE step in this format:",
                 f'"Step {step_num}: [your reasoning based on the documents]"',
+                '\nIf this is your final step, include: "Final Answer: [your answer]"',
                 f"\nDo NOT write multiple steps. Write ONLY Step {step_num}.\n",
                 f"Step {step_num}:"
             ]
@@ -817,15 +819,13 @@ class AdaptiveTrajectoryGenerator:
         return "\n".join(lines)
 
     def _has_answer(self, text: str) -> bool:
-        """Check if text contains a final answer."""
-        answer_markers = [
-            'the answer is',
-            'therefore',
-            'final answer',
-            'in conclusion',
-        ]
+        """Check if text contains the explicit 'Final Answer:' marker.
+
+        This uses a single, clear termination marker that the model is instructed
+        to use in its last step, rather than heuristic patterns.
+        """
         text_lower = text.lower()
-        return any(marker in text_lower for marker in answer_markers)
+        return 'final answer:' in text_lower
 
     def _extract_answer(self, text: str) -> str:
         """Extract answer from text using SQuAD-style extraction.

@@ -41,7 +41,10 @@ class StepForcingPrompt:
         """
         prompt = f"""Question: {question}
 
-Please solve this problem step by step. Start with:
+Please solve this problem step by step. When you reach the final answer, format your last step as:
+"Step N: [reasoning] Final Answer: [your answer]"
+
+Start with:
 
 Step 1:"""
 
@@ -51,7 +54,10 @@ Step 1:"""
 Context:
 {context}
 
-Please solve this problem step by step using the provided context. Start with:
+Please solve this problem step by step using the provided context. When you reach the final answer, format your last step as:
+"Step N: [reasoning] Final Answer: [your answer]"
+
+Start with:
 
 Step 1:"""
 
@@ -85,6 +91,8 @@ Step 1:"""
 Continue solving. You MUST respond with EXACTLY ONE step in this format:
 "Step {next_step_num}: [your reasoning]"
 
+If this is your final step, include: "Final Answer: [your answer]"
+
 Do NOT write multiple steps. Write ONLY Step {next_step_num}.
 
 Step {next_step_num}:"""
@@ -99,6 +107,8 @@ Retrieved Information:
 
 Continue solving using the retrieved information. You MUST respond with EXACTLY ONE step in this format:
 "Step {next_step_num}: [your reasoning]"
+
+If this is your final step, include: "Final Answer: [your answer]"
 
 Do NOT write multiple steps. Write ONLY Step {next_step_num}.
 
