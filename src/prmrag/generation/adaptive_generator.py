@@ -82,11 +82,13 @@ def extract_answer_from_text(text: str) -> str:
     text = text.strip()
 
     # Pattern 1: "Answer: ..." or "The answer is ..."
+    # Use greedy match (.+) but stop at sentence-ending punctuation followed by space or end
+    # This preserves decimal points like "2.2 million"
     answer_patterns = [
-        r'(?:final\s+)?answer\s*(?:is)?\s*:?\s*(.+?)(?:\.|$)',
-        r'therefore,?\s+(.+?)(?:\.|$)',
-        r'(?:in\s+)?conclusion,?\s+(.+?)(?:\.|$)',
-        r'the\s+answer\s+is\s+\(?(.+?)\)?(?:\.|$)',
+        r'(?:final\s+)?answer\s*(?:is)?\s*:?\s*(.+?)(?:\.\s+[A-Z]|\.$|$)',
+        r'therefore,?\s+(?:the\s+answer\s+is\s*:?\s*)?(.+?)(?:\.\s+[A-Z]|\.$|$)',
+        r'(?:in\s+)?conclusion,?\s+(.+?)(?:\.\s+[A-Z]|\.$|$)',
+        r'the\s+answer\s+is\s+\(?(.+?)\)?(?:\.\s+[A-Z]|\.$|$)',
     ]
 
     for pattern in answer_patterns:
@@ -793,18 +795,17 @@ class AdaptiveTrajectoryGenerator:
         return self._extract_answer(response)
 
     def _check_answer(self, predicted: str, gold: str) -> bool:
-        """Check if answer is correct using substring inclusion.
+        """Check if answer is correct using token-level F1 matching.
 
-        Uses exact substring matching after normalization (lowercase, remove
-        articles/punctuation). No paraphrasing or partial similarity - only
-        checks if normalized gold answer is contained in normalized prediction.
+        Uses token-level overlap after normalization. An answer is correct
+        if all key tokens from the gold answer appear in the prediction.
 
         Args:
             predicted: Predicted answer (raw)
             gold: Gold answer (raw)
 
         Returns:
-            True if normalized gold is substring of normalized prediction
+            True if prediction contains all gold tokens (F1-based matching)
         """
         # Extract answer parts first
         pred_extracted = extract_answer_from_text(predicted)
@@ -814,8 +815,14 @@ class AdaptiveTrajectoryGenerator:
         pred_norm = normalize_answer(pred_extracted)
         gold_norm = normalize_answer(gold_extracted)
 
-        # Check substring inclusion
-        return gold_norm in pred_norm
+        # Token-level matching: check if all gold tokens are in prediction
+        pred_tokens = set(pred_norm.split())
+        gold_tokens = set(gold_norm.split())
+
+        # Gold answer is correct if all its tokens appear in prediction
+        # This handles cases like "Paris, approximately 2.2 million" vs
+        # "The capital is Paris with population of approximately 2.2 million"
+        return gold_tokens.issubset(pred_tokens)
 
     def _format_cot_prompt(self, state: Dict[str, Any]) -> str:
         """Format prompt for CoT generation."""

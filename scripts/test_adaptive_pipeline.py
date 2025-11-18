@@ -9,6 +9,8 @@ This script shows the complete workflow with detailed logging:
 """
 
 import sys
+import json
+import argparse
 from pathlib import Path
 
 # Add src to path
@@ -20,7 +22,64 @@ from prmrag.generation.adaptive_generator import AdaptiveTrajectoryGenerator
 from prmrag.retrieval import BM25Retriever
 
 
+def load_example_data(data_dir: Path):
+    """Load example questions and corpus from data files."""
+    questions_file = data_dir / "raw" / "example_hotpotqa_questions.jsonl"
+    corpus_file = data_dir / "raw" / "example_hotpotqa_corpus.jsonl"
+
+    # Load questions
+    questions = []
+    with open(questions_file, 'r') as f:
+        for line in f:
+            questions.append(json.loads(line))
+
+    # Load corpus
+    corpus = []
+    with open(corpus_file, 'r') as f:
+        for line in f:
+            corpus.append(json.loads(line))
+
+    return questions, corpus
+
+
 def main():
+    # Parse arguments
+    parser = argparse.ArgumentParser(
+        description="Test adaptive MC-CoT + RAG pipeline with real data"
+    )
+    parser.add_argument(
+        "--question-idx",
+        type=int,
+        default=0,
+        help="Index of the question to test (default: 0)",
+    )
+    parser.add_argument(
+        "--num-rollouts",
+        type=int,
+        default=5,
+        help="Number of MC rollouts (default: 5)",
+    )
+    parser.add_argument(
+        "--list-questions",
+        action="store_true",
+        help="List all available questions and exit",
+    )
+    args = parser.parse_args()
+
+    # If user wants to list questions, do that and exit
+    if args.list_questions:
+        data_dir = Path(__file__).parent.parent / "data"
+        questions, _ = load_example_data(data_dir)
+        print(f"\n{'='*70}")
+        print(f"Available Questions ({len(questions)} total)")
+        print(f"{'='*70}\n")
+        for idx, q in enumerate(questions):
+            print(f"[{idx}] {q['_id']}")
+            print(f"    Q: {q['question']}")
+            print(f"    A: {q['answer']}")
+            print()
+        return
+
     print("=" * 70)
     print("TEST: Adaptive MC-CoT + RAG Pipeline")
     print("=" * 70)
@@ -29,49 +88,30 @@ def main():
     config_path = Path("configs/adaptive_generation.yaml")
     config = load_config(config_path)
 
+    # Load example data
+    print("\n[1] Loading example data from files...")
+    data_dir = Path(__file__).parent.parent / "data"
+    questions, corpus = load_example_data(data_dir)
+    print(f"✓ Loaded {len(questions)} questions and {len(corpus)} corpus documents")
+
     # Load model
-    print("\n[1] Loading Qwen2.5-7B model...")
+    print("\n[2] Loading Qwen2.5-7B model...")
     policy_model = load_policy_model(config['policy_model'])
     print("✓ Model loaded")
 
-    # Initialize BM25 retriever with supporting facts
-    print("\n[2] Initializing BM25 retriever...")
-
-    # Use a hard multi-hop question that requires external knowledge
-    # Supporting facts corpus for the question
-    supporting_corpus = [
-        {
-            "id": "doc1",
-            "title": "Shirley Temple",
-            "text": "Shirley Temple Black (April 23, 1928 – February 10, 2014) was an American actress, singer, dancer, and diplomat. She was Hollywood's number one box-office draw as a child actress from 1934 to 1938. As an adult, she pursued a career in public service, serving as the United States Ambassador to Ghana and to Czechoslovakia, and as Chief of Protocol of the United States."
-        },
-        {
-            "id": "doc2",
-            "title": "Kiss and Tell (1945 film)",
-            "text": "Kiss and Tell is a 1945 American comedy film starring Shirley Temple as Corliss Archer. In the film, Corliss is a mischievous teenager who becomes involved in a series of misunderstandings. The film was directed by Richard Wallace and based on the play by F. Hugh Herbert."
-        },
-        {
-            "id": "doc3",
-            "title": "Chief of Protocol",
-            "text": "The Chief of Protocol is a U.S. government official responsible for advising the President, the Vice President, and the Secretary of State on matters of diplomatic protocol. Notable people who have held this position include Shirley Temple Black, who served from 1976 to 1977."
-        },
-        {
-            "id": "doc4",
-            "title": "Corliss Archer",
-            "text": "Corliss Archer is a fictional character portrayed in various media. The character originated in short stories and was later adapted for radio, film, and television. Shirley Temple played Corliss Archer in the 1945 film Kiss and Tell."
-        }
-    ]
-
-    retriever = BM25Retriever(corpus=supporting_corpus)
-    print(f"✓ Retriever initialized with {len(supporting_corpus)} supporting documents")
+    # Initialize BM25 retriever with full corpus
+    print("\n[3] Initializing BM25 retriever...")
+    retriever = BM25Retriever(corpus=corpus)
+    print(f"✓ Retriever initialized with {len(corpus)} supporting documents")
 
     # Initialize adaptive generator
-    print("\n[3] Initializing adaptive generator...")
+    print("\n[4] Initializing adaptive generator...")
 
-    # Get generation config
-    gen_config = config.get('generation', {})
-    gen_config['num_rollouts'] = 5  # Start with 5 for speed
-    gen_config['max_steps'] = 5
+    # Get generation config from 'adaptive' section
+    gen_config = config.get('adaptive', {})
+    gen_config['num_rollouts'] = args.num_rollouts
+    # max_steps는 config 파일의 값(15) 사용 - safety limit으로만 작동
+    # 실제로는 모델이 "Final Answer:"를 생성할 때까지 계속 생성함
 
     generator = AdaptiveTrajectoryGenerator(
         policy_model=policy_model,
@@ -81,24 +121,27 @@ def main():
     print("✓ Generator initialized")
     print(f"  - num_rollouts: {generator.num_rollouts}")
 
+    # Select a test question from the loaded data
+    test_idx = args.question_idx
+    if test_idx >= len(questions):
+        print(f"\n❌ Error: Question index {test_idx} out of range (0-{len(questions)-1})")
+        print(f"   Available questions: {len(questions)}")
+        return
 
-    # Test question - Hard multi-hop question that requires RAG
-    # This question requires:
-    # 1. Identifying who played Corliss Archer in Kiss and Tell (Shirley Temple)
-    # 2. Identifying what government position she held (Chief of Protocol)
-    question = "What government position was held by the woman who portrayed Corliss Archer in the film Kiss and Tell?"
-    gold_answer = "Chief of Protocol"
+    test_question = questions[test_idx]
 
-    # Easy baseline question (for comparison):
-    # question = "Were Scott Derrickson and Ed Wood of the same nationality?"
-    # gold_answer = "yes"
+    question = test_question['question']
+    gold_answer = test_question['answer']
+    question_id = test_question['_id']
+
+    print(f"\n[5] Selected test question:")
+    print(f"  ID: {question_id}")
+    print(f"  Question: {question}")
+    print(f"  Answer: {gold_answer}")
 
     print("\n" + "=" * 70)
     print("GENERATING TRAJECTORY")
     print("=" * 70)
-    print(f"Question: {question}")
-    print(f"Gold Answer: {gold_answer}")
-    print()
 
     # Enable detailed logging by monkey-patching
     original_mc_estimate = generator._monte_carlo_estimate
@@ -121,7 +164,7 @@ def main():
     trajectory = generator.generate_trajectory(
         question=question,
         gold_answer=gold_answer,
-        trajectory_id="test_001",
+        trajectory_id=question_id,
     )
 
     # Results
