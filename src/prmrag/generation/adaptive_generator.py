@@ -344,8 +344,12 @@ class AdaptiveTrajectoryGenerator:
                 mc_prev = mc_cot
 
                 # Check if we have an answer
-                if self._has_answer(cot_step_content):
+                has_answer = self._has_answer(cot_step_content)
+                print(f"  Step {step_num}: CoT accepted (RPE={rpe_cot:.3f}), checking for final answer...")
+                print(f"  Step {step_num}: Has 'Final Answer:' marker? {has_answer}")
+                if has_answer:
                     final_answer = self._extract_answer(cot_step_content)
+                    print(f"  Step {step_num}: ✓ Found final answer, terminating trajectory.")
                     break
 
             else:
@@ -378,6 +382,15 @@ class AdaptiveTrajectoryGenerator:
                 steps.append(step)
                 current_state = rag_state
                 mc_prev = mc_rag
+
+                # Check if RAG step contains final answer
+                has_answer = self._has_answer(rag_step['content'])
+                print(f"  Step {step_num}: RAG step added (RPE={rpe_rag:.3f}, label={label}), checking for final answer...")
+                print(f"  Step {step_num}: Has 'Final Answer:' marker? {has_answer}")
+                if has_answer:
+                    final_answer = self._extract_answer(rag_step['content'])
+                    print(f"  Step {step_num}: ✓ Found final answer, terminating trajectory.")
+                    break
 
         # Extract final answer
         final_answer = self._extract_final_answer(steps)

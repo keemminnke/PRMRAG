@@ -121,7 +121,7 @@ def main():
         print("-" * 70)
         for i, step in enumerate(trajectory.steps, 1):
             print(f"\nStep {i} ({step.step_type.value.upper()}):")
-            print(f"  Content: {step.content[:100]}...")
+            print(f"  Content: {step.content}")
             print(f"  MC Before: {step.mc_before:.3f}")
             print(f"  MC After:  {step.mc_after:.3f}")
             print(f"  RPE:       {step.rpe:.3f}")
