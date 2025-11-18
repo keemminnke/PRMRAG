@@ -34,15 +34,36 @@ def main():
     policy_model = load_policy_model(config['policy_model'])
     print("✓ Model loaded")
 
-    # Initialize BM25 retriever (placeholder for now)
+    # Initialize BM25 retriever with supporting facts
     print("\n[2] Initializing BM25 retriever...")
-    # For now, use dummy corpus
-    dummy_corpus = [
-        {"id": "doc1", "title": "Paris", "text": "Paris is the capital of France."},
-        {"id": "doc2", "title": "France", "text": "France is a country in Western Europe."},
+
+    # Use a hard multi-hop question that requires external knowledge
+    # Supporting facts corpus for the question
+    supporting_corpus = [
+        {
+            "id": "doc1",
+            "title": "Shirley Temple",
+            "text": "Shirley Temple Black (April 23, 1928 – February 10, 2014) was an American actress, singer, dancer, and diplomat. She was Hollywood's number one box-office draw as a child actress from 1934 to 1938. As an adult, she pursued a career in public service, serving as the United States Ambassador to Ghana and to Czechoslovakia, and as Chief of Protocol of the United States."
+        },
+        {
+            "id": "doc2",
+            "title": "Kiss and Tell (1945 film)",
+            "text": "Kiss and Tell is a 1945 American comedy film starring Shirley Temple as Corliss Archer. In the film, Corliss is a mischievous teenager who becomes involved in a series of misunderstandings. The film was directed by Richard Wallace and based on the play by F. Hugh Herbert."
+        },
+        {
+            "id": "doc3",
+            "title": "Chief of Protocol",
+            "text": "The Chief of Protocol is a U.S. government official responsible for advising the President, the Vice President, and the Secretary of State on matters of diplomatic protocol. Notable people who have held this position include Shirley Temple Black, who served from 1976 to 1977."
+        },
+        {
+            "id": "doc4",
+            "title": "Corliss Archer",
+            "text": "Corliss Archer is a fictional character portrayed in various media. The character originated in short stories and was later adapted for radio, film, and television. Shirley Temple played Corliss Archer in the 1945 film Kiss and Tell."
+        }
     ]
-    retriever = BM25Retriever(corpus=dummy_corpus)
-    print("✓ Retriever initialized")
+
+    retriever = BM25Retriever(corpus=supporting_corpus)
+    print(f"✓ Retriever initialized with {len(supporting_corpus)} supporting documents")
 
     # Initialize adaptive generator
     print("\n[3] Initializing adaptive generator...")
@@ -61,13 +82,16 @@ def main():
     print(f"  - num_rollouts: {generator.num_rollouts}")
 
 
-    # Test question - Use a harder multi-hop question from HotpotQA
-    question = "Were Scott Derrickson and Ed Wood of the same nationality?"
-    gold_answer = "yes"
+    # Test question - Hard multi-hop question that requires RAG
+    # This question requires:
+    # 1. Identifying who played Corliss Archer in Kiss and Tell (Shirley Temple)
+    # 2. Identifying what government position she held (Chief of Protocol)
+    question = "What government position was held by the woman who portrayed Corliss Archer in the film Kiss and Tell?"
+    gold_answer = "Chief of Protocol"
 
-    # Alternative hard questions:
-    # question = "What government position was held by the woman who portrayed Corliss Archer in the film Kiss and Tell?"
-    # gold_answer = "Chief of Protocol"
+    # Easy baseline question (for comparison):
+    # question = "Were Scott Derrickson and Ed Wood of the same nationality?"
+    # gold_answer = "yes"
 
     print("\n" + "=" * 70)
     print("GENERATING TRAJECTORY")
