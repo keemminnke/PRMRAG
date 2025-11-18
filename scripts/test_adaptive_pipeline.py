@@ -173,10 +173,10 @@ def main():
     print("=" * 70)
 
     if trajectory is None:
-        print("❌ Trajectory generation FAILED")
+        print(" Trajectory generation FAILED")
         print("   (All steps rejected by MC estimation)")
     else:
-        print("✅ Trajectory generation SUCCEEDED")
+        print(" Trajectory generation SUCCEEDED")
         print(f"\nFinal Answer: {trajectory.final_answer}")
         print(f"Is Correct: {trajectory.is_correct}")
 

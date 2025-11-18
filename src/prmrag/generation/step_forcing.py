@@ -42,7 +42,9 @@ class StepForcingPrompt:
         prompt = f"""Question: {question}
 
 Please solve this problem step by step. When you reach the final answer, format your last step as:
-"Step N: [reasoning] Final Answer: [your answer]"
+"Step N: [reasoning] Final Answer: [write the complete answer here]"
+
+IMPORTANT: After "Final Answer:", you MUST write the actual answer. Do not leave it blank.
 
 Start with:
 
@@ -55,7 +57,9 @@ Context:
 {context}
 
 Please solve this problem step by step using the provided context. When you reach the final answer, format your last step as:
-"Step N: [reasoning] Final Answer: [your answer]"
+"Step N: [reasoning] Final Answer: [write the complete answer here]"
+
+IMPORTANT: After "Final Answer:", you MUST write the actual answer. Do not leave it blank.
 
 Start with:
 
@@ -91,7 +95,8 @@ Step 1:"""
 Continue solving. You MUST respond with EXACTLY ONE step in this format:
 "Step {next_step_num}: [your reasoning]"
 
-If this is your final step, include: "Final Answer: [your answer]"
+If this is your final step, include: "Final Answer: [write the complete answer here]"
+IMPORTANT: After "Final Answer:", you MUST write the actual answer. Do not leave it blank.
 
 Do NOT write multiple steps. Write ONLY Step {next_step_num}.
 
@@ -108,7 +113,8 @@ Retrieved Information:
 Continue solving using the retrieved information. You MUST respond with EXACTLY ONE step in this format:
 "Step {next_step_num}: [your reasoning]"
 
-If this is your final step, include: "Final Answer: [your answer]"
+If this is your final step, include: "Final Answer: [write the complete answer here]"
+IMPORTANT: After "Final Answer:", you MUST write the actual answer. Do not leave it blank.
 
 Do NOT write multiple steps. Write ONLY Step {next_step_num}.
 

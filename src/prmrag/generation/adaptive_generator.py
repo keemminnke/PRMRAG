@@ -471,12 +471,13 @@ class AdaptiveTrajectoryGenerator:
         prompt = "\n".join(prompt_lines)
 
         # Generate with model
+        # Don't use "\n\n" as it can cut off "Final Answer: \n\n [answer]" format
         response = self.policy_model.generate_with_chat_template(
             user_message=prompt,
             max_tokens=800,
             temperature=self.temperature,
             top_p=0.95,
-            stop_sequences=["\nStep", "\n\n"],
+            stop_sequences=["\nStep"],  # Only stop at next step marker
         )
 
         # Parse response to extract step content
@@ -587,12 +588,13 @@ class AdaptiveTrajectoryGenerator:
 
         # Generate with model (use chat template for Qwen)
         # Stop sequences prevent generating multiple steps at once
+        # Don't use "\n\n" as it can cut off "Final Answer: \n\n [answer]" format
         response = self.policy_model.generate_with_chat_template(
             user_message=prompt,
             max_tokens=800,  # Allow longer reasoning for complex steps
             temperature=self.temperature,
             top_p=0.95,
-            stop_sequences=["\nStep", "\n\n"],  # Stop at next step or double newline
+            stop_sequences=["\nStep"],  # Only stop at next step marker
         )
 
         # Parse response to extract step content (removes "Step N:" if present)
