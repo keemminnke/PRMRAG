@@ -400,6 +400,80 @@ class AdaptiveTrajectoryGenerator:
             },
         )
 
+    def _generate_rag_step_with_passages(
+        self,
+        state: Dict[str, Any],
+        passages: List[Dict[str, Any]],
+        step_num: int,
+    ) -> str:
+        """Generate a reasoning step based on retrieved passages.
+
+        Args:
+            state: Current state with question and reasoning history
+            passages: Retrieved passages to use for reasoning
+            step_num: Step number to generate
+
+        Returns:
+            Step content (without "Step N:" prefix)
+        """
+        if self.policy_model is None:
+            # Placeholder for testing without model
+            passage_text = self._format_passages(passages)
+            return f"Based on retrieved information: {passage_text}"
+
+        # Format passages for the prompt
+        passage_text = self._format_passages(passages)
+
+        # Build prompt with passages
+        forced_steps = state.get('forced_steps', [])
+
+        if step_num == 1:
+            # Initial step with passages
+            prompt_lines = [
+                f"Question: {state['question']}\n",
+                "Retrieved Information:",
+                passage_text,
+                "\nBased on the retrieved information above, provide the first reasoning step.",
+                f"Respond with EXACTLY ONE step in this format:",
+                f'"Step {step_num}: [your reasoning based on the documents]"\n',
+                f"Step {step_num}:"
+            ]
+        else:
+            # Continuation step with passages
+            steps_text = "\n".join(str(step) for step in forced_steps)
+            prompt_lines = [
+                f"Question: {state['question']}\n",
+                steps_text,
+                "\nRetrieved Information:",
+                passage_text,
+                f"\nBased on the retrieved information above, continue solving.",
+                f"You MUST respond with EXACTLY ONE step in this format:",
+                f'"Step {step_num}: [your reasoning based on the documents]"',
+                f"\nDo NOT write multiple steps. Write ONLY Step {step_num}.\n",
+                f"Step {step_num}:"
+            ]
+
+        prompt = "\n".join(prompt_lines)
+
+        # Generate with model
+        response = self.policy_model.generate_with_chat_template(
+            user_message=prompt,
+            max_tokens=800,
+            temperature=self.temperature,
+            top_p=0.95,
+            stop_sequences=["\nStep", "\n\n"],
+        )
+
+        # Parse response to extract step content
+        import re
+        # Remove any future steps
+        next_step_match = re.search(r'\n+Step\s+\d+:', response)
+        if next_step_match:
+            response = response[:next_step_match.start()].strip()
+
+        # Parse to get content without "Step N:" prefix
+        return self.step_parser.parse_single_step_response(response, step_num)
+
     def _try_rag_intervention(
         self,
         current_state: Dict[str, Any],
@@ -425,21 +499,27 @@ class AdaptiveTrajectoryGenerator:
             # Retrieve passages
             passages = self.retriever.retrieve(query, top_k=self.top_k_passages)
 
-            # Create state with retrieved passages
-            rag_state = self._apply_rag_step(current_state, query, passages, step_num)
+            # Generate RAG reasoning step based on passages
+            rag_step_content = self._generate_rag_step_with_passages(
+                current_state,
+                passages,
+                step_num
+            )
+            rag_step_text = f"Step {step_num}: {rag_step_content}"
+
+            # Create state with RAG step
+            rag_state = self._apply_rag_step(current_state, query, passages, step_num, rag_step_content)
 
             # Compute MC
             mc_rag = self._monte_carlo_estimate(rag_state, gold_answer)
 
             if mc_rag > best_mc:
                 best_mc = mc_rag
-                passage_text = self._format_passages(passages)
-                rag_content = f"Based on retrieved information: {passage_text}"
                 best_rag = {
                     'query': query,
                     'passages': passages,
-                    'text': f"Step {step_num}: {rag_content}",
-                    'content': rag_content,
+                    'text': rag_step_text,
+                    'content': rag_step_content,
                     'state': rag_state,
                 }
 
@@ -612,20 +692,29 @@ class AdaptiveTrajectoryGenerator:
         query: str,
         passages: List[Dict[str, Any]],
         step_num: int,
+        rag_step_content: str,
     ) -> Dict[str, Any]:
-        """Apply RAG step to state."""
+        """Apply RAG step to state.
+
+        Args:
+            state: Current state
+            query: RAG query used
+            passages: Retrieved passages
+            step_num: Step number
+            rag_step_content: LLM-generated reasoning content based on passages
+
+        Returns:
+            New state with RAG step added
+        """
         new_state = state.copy()
         new_state['passages'] = state['passages'] + passages
 
-        # Format RAG step
+        # Use LLM-generated content
+        rag_step_text = f"Step {step_num}: {rag_step_content}"
+
         if self.use_step_forcing:
-            passage_text = self._format_passages(passages)
-            rag_content = f"Based on retrieved information: {passage_text}"
-            rag_step_text = f"Step {step_num}: {rag_content}"
-            forced_step = ForcedStep(step_number=step_num, content=rag_content)
+            forced_step = ForcedStep(step_number=step_num, content=rag_step_content)
             new_state['forced_steps'] = state.get('forced_steps', []) + [forced_step]
-        else:
-            rag_step_text = self._format_rag_step(query, passages)
 
         new_state['reasoning_history'] = state['reasoning_history'] + [rag_step_text]
         return new_state
