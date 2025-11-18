@@ -101,8 +101,6 @@ The `AdaptiveTrajectoryGenerator` automatically uses step forcing when enabled:
 config = {
     'use_step_forcing': True,  # Enable step forcing
     'num_rollouts': 5,
-    'delta': 0.1,
-    'epsilon': 0.1,
     # ...
 }
 
@@ -331,9 +329,7 @@ from prmrag.generation import (
 config = {
     'use_step_forcing': True,
     'max_paths': 2048,
-    'num_rollouts': 5,
-    'delta': 0.1,
-    'epsilon': 0.1,
+    'num_rollouts': 5
 }
 
 generator = AdaptiveTrajectoryGenerator(

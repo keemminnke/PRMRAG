@@ -158,8 +158,7 @@ def main():
     logger.info(f"\n[3/4] Initializing adaptive trajectory generator...")
     logger.info(f"  Policy model: {config['policy_model']['model_name']}")
     logger.info(f"  MC rollouts: {config['adaptive']['num_rollouts']}")
-    logger.info(f"  Delta (CoT threshold): {config['adaptive']['delta']}")
-    logger.info(f"  Epsilon (RAG threshold): {config['adaptive']['epsilon']}")
+
 
     # Load policy model
     from prmrag.models import load_policy_model

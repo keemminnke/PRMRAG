@@ -50,8 +50,6 @@ def main():
     # Get generation config
     gen_config = config.get('generation', {})
     gen_config['num_rollouts'] = 5  # Start with 5 for speed
-    gen_config['delta'] = 0.1       # CoT tolerance
-    gen_config['epsilon'] = 0.1     # RAG improvement threshold
     gen_config['max_steps'] = 5
 
     generator = AdaptiveTrajectoryGenerator(
@@ -61,8 +59,7 @@ def main():
     )
     print("✓ Generator initialized")
     print(f"  - num_rollouts: {generator.num_rollouts}")
-    print(f"  - delta (CoT tolerance): {generator.delta}")
-    print(f"  - epsilon (RAG threshold): {generator.epsilon}")
+
 
     # Test question - Use a harder multi-hop question from HotpotQA
     question = "Were Scott Derrickson and Ed Wood of the same nationality?"

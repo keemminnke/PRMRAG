@@ -179,10 +179,7 @@ python scripts/generate_adaptive_trajectories.py \
 adaptive:
   # MC estimation
   num_rollouts: 5
-
-  # Adaptive thresholds
-  delta: 0.1           # CoT acceptance: P_cot >= 1-δ (0.9)
-  epsilon: 0.1         # RAG improvement: P_rag >= 1+ε (1.1)
+ 
 
   # Generation limits
   max_steps: 15

@@ -261,8 +261,6 @@ class AdaptiveTrajectoryGenerator:
         self.retriever = retriever
 
         self.num_rollouts = config.get('num_rollouts', 5)
-        self.delta = config.get('delta', 0.1)           # CoT tolerance (deprecated)
-        self.epsilon = config.get('epsilon', 0.1)       # RAG improvement threshold (deprecated)
         self.max_steps = config.get('max_steps', 10)
         self.num_rag_queries = config.get('num_rag_queries', 1)  # Default to 1 query
         self.top_k_passages = config.get('top_k_passages', 5)
