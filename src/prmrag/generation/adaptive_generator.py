@@ -506,9 +506,11 @@ class AdaptiveTrajectoryGenerator:
         """
         # Generate a single RAG query using LLM
         query = self._generate_rag_query(current_state)
+        print(f"    [RAG DEBUG] Query: {query[:80]}")
 
         # Retrieve passages
         passages = self.retriever.retrieve(query, top_k=self.top_k_passages)
+        print(f"    [RAG DEBUG] Retrieved {len(passages)} passages, top title: {passages[0].get('title', 'N/A') if passages else 'None'}")
 
         # Generate RAG reasoning step based on passages
         rag_step_content = self._generate_rag_step_with_passages(
@@ -622,11 +624,16 @@ class AdaptiveTrajectoryGenerator:
             prompt_lines.append("Reasoning so far:")
             for step in state['reasoning_history']:
                 prompt_lines.append(step)
-
-        prompt_lines.append(
-            "\nWhat specific information do we need to retrieve to answer this question? "
-            "Generate a focused search query."
-        )
+            prompt_lines.append(
+                "\nGenerate a short, focused search query (3-8 keywords) to find the information needed to continue."
+            )
+            prompt_lines.append("Search query:")
+        else:
+            prompt_lines.append(
+                "\nGenerate a short, focused search query (3-8 keywords) to find the information needed to answer this question."
+            )
+            prompt_lines.append("Do NOT write explanations. Just write the search query.")
+            prompt_lines.append("\nSearch query:")
 
         prompt = "\n".join(prompt_lines)
 
@@ -637,12 +644,17 @@ class AdaptiveTrajectoryGenerator:
                 temperature=0.7,
             )
 
+            # Debug: print full response
+            print(f"    [QUERY DEBUG] Raw LLM response: {response[:150]}")
+
             # Extract the first meaningful line as the query
             query = response.strip().split('\n')[0].strip()
 
             # Remove common prefixes like "1.", "-", "*"
             import re
             query = re.sub(r'^\s*(?:\d+\.|[-*])\s*', '', query)
+
+            print(f"    [QUERY DEBUG] Extracted query: {query[:100]}")
 
             return query if query else state['question']
 
@@ -729,12 +741,21 @@ class AdaptiveTrajectoryGenerator:
             return np.random.uniform(0.3, 0.9)
 
         successes = 0
-        for _ in range(self.num_rollouts):
+        rollout_answers = []
+        for i in range(self.num_rollouts):
             final_answer = self._rollout(state)
+            rollout_answers.append(final_answer[:50])  # Store first 50 chars for debugging
             if gold_answer and self._check_answer(final_answer, gold_answer):
                 successes += 1
 
-        return successes / self.num_rollouts
+        mc_value = successes / self.num_rollouts
+
+        # Debug logging
+        if mc_value == 0.0:
+            print(f"    [MC DEBUG] MC=0.0! Gold: {gold_answer[:50] if gold_answer else 'None'}")
+            print(f"    [MC DEBUG] Sample rollouts: {rollout_answers[:2]}")
+
+        return mc_value
 
     def _rollout(self, state: Dict[str, Any]) -> str:
         """Perform one rollout from current state.
@@ -752,7 +773,7 @@ class AdaptiveTrajectoryGenerator:
             # Placeholder for testing without model
             return "rollout_answer"
 
-        # Build rollout prompt
+        # Build rollout prompt with more structured instructions
         lines = [f"Question: {state['question']}\n"]
 
         # Add existing reasoning history if any
@@ -760,17 +781,24 @@ class AdaptiveTrajectoryGenerator:
             lines.append("Reasoning so far:")
             for step_text in state['reasoning_history']:
                 lines.append(step_text)
-            lines.append("\nContinue solving and end with: 'Therefore, the answer is [your answer].'")
+            lines.append("\nContinue solving this step by step.")
+            lines.append("Think carefully and show your reasoning.")
+            lines.append("At the end, provide your final answer in this format:")
+            lines.append('"Therefore, the answer is [your answer]."')
         else:
-            lines.append("Solve this problem step by step.")
-            lines.append("End your response with: 'Therefore, the answer is [your answer].'")
+            lines.append("Let's solve this step by step:")
+            lines.append("1. Break down what the question is asking")
+            lines.append("2. Think through the problem carefully")
+            lines.append("3. Draw your conclusion")
+            lines.append("\nAt the end, provide your final answer in this format:")
+            lines.append('"Therefore, the answer is [your answer]."')
 
         prompt = "\n".join(lines)
 
-        # Generate complete solution (longer max_tokens for rollout)
+        # Generate complete solution (longer max_tokens for multi-hop reasoning)
         response = self.policy_model.generate_with_chat_template(
             user_message=prompt,
-            max_tokens=800,  # Allow longer generation for multi-hop reasoning
+            max_tokens=1200,  # Increased to allow more thorough reasoning
             temperature=self.temperature,
             top_p=0.95,
         )
@@ -782,14 +810,14 @@ class AdaptiveTrajectoryGenerator:
         """Check if answer is correct using token-level F1 matching.
 
         Uses token-level overlap after normalization. An answer is correct
-        if all key tokens from the gold answer appear in the prediction.
+        if F1 score >= 0.5 (at least 50% token overlap).
 
         Args:
             predicted: Predicted answer (raw)
             gold: Gold answer (raw)
 
         Returns:
-            True if prediction contains all gold tokens (F1-based matching)
+            True if F1 >= 0.5 or exact match
         """
         # Extract answer parts first
         pred_extracted = extract_answer_from_text(predicted)
@@ -799,14 +827,13 @@ class AdaptiveTrajectoryGenerator:
         pred_norm = normalize_answer(pred_extracted)
         gold_norm = normalize_answer(gold_extracted)
 
-        # Token-level matching: check if all gold tokens are in prediction
-        pred_tokens = set(pred_norm.split())
-        gold_tokens = set(gold_norm.split())
+        # Check exact match first
+        if compute_em(pred_norm, gold_norm):
+            return True
 
-        # Gold answer is correct if all its tokens appear in prediction
-        # This handles cases like "Paris, approximately 2.2 million" vs
-        # "The capital is Paris with population of approximately 2.2 million"
-        return gold_tokens.issubset(pred_tokens)
+        # Check F1 score (threshold: 0.5 means at least 50% token overlap)
+        f1 = compute_f1(pred_norm, gold_norm)
+        return f1 >= 0.5
 
     def _format_cot_prompt(self, state: Dict[str, Any]) -> str:
         """Format prompt for CoT generation."""
