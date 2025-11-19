@@ -45,7 +45,7 @@ adaptive:
   num_trajectories_per_question: 3  # Sample multiple trajectories
 
   # RAG intervention
-  num_rag_queries: 3   # Number of query candidates to try
+  top_k_passages: 5    # Number of passages to retrieve per query
 
   # Step forcing (structured generation)
   use_step_forcing: true  # Force "Step N:" format for semantic boundaries

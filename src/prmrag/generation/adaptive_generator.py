@@ -264,7 +264,6 @@ class AdaptiveTrajectoryGenerator:
 
         self.num_rollouts = config.get('num_rollouts', 5)
         self.max_steps = config.get('max_steps', 10)
-        self.num_rag_queries = config.get('num_rag_queries', 1)  # Default to 1 query
         self.top_k_passages = config.get('top_k_passages', 5)
         self.temperature = config.get('temperature', 0.8)
 
@@ -499,48 +498,41 @@ class AdaptiveTrajectoryGenerator:
     ) -> Tuple[Dict[str, Any], Dict[str, Any], float]:
         """Try RAG intervention when CoT is below threshold.
 
-        Always returns the best RAG result found (never None).
+        Always returns a RAG result (never None).
         The caller decides whether to label it 'good' or 'bad' based on RPE >= 0.8.
 
         Returns:
             Tuple of (rag_step_info, new_state, mc_rag)
         """
-        # Generate multiple query candidates
-        query_candidates = self._generate_rag_queries(current_state)
+        # Generate a single RAG query using LLM
+        query = self._generate_rag_query(current_state)
 
-        best_rag = None
-        best_mc = -1.0
+        # Retrieve passages
+        passages = self.retriever.retrieve(query, top_k=self.top_k_passages)
 
-        for query in query_candidates:
-            # Retrieve passages
-            passages = self.retriever.retrieve(query, top_k=self.top_k_passages)
+        # Generate RAG reasoning step based on passages
+        rag_step_content = self._generate_rag_step_with_passages(
+            current_state,
+            passages,
+            step_num
+        )
+        rag_step_text = f"Step {step_num}: {rag_step_content}"
 
-            # Generate RAG reasoning step based on passages
-            rag_step_content = self._generate_rag_step_with_passages(
-                current_state,
-                passages,
-                step_num
-            )
-            rag_step_text = f"Step {step_num}: {rag_step_content}"
+        # Create state with RAG step
+        rag_state = self._apply_rag_step(current_state, query, passages, step_num, rag_step_content)
 
-            # Create state with RAG step
-            rag_state = self._apply_rag_step(current_state, query, passages, step_num, rag_step_content)
+        # Compute MC
+        mc_rag = self._monte_carlo_estimate(rag_state, gold_answer)
 
-            # Compute MC
-            mc_rag = self._monte_carlo_estimate(rag_state, gold_answer)
+        rag_step_info = {
+            'query': query,
+            'passages': passages,
+            'text': rag_step_text,
+            'content': rag_step_content,
+            'state': rag_state,
+        }
 
-            if mc_rag > best_mc:
-                best_mc = mc_rag
-                best_rag = {
-                    'query': query,
-                    'passages': passages,
-                    'text': rag_step_text,
-                    'content': rag_step_content,
-                    'state': rag_state,
-                }
-
-        # Always return best RAG result (no threshold check)
-        return (best_rag, best_rag['state'], best_mc)
+        return (rag_step_info, rag_state, mc_rag)
 
     def _generate_cot_step(self, state: Dict[str, Any]) -> str:
         """Generate next CoT reasoning step (legacy, without step forcing)."""
@@ -607,23 +599,21 @@ class AdaptiveTrajectoryGenerator:
         # Then parse to get content without "Step N:" prefix
         return self.step_parser.parse_single_step_response(response, step_num)
 
-    def _generate_rag_queries(self, state: Dict[str, Any]) -> List[str]:
-        """Generate query candidates for RAG retrieval using LLM.
+    def _generate_rag_query(self, state: Dict[str, Any]) -> str:
+        """Generate a single RAG query using LLM.
 
-        Uses the policy model to generate focused search queries based on
+        Uses the policy model to generate a focused search query based on
         the question and current reasoning state.
 
         Args:
             state: Current state with question and reasoning history
 
         Returns:
-            List of search queries for retrieval (up to num_rag_queries)
+            A single search query string
         """
-        queries = []
-
         if self.policy_model is None:
             # Fallback: use question as-is
-            return [state['question']]
+            return state['question']
 
         # Build prompt for query generation
         prompt_lines = [f"Question: {state['question']}\n"]
@@ -643,31 +633,23 @@ class AdaptiveTrajectoryGenerator:
         try:
             response = self.policy_model.generate_with_chat_template(
                 user_message=prompt,
-                max_tokens=150,
-                temperature=0.7,  # Some diversity for queries
+                max_tokens=100,
+                temperature=0.7,
             )
 
-            # Parse queries from response (simple splitting)
-            # Look for numbered list or newlines
+            # Extract the first meaningful line as the query
+            query = response.strip().split('\n')[0].strip()
+
+            # Remove common prefixes like "1.", "-", "*"
             import re
-            query_matches = re.findall(r'(?:^|\n)\s*(?:\d+\.|[-*])\s*(.+?)(?=\n|$)', response, re.MULTILINE)
-            if query_matches:
-                queries = [q.strip() for q in query_matches[:self.num_rag_queries]]
-            else:
-                # Fallback: split by newlines
-                query_lines = [line.strip() for line in response.split('\n') if line.strip()]
-                queries = query_lines[:self.num_rag_queries]
+            query = re.sub(r'^\s*(?:\d+\.|[-*])\s*', '', query)
+
+            return query if query else state['question']
 
         except Exception as e:
             # If query generation fails, use question as fallback
             print(f"Warning: Query generation failed: {e}")
-            queries = [state['question']]
-
-        # Ensure we always return at least one query
-        if not queries:
-            queries = [state['question']]
-
-        return queries[:self.num_rag_queries]
+            return state['question']
 
     def _format_passages(self, passages: List[Dict[str, Any]]) -> str:
         """Format retrieved passages for display."""
