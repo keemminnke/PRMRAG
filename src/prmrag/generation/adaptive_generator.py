@@ -668,8 +668,9 @@ class AdaptiveTrajectoryGenerator:
         text_parts = []
         for i, passage in enumerate(passages, 1):
             title = passage.get('title', 'Document')
-            content = passage.get('text', '')[:200]
-            text_parts.append(f"[{i}] {title}: {content}...")
+            # Use full text (HotpotQA passages are typically short, ~300-500 chars)
+            content = passage.get('text', '')
+            text_parts.append(f"[{i}] {title}: {content}")
         return "\n".join(text_parts)
 
     def _format_rag_step(self, query: str, passages: List[Dict[str, Any]]) -> str:
