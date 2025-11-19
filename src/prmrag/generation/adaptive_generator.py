@@ -267,7 +267,7 @@ class AdaptiveTrajectoryGenerator:
         self.policy_model = policy_model
         self.retriever = retriever
 
-        self.num_rollouts = config.get('num_rollouts', 5)
+        self.num_rollouts = config.get('num_rollouts', 8)
         self.max_steps = config.get('max_steps', 10)
         self.top_k_passages = config.get('top_k_passages', 5)
         self.temperature = config.get('temperature', 0.8)

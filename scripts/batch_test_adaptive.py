@@ -118,7 +118,7 @@ def main():
     parser.add_argument(
         "--num-rollouts",
         type=int,
-        default=5,
+        default=8,
         help="Number of MC rollouts (default: 5)",
     )
     parser.add_argument(

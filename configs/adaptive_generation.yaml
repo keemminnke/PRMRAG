@@ -41,13 +41,13 @@ retrieval:
 # Adaptive generation settings
 adaptive:
   # MC estimation
-  num_rollouts: 5
+  num_rollouts: 8
   max_rollout_steps: 10
 
 
 
   # Generation limits
-  max_steps: 15        # Max steps per trajectory
+  max_steps: 10        # Max steps per trajectory
   num_trajectories_per_question: 3  # Sample multiple trajectories
 
   # RAG intervention

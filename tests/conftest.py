@@ -43,7 +43,7 @@ def example_config():
     return {
         "rpe": {
             "model_name": "test-model",
-            "num_rollouts": 3,
+            "num_rollouts": 8,
             "threshold_good": 0.8,
             "threshold_bad": 0.3,
             "temperature": 0.8,
