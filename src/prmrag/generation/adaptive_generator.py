@@ -77,26 +77,26 @@ def extract_answer_from_text(text: str) -> str:
         text: Model output text
 
     Returns:
-        Extracted answer
+        Extracted answer (concise, stopping at punctuation or connectors)
     """
     text = text.strip()
 
     # Pattern 1: "Answer: ..." or "The answer is ..."
-    # Use greedy match (.+) but stop at sentence-ending punctuation followed by space or end
-    # This preserves decimal points like "2.2 million"
+    # Extract up to first period, comma, or connector word
+    # This gives concise answers like "yes" instead of "yes, because..."
     answer_patterns = [
-        r'(?:final\s+)?answer\s*(?:is)?\s*:?\s*(.+?)(?:\.\s+[A-Z]|\.$|$)',
-        r'therefore,?\s+(?:the\s+answer\s+is\s*:?\s*)?(.+?)(?:\.\s+[A-Z]|\.$|$)',
-        r'(?:in\s+)?conclusion,?\s+(.+?)(?:\.\s+[A-Z]|\.$|$)',
-        r'the\s+answer\s+is\s+\(?(.+?)\)?(?:\.\s+[A-Z]|\.$|$)',
+        r'(?:final\s+)?answer\s*(?:is)?\s*:?\s*([^.,;]+?)(?:[.,;]|\s+(?:because|since|as|which|that|and|or|but)\s+|$)',
+        r'therefore,?\s+(?:the\s+answer\s+is\s*:?\s*)?([^.,;]+?)(?:[.,;]|\s+(?:because|since|as|which|that|and|or|but)\s+|$)',
+        r'(?:in\s+)?conclusion,?\s+([^.,;]+?)(?:[.,;]|\s+(?:because|since|as|which|that|and|or|but)\s+|$)',
+        r'the\s+answer\s+is\s+\(?([^.,;)]+?)\)?(?:[.,;]|\s+(?:because|since|as|which|that|and|or|but)\s+|$)',
     ]
 
     for pattern in answer_patterns:
         match = re.search(pattern, text.lower())
         if match:
             answer = match.group(1).strip()
-            # Remove parentheses
-            answer = re.sub(r'[()]', '', answer)
+            # Remove parentheses and extra whitespace
+            answer = re.sub(r'[()]', '', answer).strip()
             return answer
 
     # Pattern 2: Check for content in parentheses at the end
@@ -104,10 +104,15 @@ def extract_answer_from_text(text: str) -> str:
     if paren_match:
         return paren_match.group(1).strip()
 
-    # Pattern 3: Take first sentence as fallback
+    # Pattern 3: Take first sentence as fallback, but limit length
     sentences = re.split(r'[.!?]\s+', text)
     if sentences:
-        return sentences[0].strip()
+        first_sent = sentences[0].strip()
+        # If first sentence is too long, take first clause
+        if len(first_sent.split()) > 10:
+            clauses = re.split(r'[,;]', first_sent)
+            return clauses[0].strip()
+        return first_sent
 
     return text
 
@@ -895,17 +900,17 @@ class AdaptiveTrajectoryGenerator:
         return self._extract_answer(response)
 
     def _check_answer(self, predicted: str, gold: str) -> bool:
-        """Check if answer is correct using token-level F1 matching.
+        """Check if answer is correct using token-level accuracy.
 
-        Uses token-level overlap after normalization. An answer is correct
-        if F1 score >= 0.5 (at least 50% token overlap).
+        Uses token-level accuracy: percentage of gold tokens found in prediction.
+        An answer is correct if accuracy >= 0.8 (80% of gold tokens present).
 
         Args:
             predicted: Predicted answer (raw)
             gold: Gold answer (raw)
 
         Returns:
-            True if F1 >= 0.5 or exact match
+            True if token accuracy >= 0.8
         """
         # Extract answer parts first
         pred_extracted = extract_answer_from_text(predicted)
@@ -915,13 +920,23 @@ class AdaptiveTrajectoryGenerator:
         pred_norm = normalize_answer(pred_extracted)
         gold_norm = normalize_answer(gold_extracted)
 
-        # Check exact match first
+        # Exact match - always accept
         if compute_em(pred_norm, gold_norm):
             return True
 
-        # Check F1 score (threshold: 0.5 means at least 50% token overlap)
-        f1 = compute_f1(pred_norm, gold_norm)
-        return f1 >= 0.5
+        # Token-level accuracy: what % of gold tokens are in prediction?
+        gold_tokens = gold_norm.split()
+        pred_tokens = pred_norm.split()
+
+        if not gold_tokens:  # Edge case: empty gold
+            return False
+
+        # Count how many gold tokens appear in prediction
+        matches = sum(1 for token in gold_tokens if token in pred_tokens)
+        accuracy = matches / len(gold_tokens)
+
+        # Accept if >= 80% of gold tokens are present
+        return accuracy >= 0.8
 
     def _format_cot_prompt(self, state: Dict[str, Any]) -> str:
         """Format prompt for CoT generation."""
