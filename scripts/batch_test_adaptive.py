@@ -69,8 +69,8 @@ def validate_rag_step_format(step_content: str, step_type: str) -> Dict[str, Any
     if step_type != 'rag':
         return validation
 
-    # Check for <start_search> tags
-    search_match = re.search(r'<start_search>(.*?)</end_search>', step_content, re.DOTALL)
+    # Check for <start_search> tags (note: <end_search> not </end_search>)
+    search_match = re.search(r'<start_search>(.*?)<end_search>', step_content, re.DOTALL)
     if search_match:
         validation['has_search_tags'] = True
         validation['search_query'] = search_match.group(1).strip()
