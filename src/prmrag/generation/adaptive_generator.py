@@ -471,28 +471,57 @@ class AdaptiveTrajectoryGenerator:
         if step_num == 1:
             # Initial step with passages
             prompt_lines = [
-                f"Question: {state['question']}\n",
-                "Retrieved Information:",
+                f"## Question",
+                state['question'],
+                "",
+                f"## Retrieved Documents",
                 passage_text,
-                "\nBased on the retrieved information above, provide the first reasoning step.",
+                "",
+                f"## Task",
+                "Generate a reasoning step to answer the question using the retrieved documents.",
+                "",
+                "IMPORTANT RULES:",
+                "- DO NOT hallucinate or invent information",
+                "- ONLY use information explicitly stated in the retrieved documents above",
+                "- If the documents do not contain relevant information, state: 'The retrieved documents do not contain relevant information'",
+                "- Cite which document you are using (e.g., 'According to [1]...')",
+                "",
                 f"Respond with EXACTLY ONE step in this format:",
-                f'"Step {step_num}: [your reasoning based on the documents]"',
-                '\nIf this is your final step, include: "Final Answer: [your answer]"\n',
+                f'"Step {step_num}: [your reasoning based ONLY on the documents]"',
+                "",
+                'If this is your final step, include: "Final Answer: [your answer]"',
+                "",
                 f"Step {step_num}:"
             ]
         else:
             # Continuation step with passages
             steps_text = "\n".join(str(step) for step in forced_steps)
             prompt_lines = [
-                f"Question: {state['question']}\n",
+                f"## Question",
+                state['question'],
+                "",
+                f"## Previous Reasoning Steps",
                 steps_text,
-                "\nRetrieved Information:",
+                "",
+                f"## Retrieved Documents",
                 passage_text,
-                f"\nBased on the retrieved information above, continue solving.",
-                f"You MUST respond with EXACTLY ONE step in this format:",
-                f'"Step {step_num}: [your reasoning based on the documents]"',
-                '\nIf this is your final step, include: "Final Answer: [your answer]"',
-                f"\nDo NOT write multiple steps. Write ONLY Step {step_num}.\n",
+                "",
+                f"## Task",
+                "Continue solving the question using the retrieved documents.",
+                "",
+                "IMPORTANT RULES:",
+                "- DO NOT hallucinate or invent information",
+                "- ONLY use information explicitly stated in the retrieved documents above",
+                "- If the documents do not contain relevant information, state: 'The retrieved documents do not contain relevant information'",
+                "- Cite which document you are using (e.g., 'According to [1]...')",
+                "",
+                f"Respond with EXACTLY ONE step in this format:",
+                f'"Step {step_num}: [your reasoning based ONLY on the documents]"',
+                "",
+                'If this is your final step, include: "Final Answer: [your answer]"',
+                "",
+                "Do NOT write multiple steps. Write ONLY Step {step_num}.",
+                "",
                 f"Step {step_num}:"
             ]
 
@@ -646,23 +675,52 @@ class AdaptiveTrajectoryGenerator:
             # Fallback: use question as-is
             return state['question']
 
-        # Build prompt for query generation
-        prompt_lines = [f"Question: {state['question']}\n"]
+        # Build prompt for query generation (based on iterative RAG paper)
+        prompt_lines = []
 
         if state.get('reasoning_history'):
-            prompt_lines.append("Reasoning so far:")
+            # We have previous reasoning steps - generate follow-up question
+            prompt_lines.extend([
+                "You are searching for information to answer a question step by step.",
+                "",
+                f"## Main Question",
+                state['question'],
+                "",
+                f"## Previous Reasoning Steps",
+            ])
             for step in state['reasoning_history']:
                 prompt_lines.append(step)
-            prompt_lines.append(
-                "\nGenerate a short, focused search query (3-8 keywords) to find the information needed to continue."
-            )
-            prompt_lines.append("Search query:")
+            prompt_lines.extend([
+                "",
+                "## Task",
+                "Based on the reasoning so far, generate a simple follow-up search query to find the information needed to continue.",
+                "- Ask a SIMPLE question that a search engine can understand",
+                "- You may rephrase or decompose the main question if previous steps were not helpful",
+                "- Use 3-8 keywords maximum",
+                "- Do NOT write complex questions",
+                "",
+                "Respond with ONLY the search query. Do not explain yourself.",
+                "",
+                "Search query:"
+            ])
         else:
-            prompt_lines.append(
-                "\nGenerate a short, focused search query (3-8 keywords) to find the information needed to answer this question."
-            )
-            prompt_lines.append("Do NOT write explanations. Just write the search query.")
-            prompt_lines.append("\nSearch query:")
+            # First step - decompose the main question
+            prompt_lines.extend([
+                "You are searching for information to answer a question step by step.",
+                "",
+                f"## Main Question",
+                state['question'],
+                "",
+                "## Task",
+                "Generate a simple search query to find information that will help answer this question.",
+                "- Break down the question if it requires multiple pieces of information",
+                "- Ask a SIMPLE question that a search engine can understand",
+                "- Use 3-8 keywords maximum",
+                "",
+                "Respond with ONLY the search query. Do not explain yourself.",
+                "",
+                "Search query:"
+            ])
 
         prompt = "\n".join(prompt_lines)
 
