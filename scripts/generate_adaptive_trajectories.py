@@ -20,7 +20,7 @@ from typing import List, Dict, Any
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from prmrag.generation import AdaptiveTrajectoryGenerator
-from prmrag.retrieval import BM25Retriever, WikipediaRetriever, load_hotpotqa_corpus, create_retriever
+from prmrag.retrieval import BGERetriever, WikipediaRetriever, load_hotpotqa_corpus, create_retriever
 from prmrag.utils import setup_logger, load_config
 
 

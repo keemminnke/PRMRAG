@@ -19,8 +19,14 @@ policy_model:
 
 # Retrieval settings
 retrieval:
-  method: "wikipedia"  # bm25, wikipedia, hybrid
+  method: "bge-m3"  # bge-m3, bm25, wikipedia, hybrid
   top_k_passages: 5
+
+  # BGE-M3 specific (default)
+  bge_m3:
+    model_name: "BAAI/bge-m3"
+    batch_size: 64
+    max_length: 512
 
   # Wikipedia specific
   wikipedia:
@@ -28,7 +34,7 @@ retrieval:
     user_agent: "PRMRAG/1.0"
     extract_sentences: 5  # Number of sentences per page
 
-  # BM25 specific (if using BM25)
+  # BM25 specific (legacy)
   bm25:
     tokenizer: "simple"  # simple, bert, custom
 

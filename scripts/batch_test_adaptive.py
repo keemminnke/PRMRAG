@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from prmrag.models import load_policy_model
 from prmrag.utils import load_config
 from prmrag.generation.adaptive_generator import AdaptiveTrajectoryGenerator
-from prmrag.retrieval import BM25Retriever
+from prmrag.retrieval import BGERetriever
 
 
 def load_validation_data(data_dir: Path, limit: int = None):
@@ -163,9 +163,14 @@ def main():
     policy_model = load_policy_model(config['policy_model'])
     print("✓ Model loaded")
 
-    # Initialize BM25 retriever
-    print(f"\n[3] Initializing BM25 retriever...")
-    retriever = BM25Retriever(corpus=corpus)
+    # Initialize BGE-M3 retriever
+    print(f"\n[3] Initializing BGE-M3 retriever...")
+    embedding_cache = "data/embeddings/hotpotqa_validation_bge_m3.npy"
+    retriever = BGERetriever(
+        corpus=corpus,
+        batch_size=64,
+        embedding_cache_path=embedding_cache
+    )
     print(f"✓ Retriever initialized")
 
     # Initialize adaptive generator

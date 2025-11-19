@@ -161,9 +161,13 @@ class HybridRetriever:
 # Import Wikipedia retriever
 from .wikipedia_retriever import WikipediaRetriever, create_retriever
 
+# Import BGE retriever
+from .bge_retriever import BGERetriever
+
 __all__ = [
     'BaseRetriever',
     'BM25Retriever',
+    'BGERetriever',
     'WikipediaRetriever',
     'load_hotpotqa_corpus',
     'HybridRetriever',
