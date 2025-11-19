@@ -550,6 +550,9 @@ class AdaptiveTrajectoryGenerator:
             stop_sequences=["\nStep"],  # Only stop at next step marker
         )
 
+        # DEBUG: Show raw response
+        print(f"    [RAG STEP DEBUG] Raw model response (first 200 chars): {response[:200]}")
+
         # Parse response to extract step content
         import re
         # Remove any future steps
@@ -558,7 +561,10 @@ class AdaptiveTrajectoryGenerator:
             response = response[:next_step_match.start()].strip()
 
         # Parse to get content without "Step N:" prefix
-        return self.step_parser.parse_single_step_response(response, step_num)
+        parsed_content = self.step_parser.parse_single_step_response(response, step_num)
+        print(f"    [RAG STEP DEBUG] Parsed content (first 200 chars): {parsed_content[:200]}")
+
+        return parsed_content
 
     def _try_rag_intervention(
         self,
