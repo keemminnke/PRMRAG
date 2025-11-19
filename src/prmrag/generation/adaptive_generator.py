@@ -451,6 +451,7 @@ class AdaptiveTrajectoryGenerator:
         state: Dict[str, Any],
         passages: List[Dict[str, Any]],
         step_num: int,
+        query: str,
     ) -> str:
         """Generate a reasoning step based on retrieved passages.
 
@@ -458,6 +459,7 @@ class AdaptiveTrajectoryGenerator:
             state: Current state with question and reasoning history
             passages: Retrieved passages to use for reasoning
             step_num: Step number to generate
+            query: The search query that was used to retrieve passages
 
         Returns:
             Step content (without "Step N:" prefix)
@@ -465,7 +467,7 @@ class AdaptiveTrajectoryGenerator:
         if self.policy_model is None:
             # Placeholder for testing without model
             passage_text = self._format_passages(passages)
-            return f"Based on retrieved information: {passage_text}"
+            return f"<start_search>{query}<end_search> Based on retrieved information: {passage_text}"
 
         # Format passages for the prompt
         passage_text = self._format_passages(passages)
@@ -483,16 +485,19 @@ class AdaptiveTrajectoryGenerator:
                 passage_text,
                 "",
                 f"## Task",
+                f"You searched for: {query}",
                 "Generate a reasoning step to answer the question using the retrieved documents.",
                 "",
                 "IMPORTANT RULES:",
+                "- Start with a search marker showing what you searched: <start_search>{query}<end_search>",
                 "- DO NOT hallucinate or invent information",
                 "- ONLY use information explicitly stated in the retrieved documents above",
                 "- If the documents do not contain relevant information, state: 'The retrieved documents do not contain relevant information'",
                 "- Cite which document you are using (e.g., 'According to [1]...')",
                 "",
                 f"Respond with EXACTLY ONE step in this format:",
-                f'"Step {step_num}: [your reasoning based ONLY on the documents]"',
+                f'"Step {step_num}: <start_search>{query}<end_search>"',
+                f'"[your reasoning based ONLY on the documents]"',
                 "",
                 'If this is your final step, include: "Final Answer: [your answer]"',
                 "",
@@ -512,16 +517,19 @@ class AdaptiveTrajectoryGenerator:
                 passage_text,
                 "",
                 f"## Task",
+                f"You searched for: {query}",
                 "Continue solving the question using the retrieved documents.",
                 "",
                 "IMPORTANT RULES:",
+                "- Start with a search marker showing what you searched: <start_search>{query}<end_search>",
                 "- DO NOT hallucinate or invent information",
                 "- ONLY use information explicitly stated in the retrieved documents above",
                 "- If the documents do not contain relevant information, state: 'The retrieved documents do not contain relevant information'",
                 "- Cite which document you are using (e.g., 'According to [1]...')",
                 "",
                 f"Respond with EXACTLY ONE step in this format:",
-                f'"Step {step_num}: [your reasoning based ONLY on the documents]"',
+                f'"Step {step_num}: <start_search>{query}<end_search>"',
+                f'"[your reasoning based ONLY on the documents]"',
                 "",
                 'If this is your final step, include: "Final Answer: [your answer]"',
                 "",
@@ -579,7 +587,8 @@ class AdaptiveTrajectoryGenerator:
         rag_step_content = self._generate_rag_step_with_passages(
             current_state,
             passages,
-            step_num
+            step_num,
+            query
         )
         rag_step_text = f"Step {step_num}: {rag_step_content}"
 
