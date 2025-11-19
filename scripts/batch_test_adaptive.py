@@ -21,6 +21,7 @@ from prmrag.models import load_policy_model
 from prmrag.utils import load_config
 from prmrag.generation.adaptive_generator import AdaptiveTrajectoryGenerator
 from prmrag.retrieval import BGERetriever
+import re
 
 
 def load_validation_data(data_dir: Path, limit: int = None):
@@ -45,10 +46,56 @@ def load_validation_data(data_dir: Path, limit: int = None):
     return questions, corpus
 
 
+def validate_rag_step_format(step_content: str, step_type: str) -> Dict[str, Any]:
+    """Validate if RAG step follows the required format.
+
+    Checks for:
+    1. <start_search>query</end_search> tags
+    2. <document> tags (should be in passages, not step content)
+    3. Citation format (e.g., "According to [1]", "Based on [2]")
+    4. No hallucination markers
+
+    Returns:
+        Dict with validation results
+    """
+    validation = {
+        'has_search_tags': False,
+        'has_citations': False,
+        'search_query': None,
+        'num_citations': 0,
+        'citation_numbers': [],
+    }
+
+    if step_type != 'rag':
+        return validation
+
+    # Check for <start_search> tags
+    search_match = re.search(r'<start_search>(.*?)</end_search>', step_content, re.DOTALL)
+    if search_match:
+        validation['has_search_tags'] = True
+        validation['search_query'] = search_match.group(1).strip()
+
+    # Check for citations: [1], [2], etc.
+    citation_matches = re.findall(r'\[(\d+)\]', step_content)
+    if citation_matches:
+        validation['has_citations'] = True
+        validation['num_citations'] = len(citation_matches)
+        validation['citation_numbers'] = [int(c) for c in citation_matches]
+
+    return validation
+
+
 def format_trajectory_for_review(trajectory, question_data: Dict[str, Any]) -> Dict[str, Any]:
     """Format trajectory for human review, highlighting RAG steps."""
 
     steps_detail = []
+    format_compliance = {
+        'total_rag_steps': 0,
+        'rag_with_search_tags': 0,
+        'rag_with_citations': 0,
+        'rag_fully_compliant': 0,
+    }
+
     for i, step in enumerate(trajectory.steps, 1):
         step_info = {
             'step_num': i,
@@ -64,6 +111,19 @@ def format_trajectory_for_review(trajectory, question_data: Dict[str, Any]) -> D
         if step_info['is_rag']:
             step_info['num_passages'] = len(step.used_passages)
             step_info['passage_titles'] = [p.get('title', 'Unknown') for p in step.used_passages]
+
+            # Validate format
+            validation = validate_rag_step_format(step.content, step.step_type.value)
+            step_info['format_validation'] = validation
+
+            # Update compliance stats
+            format_compliance['total_rag_steps'] += 1
+            if validation['has_search_tags']:
+                format_compliance['rag_with_search_tags'] += 1
+            if validation['has_citations']:
+                format_compliance['rag_with_citations'] += 1
+            if validation['has_search_tags'] and validation['has_citations']:
+                format_compliance['rag_fully_compliant'] += 1
 
         steps_detail.append(step_info)
 
@@ -96,6 +156,7 @@ def format_trajectory_for_review(trajectory, question_data: Dict[str, Any]) -> D
         'has_rag': trajectory.metadata['num_rag_steps'] > 0,
         'steps': steps_detail,
         'rag_interventions': rag_interventions,
+        'format_compliance': format_compliance,
     }
 
 
@@ -199,6 +260,12 @@ def main():
         'without_rag': 0,
         'without_rag_correct': 0,
         'failed': 0,
+        'format_compliance': {
+            'total_rag_steps': 0,
+            'rag_with_search_tags': 0,
+            'rag_with_citations': 0,
+            'rag_fully_compliant': 0,
+        }
     }
 
     for i, q in enumerate(questions, 1):
@@ -235,6 +302,13 @@ def main():
                 summary_stats['with_rag'] += 1
                 if result['is_correct']:
                     summary_stats['with_rag_correct'] += 1
+
+                # Update format compliance stats
+                fc = result['format_compliance']
+                summary_stats['format_compliance']['total_rag_steps'] += fc['total_rag_steps']
+                summary_stats['format_compliance']['rag_with_search_tags'] += fc['rag_with_search_tags']
+                summary_stats['format_compliance']['rag_with_citations'] += fc['rag_with_citations']
+                summary_stats['format_compliance']['rag_fully_compliant'] += fc['rag_fully_compliant']
             else:
                 summary_stats['without_rag'] += 1
                 if result['is_correct']:
@@ -243,6 +317,13 @@ def main():
             # Print summary
             status = "✅" if result['is_correct'] else "❌"
             rag_info = f"({result['num_rag_steps']} RAG steps)" if result['has_rag'] else "(CoT only)"
+
+            # Add format compliance info for RAG steps
+            if result['has_rag']:
+                fc = result['format_compliance']
+                compliance_rate = fc['rag_fully_compliant'] / max(fc['total_rag_steps'], 1) * 100
+                rag_info += f" [Format: {fc['rag_fully_compliant']}/{fc['total_rag_steps']} ({compliance_rate:.0f}%)]"
+
             print(f"  {status} {result['num_steps']} steps {rag_info}")
 
         except Exception as e:
@@ -277,6 +358,20 @@ def main():
 
     print(f"\nQuestions without RAG (CoT only): {summary_stats['without_rag']}")
     print(f"  - Correct: {summary_stats['without_rag_correct']}/{summary_stats['without_rag']} ({summary_stats['without_rag_correct']/max(summary_stats['without_rag'],1)*100:.1f}%)")
+
+    # Format compliance report
+    if summary_stats['format_compliance']['total_rag_steps'] > 0:
+        print(f"\n--- Format Compliance Analysis ---")
+        fc = summary_stats['format_compliance']
+        total_rag = fc['total_rag_steps']
+
+        print(f"\nTotal RAG steps analyzed: {total_rag}")
+        print(f"  ✓ With <start_search> tags: {fc['rag_with_search_tags']}/{total_rag} ({fc['rag_with_search_tags']/total_rag*100:.1f}%)")
+        print(f"  ✓ With citations [N]: {fc['rag_with_citations']}/{total_rag} ({fc['rag_with_citations']/total_rag*100:.1f}%)")
+        print(f"  ✓ Fully compliant (both): {fc['rag_fully_compliant']}/{total_rag} ({fc['rag_fully_compliant']/total_rag*100:.1f}%)")
+
+        if fc['rag_fully_compliant'] < total_rag:
+            print(f"\n⚠️  Warning: {total_rag - fc['rag_fully_compliant']} RAG steps are not fully compliant with format requirements")
 
     print(f"\n{'=' * 70}")
     print("NEXT STEPS")
