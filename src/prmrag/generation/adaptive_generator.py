@@ -305,7 +305,8 @@ class AdaptiveTrajectoryGenerator:
         }
 
         steps = []
-        mc_prev = self._monte_carlo_estimate(current_state, gold_answer)
+        # Don't compute MC for empty state (Step 0) - start with Step 1 as baseline
+        mc_prev = None
 
         for t in range(self.max_steps):
             step_num = t + 1
@@ -322,7 +323,35 @@ class AdaptiveTrajectoryGenerator:
             cot_state = self._apply_cot_step(current_state, cot_step_text, step_num)
             mc_cot = self._monte_carlo_estimate(cot_state, gold_answer)
 
-            # Compute RPE for CoT
+            # Step 1: Always accept as baseline (no RPE calculation)
+            if step_num == 1:
+                print(f"  Step 1: Always accepted as baseline (MC={mc_cot:.3f})")
+                step = AdaptiveStep(
+                    step_id=t,
+                    step_type=StepType.COT,
+                    text=cot_step_text,
+                    content=cot_step_content,
+                    used_passages=[],
+                    mc_before=0.0,  # No previous MC for step 1
+                    mc_after=mc_cot,
+                    rpe=1.0,  # Dummy value, not used
+                    label='good',
+                    metadata={'accepted': 'cot_baseline', 'step1': True},
+                )
+                steps.append(step)
+                current_state = cot_state
+                mc_prev = mc_cot
+
+                # Check if we have an answer
+                has_answer = self._has_answer(cot_step_content)
+                print(f"  Step {step_num}: Has 'Final Answer:' marker? {has_answer}")
+                if has_answer:
+                    final_answer = self._extract_answer(cot_step_content)
+                    print(f"  Step {step_num}: ✓ Found final answer, terminating trajectory.")
+                    break
+                continue
+
+            # Step 2+: Compute RPE and check threshold
             rpe_cot = mc_cot / (mc_prev + 1e-8)
 
             # (B) Check if CoT is acceptable (threshold: 0.8, using > 0.79 to avoid floating point issues)
