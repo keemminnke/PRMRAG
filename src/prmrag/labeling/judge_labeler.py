@@ -40,7 +40,7 @@ class JudgeLabeler(BaseLabeler):
         """
         super().__init__(config)
 
-        self.model_name = config.get("model_name", "gpt-4")
+        self.model_name = config.get("model_name", "Qwen/Qwen3-32B")
         self.temperature = config.get("temperature", 0.3)
         self.max_tokens = config.get("max_tokens", 512)
         self.max_retries = config.get("max_retries", 3)

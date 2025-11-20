@@ -73,22 +73,30 @@ def extract_answer_from_text(text: str) -> str:
     - "(answer)" or "answer."
     - First sentence
 
+    Handles numbers with commas (e.g., "3,677 seated") and units.
+
     Args:
         text: Model output text
 
     Returns:
-        Extracted answer (concise, stopping at punctuation or connectors)
+        Extracted answer (concise, stopping at sentence boundaries or connectors)
     """
     text = text.strip()
 
     # Pattern 1: "Answer: ..." or "The answer is ..."
-    # Extract up to first period, comma, or connector word
-    # This gives concise answers like "yes" instead of "yes, because..."
+    # Now allows commas in numbers and captures complete answers with units
+    # Stops at: period/semicolon OR connector words (because, since, etc.)
+    # BUT allows commas in numbers like "3,677"
     answer_patterns = [
-        r'(?:final\s+)?answer\s*(?:is)?\s*:?\s*([^.,;]+?)(?:[.,;]|\s+(?:because|since|as|which|that|and|or|but)\s+|$)',
-        r'therefore,?\s+(?:the\s+answer\s+is\s*:?\s*)?([^.,;]+?)(?:[.,;]|\s+(?:because|since|as|which|that|and|or|but)\s+|$)',
-        r'(?:in\s+)?conclusion,?\s+([^.,;]+?)(?:[.,;]|\s+(?:because|since|as|which|that|and|or|but)\s+|$)',
-        r'the\s+answer\s+is\s+\(?([^.,;)]+?)\)?(?:[.,;]|\s+(?:because|since|as|which|that|and|or|but)\s+|$)',
+        # "Final Answer: 3,677 seated" → "3,677 seated"
+        # Stops at period or connector words, but allows commas
+        r'(?:final\s+)?answer\s*(?:is)?\s*:?\s*([^.;]+?)(?:[.;]|\s+(?:because|since|as|which|that)\s+|$)',
+        # "Therefore, the answer is 3,677 seated" → "3,677 seated"
+        r'therefore,?\s+(?:the\s+answer\s+is\s*:?\s*)?([^.;]+?)(?:[.;]|\s+(?:because|since|as|which|that)\s+|$)',
+        # "In conclusion, 3,677 seated" → "3,677 seated"
+        r'(?:in\s+)?conclusion,?\s+([^.;]+?)(?:[.;]|\s+(?:because|since|as|which|that)\s+|$)',
+        # "The answer is 3,677 seated" → "3,677 seated"
+        r'the\s+answer\s+is\s+\(?([^.;)]+?)\)?(?:[.;]|\s+(?:because|since|as|which|that)\s+|$)',
     ]
 
     for pattern in answer_patterns:
@@ -97,6 +105,18 @@ def extract_answer_from_text(text: str) -> str:
             answer = match.group(1).strip()
             # Remove parentheses and extra whitespace
             answer = re.sub(r'[()]', '', answer).strip()
+
+            # Post-process: trim at "and", "or", "but" if they appear
+            # (but not if they're part of the answer itself)
+            for connector in [' and ', ' or ', ' but ']:
+                if connector in answer.lower():
+                    parts = answer.lower().split(connector, 1)
+                    # Only split if the first part looks like a complete answer
+                    # (has at least 1 word)
+                    if len(parts[0].strip().split()) >= 1:
+                        answer = parts[0].strip()
+                        break
+
             return answer
 
     # Pattern 2: Check for content in parentheses at the end
@@ -108,10 +128,13 @@ def extract_answer_from_text(text: str) -> str:
     sentences = re.split(r'[.!?]\s+', text)
     if sentences:
         first_sent = sentences[0].strip()
-        # If first sentence is too long, take first clause
+        # If first sentence is too long, take up to first connector
         if len(first_sent.split()) > 10:
-            clauses = re.split(r'[,;]', first_sent)
-            return clauses[0].strip()
+            # Split at connectors but keep numerical commas
+            for connector in [' because ', ' since ', ' as ', ' which ', ' that ']:
+                if connector in first_sent.lower():
+                    first_sent = first_sent.lower().split(connector, 1)[0].strip()
+                    break
         return first_sent
 
     return text
@@ -850,9 +873,14 @@ class AdaptiveTrajectoryGenerator:
             # Placeholder: random estimate
             return np.random.uniform(0.3, 0.9)
 
+        # Debug: show if passages are available
+        num_passages = len(state.get('passages', []))
+        if num_passages > 0:
+            print(f"    [MC DEBUG] Rollouts will use {num_passages} retrieved passages")
+
         successes = 0
         rollout_answers = []
-        for i in range(self.num_rollouts):
+        for _ in range(self.num_rollouts):
             final_answer = self._rollout(state)
             rollout_answers.append(final_answer[:50])  # Store first 50 chars for debugging
             if gold_answer and self._check_answer(final_answer, gold_answer):
@@ -864,6 +892,8 @@ class AdaptiveTrajectoryGenerator:
         if mc_value == 0.0:
             print(f"    [MC DEBUG] MC=0.0! Gold: {gold_answer[:50] if gold_answer else 'None'}")
             print(f"    [MC DEBUG] Sample rollouts: {rollout_answers[:2]}")
+        elif num_passages > 0:
+            print(f"    [MC DEBUG] MC={mc_value:.3f} with {num_passages} passages (successes: {successes}/{self.num_rollouts})")
 
         return mc_value
 
@@ -886,12 +916,32 @@ class AdaptiveTrajectoryGenerator:
         # Build rollout prompt with more structured instructions
         lines = [f"Question: {state['question']}\n"]
 
+        # CRITICAL FIX: Include retrieved passages if available
+        if state.get('passages'):
+            lines.append("Retrieved Information:")
+            # Deduplicate passages by (title, text) tuple
+            seen_passages = set()
+            unique_passages = []
+            for passage in state['passages']:
+                passage_key = (passage.get('title', ''), passage.get('text', ''))
+                if passage_key not in seen_passages:
+                    seen_passages.add(passage_key)
+                    unique_passages.append(passage)
+
+            for i, passage in enumerate(unique_passages, 1):
+                title = passage.get('title', 'Document')
+                content = passage.get('text', '')
+                lines.append(f"[{i}] {title}: {content}")
+            lines.append("")
+
         # Add existing reasoning history if any
         if state.get('reasoning_history'):
             lines.append("Reasoning so far:")
             for step_text in state['reasoning_history']:
                 lines.append(step_text)
             lines.append("\nContinue solving this step by step.")
+            if state.get('passages'):
+                lines.append("Use the retrieved information above to support your answer.")
             lines.append("Think carefully and show your reasoning.")
             lines.append("At the end, provide your final answer in this format:")
             lines.append('"Therefore, the answer is [your answer]."')
@@ -899,6 +949,8 @@ class AdaptiveTrajectoryGenerator:
             lines.append("Let's solve this step by step:")
             lines.append("1. Break down what the question is asking")
             lines.append("2. Think through the problem carefully")
+            if state.get('passages'):
+                lines.append("3. Use the retrieved information above")
             lines.append("3. Draw your conclusion")
             lines.append("\nAt the end, provide your final answer in this format:")
             lines.append('"Therefore, the answer is [your answer]."')

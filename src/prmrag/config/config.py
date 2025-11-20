@@ -34,7 +34,7 @@ class RPEConfig:
 @dataclass
 class JudgeConfig:
     """Judge labeler configuration."""
-    model_name: str = "openai/gpt-oss-20b"
+    model_name: str = "Qwen/Qwen3-32B"
     model_path: Optional[str] = None
     device: str = "cuda"
     temperature: float = 0.3
