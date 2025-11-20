@@ -24,23 +24,18 @@ from prmrag.retrieval import BGERetriever
 import re
 
 
-def load_validation_data(data_dir: Path, limit: int = None, use_fullwiki: bool = False):
-    """Load validation questions and corpus.
+def load_validation_data(data_dir: Path, limit: int = None):
+    """Load validation questions and Full Wiki corpus.
 
     Args:
         data_dir: Data directory
         limit: Limit number of questions
-        use_fullwiki: If True, use full wiki corpus (5.23M), otherwise validation subset
 
     Returns:
         Tuple of (questions, corpus)
     """
     questions_file = data_dir / "raw" / "hotpotqa_validation.jsonl"
-
-    if use_fullwiki:
-        corpus_file = data_dir / "raw" / "hotpotqa_fullwiki_corpus.jsonl"
-    else:
-        corpus_file = data_dir / "raw" / "hotpotqa_validation_corpus.jsonl"
+    corpus_file = data_dir / "raw" / "hotpotqa_fullwiki_corpus.jsonl"
 
     # Load questions
     questions = []
@@ -201,11 +196,6 @@ def main():
         default="outputs/batch_test",
         help="Output directory for results (default: outputs/batch_test)",
     )
-    parser.add_argument(
-        "--use-fullwiki",
-        action="store_true",
-        help="Use Full Wiki corpus (5.23M docs) instead of validation subset (66K docs)",
-    )
     args = parser.parse_args()
 
     # Create output directory
@@ -215,13 +205,13 @@ def main():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     print("=" * 70)
-    print("BATCH TEST: Adaptive MC-CoT + RAG Pipeline")
+    print("BATCH TEST: Adaptive MC-CoT + RAG Pipeline (Full Wiki)")
     print("=" * 70)
     print(f"\nConfiguration:")
     print(f"  - Number of questions: {args.num_questions}")
     print(f"  - Starting index: {args.start_idx}")
     print(f"  - MC rollouts: {args.num_rollouts}")
-    print(f"  - Corpus: {'Full Wiki (5.23M)' if args.use_fullwiki else 'Validation subset (66K)'}")
+    print(f"  - Corpus: Full Wiki (5.23M)")
     print(f"  - Output directory: {output_dir}")
 
     # Load config
@@ -229,12 +219,11 @@ def main():
     config = load_config(config_path)
 
     # Load validation data
-    print(f"\n[1] Loading validation data...")
+    print(f"\n[1] Loading Full Wiki corpus...")
     data_dir = Path(__file__).parent.parent / "data"
     questions, corpus = load_validation_data(
         data_dir,
-        limit=args.start_idx + args.num_questions,
-        use_fullwiki=args.use_fullwiki
+        limit=args.start_idx + args.num_questions
     )
     questions = questions[args.start_idx:args.start_idx + args.num_questions]
     print(f"✓ Loaded {len(questions)} questions and {len(corpus):,} corpus documents")
@@ -246,10 +235,7 @@ def main():
 
     # Initialize BGE-M3 retriever
     print(f"\n[3] Initializing BGE-M3 retriever...")
-    if args.use_fullwiki:
-        embedding_cache = "data/embeddings/hotpotqa_fullwiki_bge_m3.npy"
-    else:
-        embedding_cache = "data/embeddings/hotpotqa_validation_bge_m3.npy"
+    embedding_cache = "data/embeddings/hotpotqa_fullwiki_bge_m3.npy"
 
     retriever = BGERetriever(
         corpus=corpus,
