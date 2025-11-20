@@ -31,57 +31,98 @@ except ImportError:
     sys.exit(1)
 
 
-def extract_corpus_from_hotpotqa(output_file: Path):
+def save_questions(dataset, output_file: Path):
+    """Save HotpotQA questions to JSONL format.
+
+    Args:
+        dataset: HuggingFace dataset
+        output_file: Output JSONL file path
+    """
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(output_file, 'w', encoding='utf-8') as f:
+        for example in tqdm(dataset, desc=f"Saving {output_file.name}"):
+            question_data = {
+                '_id': example['id'],
+                'question': example['question'],
+                'answer': example['answer'],
+                'type': example['type'],
+                'level': example['level'],
+                'supporting_facts': example['supporting_facts']
+            }
+            f.write(json.dumps(question_data, ensure_ascii=False) + '\n')
+
+    print(f"✓ Saved {len(dataset)} questions to {output_file}")
+
+
+def extract_corpus_from_hotpotqa(corpus_file: Path, questions_dir: Path):
     """Extract unique Wikipedia paragraphs from HotpotQA fullwiki dataset.
 
     Downloads HotpotQA from Hugging Face and extracts all unique paragraphs
-    from the context field to build a corpus.
+    from the context field to build a corpus. Also saves questions for each split.
 
     Returns:
         Number of unique documents extracted
     """
-    print("Downloading HotpotQA dataset from Hugging Face...")
-    print("This may take a few minutes...")
+    print("Downloading HotpotQA fullwiki dataset from Hugging Face...")
+    print("This may take several minutes...")
 
-    # Load the validation fullwiki split
-    dataset = load_dataset("hotpot_qa", "fullwiki", split="validation")
-    print(f"✓ Loaded {len(dataset)} examples")
+    # Load all splits
+    print("\n[1] Loading train split...")
+    train_dataset = load_dataset("hotpot_qa", "fullwiki", split="train")
+    print(f"✓ Loaded {len(train_dataset)} train examples")
 
-    # Extract unique paragraphs
-    print("\nExtracting unique paragraphs from context...")
+    print("\n[2] Loading validation split...")
+    val_dataset = load_dataset("hotpot_qa", "fullwiki", split="validation")
+    print(f"✓ Loaded {len(val_dataset)} validation examples")
+
+    print("\n[3] Loading test split...")
+    test_dataset = load_dataset("hotpot_qa", "fullwiki", split="test")
+    print(f"✓ Loaded {len(test_dataset)} test examples")
+
+    # Save questions for each split
+    print("\n[4] Saving questions to JSONL...")
+    save_questions(train_dataset, questions_dir / "hotpotqa_train.jsonl")
+    save_questions(val_dataset, questions_dir / "hotpotqa_validation.jsonl")
+    save_questions(test_dataset, questions_dir / "hotpotqa_test.jsonl")
+
+    # Extract unique paragraphs from all splits
+    print("\n[5] Extracting unique paragraphs from all splits...")
     unique_paragraphs = OrderedDict()  # title -> set of paragraphs
     doc_id = 0
 
-    output_file.parent.mkdir(parents=True, exist_ok=True)
+    corpus_file.parent.mkdir(parents=True, exist_ok=True)
 
-    with open(output_file, 'w', encoding='utf-8') as f:
-        for example in tqdm(dataset, desc="Processing"):
-            # Each example has 'context' field with {'title': [...], 'sentences': [[...]]}
-            titles = example['context']['title']
-            sentences_list = example['context']['sentences']
+    with open(corpus_file, 'w', encoding='utf-8') as f:
+        # Process all datasets
+        for split_name, dataset in [("train", train_dataset), ("validation", val_dataset), ("test", test_dataset)]:
+            for example in tqdm(dataset, desc=f"Processing {split_name}"):
+                # Each example has 'context' field with {'title': [...], 'sentences': [[...]]}
+                titles = example['context']['title']
+                sentences_list = example['context']['sentences']
 
-            for title, sentences in zip(titles, sentences_list):
-                # Join sentences to form paragraph
-                paragraph = ' '.join(sentences).strip()
+                for title, sentences in zip(titles, sentences_list):
+                    # Join sentences to form paragraph
+                    paragraph = ' '.join(sentences).strip()
 
-                if not paragraph:
-                    continue
+                    if not paragraph:
+                        continue
 
-                # Create unique key
-                key = f"{title}:::{paragraph[:100]}"  # Use first 100 chars as fingerprint
+                    # Create unique key
+                    key = f"{title}:::{paragraph[:100]}"  # Use first 100 chars as fingerprint
 
-                if key not in unique_paragraphs:
-                    unique_paragraphs[key] = True
+                    if key not in unique_paragraphs:
+                        unique_paragraphs[key] = True
 
-                    doc = {
-                        'id': f'wiki_{doc_id}',
-                        'title': title,
-                        'text': paragraph
-                    }
-                    f.write(json.dumps(doc, ensure_ascii=False) + '\n')
-                    doc_id += 1
+                        doc = {
+                            'id': f'wiki_{doc_id}',
+                            'title': title,
+                            'text': paragraph
+                        }
+                        f.write(json.dumps(doc, ensure_ascii=False) + '\n')
+                        doc_id += 1
 
-    print(f"✓ Extracted {doc_id:,} unique documents to {output_file}")
+    print(f"✓ Extracted {doc_id:,} unique documents to {corpus_file}")
     return doc_id
 
 
@@ -127,9 +168,11 @@ def main():
     data_dir = Path("data")
     raw_dir = data_dir / "raw"
     embeddings_dir = data_dir / "embeddings"
+    questions_dir = raw_dir / "questions"
 
     raw_dir.mkdir(parents=True, exist_ok=True)
     embeddings_dir.mkdir(parents=True, exist_ok=True)
+    questions_dir.mkdir(parents=True, exist_ok=True)
 
     # Files
     corpus_jsonl = raw_dir / "hotpotqa_fullwiki_corpus.jsonl"
@@ -139,11 +182,13 @@ def main():
     print("HOTPOTQA FULL WIKI CORPUS SETUP (via Hugging Face)")
     print("="*70)
     print(f"\nThis script will:")
-    print(f"1. Download HotpotQA fullwiki dataset from Hugging Face")
-    print(f"2. Extract unique Wikipedia paragraphs (~100K-200K docs)")
-    print(f"3. Convert to JSONL format")
-    print(f"4. Generate BGE-M3 embeddings (takes 1-2 hours on GPU)")
+    print(f"1. Download HotpotQA fullwiki dataset (train/val/test) from Hugging Face")
+    print(f"2. Save questions for each split to JSONL")
+    print(f"3. Extract unique Wikipedia paragraphs (~100K-200K docs)")
+    print(f"4. Convert to JSONL format")
+    print(f"5. Generate BGE-M3 embeddings (takes 1-2 hours on GPU)")
     print(f"\nData will be saved to:")
+    print(f"  - Questions: {questions_dir}/")
     print(f"  - Corpus: {corpus_jsonl}")
     print(f"  - Embeddings: {embeddings_file}")
     print("="*70)
@@ -162,8 +207,8 @@ def main():
 
     # Step 1 & 2: Download and extract corpus
     if not corpus_jsonl.exists():
-        print(f"\n[1/2] Downloading and extracting corpus from HotpotQA...")
-        num_docs = extract_corpus_from_hotpotqa(corpus_jsonl)
+        print(f"\n[1/2] Downloading and extracting from HotpotQA (all splits)...")
+        num_docs = extract_corpus_from_hotpotqa(corpus_jsonl, questions_dir)
     else:
         print(f"\n[1/2] Using existing corpus: {corpus_jsonl}")
         with open(corpus_jsonl, 'r') as f:
@@ -181,6 +226,10 @@ def main():
     print(f"\n{'='*70}")
     print("✅ SETUP COMPLETE!")
     print(f"{'='*70}")
+    print(f"\nQuestions saved to: {questions_dir}/")
+    print(f"  - hotpotqa_train.jsonl")
+    print(f"  - hotpotqa_validation.jsonl")
+    print(f"  - hotpotqa_test.jsonl")
     print(f"\nCorpus: {corpus_jsonl}")
     print(f"  - Documents: {num_docs:,}")
     print(f"  - Size: {corpus_jsonl.stat().st_size / 1e6:.2f} MB")
