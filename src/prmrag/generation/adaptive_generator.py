@@ -579,7 +579,7 @@ class AdaptiveTrajectoryGenerator:
                 "Do NOT write multiple steps. Write ONLY Step {step_num}.",
                 "",
                 f"Step {step_num}:"
-            ]
+            ])
 
         prompt = "\n".join(prompt_lines)
 
@@ -1134,3 +1134,4 @@ class AdaptiveTrajectoryGenerator:
                     all_trajectories.append(trajectory)
 
         return all_trajectories
+    
