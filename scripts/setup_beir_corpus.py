@@ -94,8 +94,9 @@ def setup_beir_corpus():
 
     for i in tqdm(range(0, len(corpus), batch_size), desc="Encoding batches"):
         batch = corpus[i:i+batch_size]
-        # Combine title and text for better retrieval
-        texts = [f"{doc['title']} {doc['text']}" for doc in batch]
+        # HuggingFace Dataset slicing returns dict of lists
+        # batch = {'_id': [...], 'title': [...], 'text': [...]}
+        texts = [f"{title} {text}" for title, text in zip(batch['title'], batch['text'])]
         batch_embs = model.encode(
             texts,
             batch_size=batch_size,
