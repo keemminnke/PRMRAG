@@ -329,7 +329,8 @@ class AdaptiveTrajectoryGenerator:
             'question': question,
             'reasoning_history': [],
             'forced_steps': [],  # Track ForcedStep objects
-            'passages': [],
+            'passages': [],  # Accumulated passages from all RAG steps
+            'current_passages': [],  # Passages from current step only (for rollout)
         }
 
         steps = []
@@ -821,6 +822,9 @@ class AdaptiveTrajectoryGenerator:
         new_state = state.copy()
         new_state['reasoning_history'] = state['reasoning_history'] + [step_text]
 
+        # Clear current_passages for CoT steps (no retrieval)
+        new_state['current_passages'] = []
+
         # Update forced steps if using step forcing
         if self.use_step_forcing:
             # Extract content from "Step N: content"
@@ -852,6 +856,8 @@ class AdaptiveTrajectoryGenerator:
         """
         new_state = state.copy()
         new_state['passages'] = state['passages'] + passages
+        # Store current step's passages separately for rollout
+        new_state['current_passages'] = passages
 
         # Use LLM-generated content
         rag_step_text = f"Step {step_num}: {rag_step_content}"
@@ -874,9 +880,9 @@ class AdaptiveTrajectoryGenerator:
             return np.random.uniform(0.3, 0.9)
 
         # Debug: show if passages are available
-        num_passages = len(state.get('passages', []))
-        if num_passages > 0:
-            print(f"    [MC DEBUG] Rollouts will use {num_passages} retrieved passages")
+        num_current_passages = len(state.get('current_passages', []))
+        if num_current_passages > 0:
+            print(f"    [MC DEBUG] Rollouts will use {num_current_passages} current step passages (not accumulated)")
 
         successes = 0
         rollout_answers = []
@@ -892,8 +898,8 @@ class AdaptiveTrajectoryGenerator:
         if mc_value == 0.0:
             print(f"    [MC DEBUG] MC=0.0! Gold: {gold_answer[:50] if gold_answer else 'None'}")
             print(f"    [MC DEBUG] Sample rollouts: {rollout_answers[:2]}")
-        elif num_passages > 0:
-            print(f"    [MC DEBUG] MC={mc_value:.3f} with {num_passages} passages (successes: {successes}/{self.num_rollouts})")
+        elif num_current_passages > 0:
+            print(f"    [MC DEBUG] MC={mc_value:.3f} with {num_current_passages} current passages (successes: {successes}/{self.num_rollouts})")
 
         return mc_value
 
@@ -916,19 +922,12 @@ class AdaptiveTrajectoryGenerator:
         # Build rollout prompt with more structured instructions
         lines = [f"Question: {state['question']}\n"]
 
-        # CRITICAL FIX: Include retrieved passages if available
-        if state.get('passages'):
+        # CRITICAL FIX: Include only current step's retrieved passages (not all accumulated)
+        # This matches the behavior of actual step generation
+        if state.get('current_passages'):
             lines.append("Retrieved Information:")
-            # Deduplicate passages by (title, text) tuple
-            seen_passages = set()
-            unique_passages = []
-            for passage in state['passages']:
-                passage_key = (passage.get('title', ''), passage.get('text', ''))
-                if passage_key not in seen_passages:
-                    seen_passages.add(passage_key)
-                    unique_passages.append(passage)
-
-            for i, passage in enumerate(unique_passages, 1):
+            # Use current_passages (from current RAG step) instead of all accumulated passages
+            for i, passage in enumerate(state['current_passages'], 1):
                 title = passage.get('title', 'Document')
                 content = passage.get('text', '')
                 lines.append(f"[{i}] {title}: {content}")
@@ -940,7 +939,7 @@ class AdaptiveTrajectoryGenerator:
             for step_text in state['reasoning_history']:
                 lines.append(step_text)
             lines.append("\nContinue solving this step by step.")
-            if state.get('passages'):
+            if state.get('current_passages'):
                 lines.append("Use the retrieved information above to support your answer.")
             lines.append("Think carefully and show your reasoning.")
             lines.append("At the end, provide your final answer in this format:")
@@ -949,7 +948,7 @@ class AdaptiveTrajectoryGenerator:
             lines.append("Let's solve this step by step:")
             lines.append("1. Break down what the question is asking")
             lines.append("2. Think through the problem carefully")
-            if state.get('passages'):
+            if state.get('current_passages'):
                 lines.append("3. Use the retrieved information above")
             lines.append("3. Draw your conclusion")
             lines.append("\nAt the end, provide your final answer in this format:")
