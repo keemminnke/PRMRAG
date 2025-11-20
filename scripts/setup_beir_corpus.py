@@ -102,18 +102,14 @@ def setup_beir_corpus():
     model = BGEM3FlagModel('BAAI/bge-m3', use_fp16=True)
 
     embeddings = []
-    batch_size = 64
+    batch_size = 256  # Increased for H200
 
     for i in tqdm(range(0, len(corpus_data), batch_size), desc="Encoding batches"):
         batch = corpus_data[i:i+batch_size]
         texts = [f"{doc['title']} {doc['text']}" for doc in batch]
         batch_embs = model.encode(
             texts,
-            batch_size=batch_size,
-            max_length=512,
-            return_dense=True,
-            return_sparse=False,
-            return_colbert_vecs=False
+            max_length=512
         )['dense_vecs']
         embeddings.append(batch_embs)
 
