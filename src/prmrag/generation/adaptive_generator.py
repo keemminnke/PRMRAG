@@ -532,6 +532,16 @@ class AdaptiveTrajectoryGenerator:
         else:
             # Continuation step with passages
             steps_text = "\n".join(str(step) for step in forced_steps)
+
+            # Add previous documents titles for context
+            previous_passages = state.get('passages', [])
+            previous_docs_section = []
+            if previous_passages:
+                previous_docs_section.append("## Previous Documents (for reference)")
+                for i, p in enumerate(previous_passages, 1):
+                    previous_docs_section.append(f"[{i}] {p.get('title', 'Document')}")
+                previous_docs_section.append("")
+
             prompt_lines = [
                 f"## Question",
                 state['question'],
@@ -539,7 +549,14 @@ class AdaptiveTrajectoryGenerator:
                 f"## Previous Reasoning Steps",
                 steps_text,
                 "",
-                f"## Retrieved Documents",
+            ]
+
+            # Add previous docs titles if any
+            if previous_docs_section:
+                prompt_lines.extend(previous_docs_section)
+
+            prompt_lines.extend([
+                f"## Retrieved Documents (Current)",
                 passage_text,
                 "",
                 f"## Task",
@@ -922,12 +939,23 @@ class AdaptiveTrajectoryGenerator:
         # Build rollout prompt with more structured instructions
         lines = [f"Question: {state['question']}\n"]
 
-        # CRITICAL FIX: Include only current step's retrieved passages (not all accumulated)
-        # This matches the behavior of actual step generation
-        if state.get('current_passages'):
-            lines.append("Retrieved Information:")
-            # Use current_passages (from current RAG step) instead of all accumulated passages
-            for i, passage in enumerate(state['current_passages'], 1):
+        # Add previous documents titles for reference (if any exist beyond current)
+        all_passages = state.get('passages', [])
+        current_passages = state.get('current_passages', [])
+
+        # Previous passages = all passages minus current passages
+        if all_passages and len(all_passages) > len(current_passages):
+            lines.append("Previous Documents (for reference):")
+            # Show titles of previous documents
+            num_previous = len(all_passages) - len(current_passages)
+            for i, passage in enumerate(all_passages[:num_previous], 1):
+                lines.append(f"[{i}] {passage.get('title', 'Document')}")
+            lines.append("")
+
+        # Current step's retrieved passages (full content)
+        if current_passages:
+            lines.append("Retrieved Information (Current):")
+            for i, passage in enumerate(current_passages, 1):
                 title = passage.get('title', 'Document')
                 content = passage.get('text', '')
                 lines.append(f"[{i}] {title}: {content}")
