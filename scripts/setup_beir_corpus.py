@@ -128,7 +128,7 @@ def setup_beir_corpus():
     print("✅ SETUP COMPLETE!")
     print(f"{'='*70}")
     print(f"\nCorpus: {corpus_file}")
-    print(f"  - Documents: {len(corpus):,}")
+    print(f"  - Documents: {len(corpus_data):,}")
     print(f"  - Size: {corpus_file.stat().st_size / 1e6:.2f} MB")
     print(f"\nEmbeddings: {embeddings_file}")
     print(f"  - Shape: {embeddings.shape}")
