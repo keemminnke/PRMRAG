@@ -265,6 +265,13 @@ def main():
             'rag_with_search_tags': 0,
             'rag_with_citations': 0,
             'rag_fully_compliant': 0,
+        },
+        'rag_effectiveness': {
+            'total_rag_steps': 0,
+            'rag_improved_mc': 0,  # mc_after > mc_before
+            'rag_degraded_mc': 0,  # mc_after < mc_before
+            'total_mc_improvement': 0.0,  # sum of mc improvements
+            'rpe_above_threshold': 0,  # RPE >= 0.8
         }
     }
 
@@ -309,6 +316,20 @@ def main():
                 summary_stats['format_compliance']['rag_with_search_tags'] += fc['rag_with_search_tags']
                 summary_stats['format_compliance']['rag_with_citations'] += fc['rag_with_citations']
                 summary_stats['format_compliance']['rag_fully_compliant'] += fc['rag_fully_compliant']
+
+                # Update RAG effectiveness stats
+                for intervention in result['rag_interventions']:
+                    summary_stats['rag_effectiveness']['total_rag_steps'] += 1
+                    mc_imp = intervention['mc_improvement']
+                    summary_stats['rag_effectiveness']['total_mc_improvement'] += mc_imp
+
+                    if mc_imp > 0:
+                        summary_stats['rag_effectiveness']['rag_improved_mc'] += 1
+                    elif mc_imp < 0:
+                        summary_stats['rag_effectiveness']['rag_degraded_mc'] += 1
+
+                    if intervention['rpe'] >= 0.8:
+                        summary_stats['rag_effectiveness']['rpe_above_threshold'] += 1
             else:
                 summary_stats['without_rag'] += 1
                 if result['is_correct']:
@@ -372,6 +393,25 @@ def main():
 
         if fc['rag_fully_compliant'] < total_rag:
             print(f"\n⚠️  Warning: {total_rag - fc['rag_fully_compliant']} RAG steps are not fully compliant with format requirements")
+
+    # RAG effectiveness report
+    if summary_stats['rag_effectiveness']['total_rag_steps'] > 0:
+        print(f"\n--- RAG Effectiveness Analysis ---")
+        eff = summary_stats['rag_effectiveness']
+        total_rag = eff['total_rag_steps']
+        avg_improvement = eff['total_mc_improvement'] / total_rag
+
+        print(f"\nTotal RAG interventions: {total_rag}")
+        print(f"  ✓ Improved MC (mc_after > mc_before): {eff['rag_improved_mc']}/{total_rag} ({eff['rag_improved_mc']/total_rag*100:.1f}%)")
+        print(f"  ✗ Degraded MC (mc_after < mc_before): {eff['rag_degraded_mc']}/{total_rag} ({eff['rag_degraded_mc']/total_rag*100:.1f}%)")
+        print(f"  → Unchanged MC: {total_rag - eff['rag_improved_mc'] - eff['rag_degraded_mc']}/{total_rag}")
+        print(f"\n  Average MC improvement: {avg_improvement:+.3f}")
+        print(f"  RAG steps with RPE ≥ 0.8: {eff['rpe_above_threshold']}/{total_rag} ({eff['rpe_above_threshold']/total_rag*100:.1f}%)")
+
+        if eff['rag_improved_mc'] > eff['rag_degraded_mc']:
+            print(f"\n✅ RAG is effective: {eff['rag_improved_mc']} improvements vs {eff['rag_degraded_mc']} degradations")
+        else:
+            print(f"\n⚠️  Warning: RAG may not be effective: {eff['rag_improved_mc']} improvements vs {eff['rag_degraded_mc']} degradations")
 
     print(f"\n{'=' * 70}")
     print("NEXT STEPS")
