@@ -64,26 +64,38 @@ def setup_beir_corpus():
 
     input("\nPress Enter to start, or Ctrl+C to cancel...")
 
-    # Step 1: Download corpus
-    print(f"\n[1/3] Downloading BeIR/hotpotqa corpus from HuggingFace...")
-    corpus = load_dataset("BeIR/hotpotqa", "corpus", split="corpus")
-    print(f"  - Corpus size: {len(corpus):,} documents")
+    # Step 1 & 2: Download and save corpus (skip if exists)
+    if not corpus_file.exists():
+        print(f"\n[1/3] Downloading BeIR/hotpotqa corpus from HuggingFace...")
+        corpus = load_dataset("BeIR/hotpotqa", "corpus", split="corpus")
+        print(f"  - Corpus size: {len(corpus):,} documents")
 
-    # Step 2: Save to JSONL
-    print(f"\n[2/3] Saving corpus to JSONL...")
-    with open(corpus_file, 'w', encoding='utf-8') as f:
-        for doc in tqdm(corpus, desc="Writing corpus"):
-            f.write(json.dumps({
-                'id': doc['_id'],
-                'title': doc['title'],
-                'text': doc['text']
-            }, ensure_ascii=False) + '\n')
+        print(f"\n[2/3] Saving corpus to JSONL...")
+        with open(corpus_file, 'w', encoding='utf-8') as f:
+            for doc in tqdm(corpus, desc="Writing corpus"):
+                f.write(json.dumps({
+                    'id': doc['_id'],
+                    'title': doc['title'],
+                    'text': doc['text']
+                }, ensure_ascii=False) + '\n')
 
-    print(f"  ✅ Saved {len(corpus):,} documents to {corpus_file}")
-    print(f"  - File size: {corpus_file.stat().st_size / 1e6:.2f} MB")
+        print(f"  ✅ Saved {len(corpus):,} documents to {corpus_file}")
+        print(f"  - File size: {corpus_file.stat().st_size / 1e6:.2f} MB")
+    else:
+        print(f"\n[1-2/3] Corpus already exists, skipping download...")
+        print(f"  - Using: {corpus_file}")
+        print(f"  - Size: {corpus_file.stat().st_size / 1e6:.2f} MB")
 
-    # Step 3: Generate BGE-M3 embeddings
+    # Step 3: Load corpus from JSONL and generate embeddings
     print(f"\n[3/3] Generating BGE-M3 embeddings...")
+    print(f"  - Loading corpus from JSONL...")
+
+    corpus_data = []
+    with open(corpus_file, 'r', encoding='utf-8') as f:
+        for line in tqdm(f, desc="Loading corpus"):
+            corpus_data.append(json.loads(line))
+
+    print(f"  - Loaded {len(corpus_data):,} documents")
     print(f"  - Model: BAAI/bge-m3")
     print(f"  - This may take several hours depending on corpus size and GPU...")
 
@@ -92,11 +104,9 @@ def setup_beir_corpus():
     embeddings = []
     batch_size = 64
 
-    for i in tqdm(range(0, len(corpus), batch_size), desc="Encoding batches"):
-        batch = corpus[i:i+batch_size]
-        # HuggingFace Dataset slicing returns dict of lists
-        # batch = {'_id': [...], 'title': [...], 'text': [...]}
-        texts = [f"{title} {text}" for title, text in zip(batch['title'], batch['text'])]
+    for i in tqdm(range(0, len(corpus_data), batch_size), desc="Encoding batches"):
+        batch = corpus_data[i:i+batch_size]
+        texts = [f"{doc['title']} {doc['text']}" for doc in batch]
         batch_embs = model.encode(
             texts,
             batch_size=batch_size,
