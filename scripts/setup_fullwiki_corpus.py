@@ -1,87 +1,87 @@
 #!/usr/bin/env python3
-"""Download and prepare HotpotQA Full Wiki corpus (5.23M paragraphs) with BGE-M3 embeddings.
+"""Download and prepare HotpotQA Full Wiki corpus with BGE-M3 embeddings.
 
 This script:
-1. Downloads the full Wikipedia corpus used in HotpotQA
-2. Converts to JSONL format compatible with BGERetriever
-3. Generates BGE-M3 embeddings (takes ~2-4 hours on GPU)
-4. Saves embeddings cache for fast retrieval
+1. Downloads HotpotQA dataset from Hugging Face
+2. Extracts unique Wikipedia paragraphs from fullwiki setting
+3. Converts to JSONL format compatible with BGERetriever
+4. Generates BGE-M3 embeddings (takes ~2-4 hours on GPU)
+5. Saves embeddings cache for fast retrieval
+
+Note: Uses Hugging Face datasets library for reliable download.
 """
 
 import sys
 import json
-import requests
-import zipfile
 from pathlib import Path
 from tqdm import tqdm
 import numpy as np
 import torch
+from collections import OrderedDict
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from prmrag.retrieval import BGERetriever
 
-
-def download_file(url: str, output_path: Path):
-    """Download file with progress bar."""
-    print(f"Downloading from {url}...")
-
-    response = requests.get(url, stream=True)
-    response.raise_for_status()
-
-    total_size = int(response.headers.get('content-length', 0))
-
-    with open(output_path, 'wb') as f, tqdm(
-        total=total_size,
-        unit='B',
-        unit_scale=True,
-        desc=output_path.name
-    ) as pbar:
-        for chunk in response.iter_content(chunk_size=8192):
-            f.write(chunk)
-            pbar.update(len(chunk))
-
-    print(f"✓ Downloaded to {output_path}")
+try:
+    from datasets import load_dataset
+except ImportError:
+    print("ERROR: 'datasets' package not found.")
+    print("Install it with: pip install datasets")
+    sys.exit(1)
 
 
-def extract_zip(zip_path: Path, extract_to: Path):
-    """Extract zip file."""
-    print(f"Extracting {zip_path.name}...")
-    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        zip_ref.extractall(extract_to)
-    print(f"✓ Extracted to {extract_to}")
+def extract_corpus_from_hotpotqa(output_file: Path):
+    """Extract unique Wikipedia paragraphs from HotpotQA fullwiki dataset.
 
+    Downloads HotpotQA from Hugging Face and extracts all unique paragraphs
+    from the context field to build a corpus.
 
-def convert_to_jsonl(input_file: Path, output_file: Path):
-    """Convert HotpotQA wiki format to JSONL format.
-
-    Input format: JSON with article_title -> [paragraph_text, ...]
-    Output format: JSONL with {id, title, text} per line
+    Returns:
+        Number of unique documents extracted
     """
-    print(f"Converting {input_file.name} to JSONL...")
+    print("Downloading HotpotQA dataset from Hugging Face...")
+    print("This may take a few minutes...")
 
-    with open(input_file, 'r', encoding='utf-8') as f:
-        wiki_data = json.load(f)
+    # Load the validation fullwiki split
+    dataset = load_dataset("hotpot_qa", "fullwiki", split="validation")
+    print(f"✓ Loaded {len(dataset)} examples")
 
+    # Extract unique paragraphs
+    print("\nExtracting unique paragraphs from context...")
+    unique_paragraphs = OrderedDict()  # title -> set of paragraphs
     doc_id = 0
+
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
     with open(output_file, 'w', encoding='utf-8') as f:
-        for title, paragraphs in tqdm(wiki_data.items(), desc="Converting"):
-            for paragraph in paragraphs:
-                # Skip empty paragraphs
-                if not paragraph.strip():
+        for example in tqdm(dataset, desc="Processing"):
+            # Each example has 'context' field with {'title': [...], 'sentences': [[...]]}
+            titles = example['context']['title']
+            sentences_list = example['context']['sentences']
+
+            for title, sentences in zip(titles, sentences_list):
+                # Join sentences to form paragraph
+                paragraph = ' '.join(sentences).strip()
+
+                if not paragraph:
                     continue
 
-                doc = {
-                    'id': f'wiki_{doc_id}',
-                    'title': title,
-                    'text': paragraph.strip()
-                }
-                f.write(json.dumps(doc, ensure_ascii=False) + '\n')
-                doc_id += 1
+                # Create unique key
+                key = f"{title}:::{paragraph[:100]}"  # Use first 100 chars as fingerprint
 
-    print(f"✓ Converted {doc_id:,} documents to {output_file}")
+                if key not in unique_paragraphs:
+                    unique_paragraphs[key] = True
+
+                    doc = {
+                        'id': f'wiki_{doc_id}',
+                        'title': title,
+                        'text': paragraph
+                    }
+                    f.write(json.dumps(doc, ensure_ascii=False) + '\n')
+                    doc_id += 1
+
+    print(f"✓ Extracted {doc_id:,} unique documents to {output_file}")
     return doc_id
 
 
@@ -132,18 +132,17 @@ def main():
     embeddings_dir.mkdir(parents=True, exist_ok=True)
 
     # Files
-    zip_file = raw_dir / "enwiki-20171001-pages-meta-current-withlinks-abstracts.tar.bz2"
-    extracted_file = raw_dir / "enwiki-20171001-pages-meta-current-withlinks-abstracts"
     corpus_jsonl = raw_dir / "hotpotqa_fullwiki_corpus.jsonl"
     embeddings_file = embeddings_dir / "hotpotqa_fullwiki_bge_m3.npy"
 
     print("="*70)
-    print("HOTPOTQA FULL WIKI CORPUS SETUP")
+    print("HOTPOTQA FULL WIKI CORPUS SETUP (via Hugging Face)")
     print("="*70)
     print(f"\nThis script will:")
-    print(f"1. Download 5.23M Wikipedia abstracts (~2GB)")
-    print(f"2. Convert to JSONL format")
-    print(f"3. Generate BGE-M3 embeddings (~50GB, takes 2-4 hours)")
+    print(f"1. Download HotpotQA fullwiki dataset from Hugging Face")
+    print(f"2. Extract unique Wikipedia paragraphs (~100K-200K docs)")
+    print(f"3. Convert to JSONL format")
+    print(f"4. Generate BGE-M3 embeddings (takes 1-2 hours on GPU)")
     print(f"\nData will be saved to:")
     print(f"  - Corpus: {corpus_jsonl}")
     print(f"  - Embeddings: {embeddings_file}")
@@ -161,41 +160,22 @@ def main():
 
     input("\nPress Enter to start, or Ctrl+C to cancel...")
 
-    # Step 1: Download
-    url = "http://curtis.ml.cmu.edu/datasets/hotpot/enwiki-20171001-pages-meta-current-withlinks-abstracts.tar.bz2"
-
-    if not extracted_file.exists():
-        if not zip_file.exists():
-            print(f"\n[1/3] Downloading corpus...")
-            download_file(url, zip_file)
-        else:
-            print(f"\n[1/3] Using cached download: {zip_file}")
-
-        # Extract
-        print(f"\n[2/3] Extracting...")
-        import tarfile
-        with tarfile.open(zip_file, 'r:bz2') as tar:
-            tar.extractall(raw_dir)
-        print(f"✓ Extracted")
-    else:
-        print(f"\n[1-2/3] Using existing extracted file: {extracted_file}")
-
-    # Step 2: Convert to JSONL
+    # Step 1 & 2: Download and extract corpus
     if not corpus_jsonl.exists():
-        print(f"\n[3/3] Converting to JSONL...")
-        num_docs = convert_to_jsonl(extracted_file, corpus_jsonl)
+        print(f"\n[1/2] Downloading and extracting corpus from HotpotQA...")
+        num_docs = extract_corpus_from_hotpotqa(corpus_jsonl)
     else:
-        print(f"\n[3/3] Using existing JSONL: {corpus_jsonl}")
+        print(f"\n[1/2] Using existing corpus: {corpus_jsonl}")
         with open(corpus_jsonl, 'r') as f:
             num_docs = sum(1 for _ in f)
         print(f"  - Documents: {num_docs:,}")
 
     # Step 3: Build embeddings
     if not embeddings_file.exists():
-        print(f"\n[4/3] Building BGE-M3 embeddings...")
+        print(f"\n[2/2] Building BGE-M3 embeddings...")
         build_embeddings(corpus_jsonl, embeddings_file, batch_size=64)
     else:
-        print(f"\n[4/3] Using existing embeddings: {embeddings_file}")
+        print(f"\n[2/2] Using existing embeddings: {embeddings_file}")
 
     # Summary
     print(f"\n{'='*70}")
@@ -207,8 +187,8 @@ def main():
     print(f"\nEmbeddings: {embeddings_file}")
     if embeddings_file.exists():
         print(f"  - Size: {embeddings_file.stat().st_size / 1e9:.2f} GB")
-    print(f"\nYou can now use Full Wiki setting with:")
-    print(f"  python scripts/batch_test_adaptive.py --use-fullwiki")
+    print(f"\nYou can now run tests with Full Wiki corpus:")
+    print(f"  python scripts/batch_test_adaptive.py --num-questions 10")
     print()
 
 
