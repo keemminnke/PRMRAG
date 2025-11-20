@@ -3,9 +3,10 @@
 
 This script:
 1. Tests N questions from HotpotQA validation set
-2. Tracks which steps used RAG and which used CoT
-3. Saves detailed results for manual inspection
-4. Generates summary statistics
+2. Uses BeIR HotpotQA corpus with BGE-M3 embeddings
+3. Tracks which steps used RAG and which used CoT
+4. Saves detailed results for manual inspection
+5. Generates summary statistics including RAG effectiveness analysis
 """
 
 import sys
@@ -25,7 +26,7 @@ import re
 
 
 def load_validation_data(data_dir: Path, limit: int = None):
-    """Load validation questions and Full Wiki corpus.
+    """Load validation questions and BeIR HotpotQA corpus.
 
     Args:
         data_dir: Data directory
@@ -34,8 +35,8 @@ def load_validation_data(data_dir: Path, limit: int = None):
     Returns:
         Tuple of (questions, corpus)
     """
-    questions_file = data_dir / "raw" / "hotpotqa_validation.jsonl"
-    corpus_file = data_dir / "raw" / "hotpotqa_fullwiki_corpus.jsonl"
+    questions_file = data_dir / "raw" / "questions" / "hotpotqa_validation.jsonl"
+    corpus_file = data_dir / "raw" / "beir_hotpotqa_corpus.jsonl"
 
     # Load questions
     questions = []
@@ -235,7 +236,7 @@ def main():
 
     # Initialize BGE-M3 retriever
     print(f"\n[3] Initializing BGE-M3 retriever...")
-    embedding_cache = "data/embeddings/hotpotqa_fullwiki_bge_m3.npy"
+    embedding_cache = "data/embeddings/beir_hotpotqa_bge_m3.npy"
 
     retriever = BGERetriever(
         corpus=corpus,
