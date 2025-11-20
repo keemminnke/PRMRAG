@@ -357,7 +357,8 @@ class AdaptiveTrajectoryGenerator:
                 continue
 
             # Step 2+: Compute RPE and check threshold
-            rpe_cot = mc_cot / (mc_prev + 1e-8)
+            # Use 0.01 as smoothing factor to avoid extreme RPE values when mc_prev is near 0
+            rpe_cot = mc_cot / (mc_prev + 0.01)
 
             # (B) Check if CoT is acceptable (threshold: 0.8, using > 0.79 to avoid floating point issues)
             if rpe_cot > 0.79:
@@ -397,7 +398,8 @@ class AdaptiveTrajectoryGenerator:
 
                 # RAG always returns a result (never None)
                 rag_step, rag_state, mc_rag = rag_result
-                rpe_rag = mc_rag / (mc_prev + 1e-8)
+                # Use 0.01 as smoothing factor to avoid extreme RPE values when mc_prev is near 0
+                rpe_rag = mc_rag / (mc_prev + 0.01)
 
                 # Label as 'good' if RPE > 0.79 (effective 0.8 with floating point tolerance), else 'bad'
                 label = 'good' if rpe_rag > 0.79 else 'bad'
