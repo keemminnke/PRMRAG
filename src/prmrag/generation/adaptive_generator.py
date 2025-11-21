@@ -295,6 +295,14 @@ class AdaptiveTrajectoryGenerator:
         self.top_k_passages = config.get('top_k_passages', 5)
         self.temperature = config.get('temperature', 0.8)
 
+        # Dynamic K settings for MC estimation (based on GenPRM)
+        # K is adjusted based on problem difficulty (estimated from first step MC)
+        self.use_dynamic_k = config.get('use_dynamic_k', True)
+        self.k_hard = config.get('k_hard', 32)      # MC(s1) < 0.1
+        self.k_medium = config.get('k_medium', 16)  # 0.1 <= MC(s1) < 0.9
+        self.k_easy = config.get('k_easy', 8)       # MC(s1) >= 0.9
+        self.current_k = self.num_rollouts  # Will be updated after first step
+
         # Step forcing settings
         self.use_step_forcing = config.get('use_step_forcing', True)
         self.step_forcing_prompt = StepForcingPrompt()
@@ -370,6 +378,19 @@ class AdaptiveTrajectoryGenerator:
                 steps.append(step)
                 current_state = cot_state
                 mc_prev = mc_cot
+
+                # Update dynamic K based on Step 1 MC (GenPRM-style)
+                if self.use_dynamic_k:
+                    if mc_cot < 0.1:
+                        self.current_k = self.k_hard
+                        difficulty = "hard"
+                    elif mc_cot < 0.9:
+                        self.current_k = self.k_medium
+                        difficulty = "medium"
+                    else:
+                        self.current_k = self.k_easy
+                        difficulty = "easy"
+                    print(f"  [Dynamic K] MC(s1)={mc_cot:.3f} → difficulty={difficulty} → K={self.current_k}")
 
                 # Check if we have an answer
                 has_answer = self._has_answer(cot_step_content)
@@ -901,22 +922,25 @@ class AdaptiveTrajectoryGenerator:
         if num_current_passages > 0:
             print(f"    [MC DEBUG] Rollouts will use {num_current_passages} current step passages (not accumulated)")
 
+        # Use dynamic K (set after Step 1) or fallback to num_rollouts
+        k = self.current_k if self.use_dynamic_k else self.num_rollouts
+
         successes = 0
         rollout_answers = []
-        for _ in range(self.num_rollouts):
+        for _ in range(k):
             final_answer = self._rollout(state)
             rollout_answers.append(final_answer[:50])  # Store first 50 chars for debugging
             if gold_answer and self._check_answer(final_answer, gold_answer):
                 successes += 1
 
-        mc_value = successes / self.num_rollouts
+        mc_value = successes / k
 
         # Debug logging
         if mc_value == 0.0:
-            print(f"    [MC DEBUG] MC=0.0! Gold: {gold_answer[:50] if gold_answer else 'None'}")
+            print(f"    [MC DEBUG] MC=0.0! K={k}, Gold: {gold_answer[:50] if gold_answer else 'None'}")
             print(f"    [MC DEBUG] Sample rollouts: {rollout_answers[:2]}")
         elif num_current_passages > 0:
-            print(f"    [MC DEBUG] MC={mc_value:.3f} with {num_current_passages} current passages (successes: {successes}/{self.num_rollouts})")
+            print(f"    [MC DEBUG] MC={mc_value:.3f} with {num_current_passages} passages, K={k} (successes: {successes}/{k})")
 
         return mc_value
 
