@@ -1,6 +1,5 @@
-"""MC-based RPE labeler using small model."""
+"""MC-based RPE labeler using vLLM."""
 
-import torch
 from typing import List, Dict, Any, Optional
 from tqdm import tqdm
 import numpy as np
@@ -18,41 +17,61 @@ class RPELabeler(BaseLabeler):
     3. Computes MC(s_t) and MC(s_t, a_t)
     4. Calculates RPE = MC(s_t, a_t) / MC(s_t)
     5. Thresholds RPE to assign GOOD/BORDERLINE/BAD labels
+
+    Now uses vLLM backend for fast inference.
     """
 
     def __init__(
         self,
         config: Dict[str, Any],
         model=None,
-        tokenizer=None,
     ):
         """Initialize RPE labeler.
 
         Args:
             config: Configuration dictionary with keys:
+                - model_name: Model name for vLLM
                 - num_rollouts: Number of MC rollouts
                 - max_rollout_steps: Max steps per rollout
                 - threshold: RPE threshold (>= threshold: GOOD, < threshold: BAD)
                 - temperature: Sampling temperature
-                - device: Device for model inference
-            model: Pre-loaded model (optional)
-            tokenizer: Pre-loaded tokenizer (optional)
+                - gpu_memory_utilization: GPU memory utilization for vLLM (default: 0.7)
+                - tensor_parallel_size: Number of GPUs for vLLM (default: 1)
+            model: Pre-loaded vLLM PolicyModel (optional)
         """
         super().__init__(config)
 
+        self.model_name = config.get("model_name", "Qwen/Qwen2.5-7B-Instruct")
         self.num_rollouts = config.get("num_rollouts", 5)
         self.max_rollout_steps = config.get("max_rollout_steps", 20)
         self.threshold = config.get("threshold", 0.5)
         self.temperature = config.get("temperature", 0.8)
-        self.device = config.get("device", "cuda" if torch.cuda.is_available() else "cpu")
+        self.max_tokens = config.get("max_tokens", 512)
 
-        # Model loading (simplified - will be expanded)
+        # vLLM-specific settings
+        self.gpu_memory_utilization = config.get("gpu_memory_utilization", 0.7)
+        self.tensor_parallel_size = config.get("tensor_parallel_size", 1)
+
         self.model = model
-        self.tokenizer = tokenizer
 
-        if self.model is not None:
-            self.model.to(self.device)
-            self.model.eval()
+        # Initialize vLLM model if not provided
+        if self.model is None:
+            self._initialize_vllm_model()
+
+    def _initialize_vllm_model(self):
+        """Initialize vLLM model for RPE labeling."""
+        from ..models import load_policy_model
+
+        model_config = {
+            'model_name': self.model_name,
+            'temperature': self.temperature,
+            'max_tokens': self.max_tokens,
+            'gpu_memory_utilization': self.gpu_memory_utilization,
+            'tensor_parallel_size': self.tensor_parallel_size,
+        }
+
+        print(f"Initializing RPE model with vLLM: {self.model_name}")
+        self.model = load_policy_model(model_config)
 
     def label_trajectory(self, trajectory: Trajectory) -> List[RPELabel]:
         """Label a trajectory using MC-based RPE.
@@ -161,7 +180,7 @@ class RPELabeler(BaseLabeler):
         question: str,
         prefix_steps: List,
     ) -> str:
-        """Perform a single rollout from a prefix.
+        """Perform a single rollout from a prefix using vLLM.
 
         Args:
             question: The question
@@ -171,23 +190,20 @@ class RPELabeler(BaseLabeler):
             Final answer from the rollout
         """
         if self.model is None:
-            # Placeholder
             return "placeholder_answer"
 
-        # TODO: Implement actual rollout with model
-        # This would involve:
-        # 1. Format prefix as prompt
-        # 2. Generate continuation with model
-        # 3. Parse out final answer
-        # 4. Return answer
-
-        # For now, simplified placeholder
+        # Format prefix as prompt
         prompt = self._format_prompt(question, prefix_steps)
 
-        # In real implementation, would call model.generate() here
-        # with temperature sampling
+        # Generate with vLLM
+        response = self.model.generate_with_chat_template(
+            user_message=prompt,
+            max_tokens=self.max_tokens,
+            temperature=self.temperature,
+        )
 
-        return "generated_answer"
+        # Extract answer from response
+        return self._extract_answer(response)
 
     def _format_prompt(
         self,
@@ -210,8 +226,37 @@ class RPELabeler(BaseLabeler):
             lines.append(f"Result: {step.observation}\n")
 
         lines.append("Continue reasoning to answer the question.")
+        lines.append("At the end, provide your final answer in this format:")
+        lines.append('"Therefore, the answer is [your answer]."')
 
         return "\n".join(lines)
+
+    def _extract_answer(self, response: str) -> str:
+        """Extract final answer from model response.
+
+        Args:
+            response: Model response text
+
+        Returns:
+            Extracted answer
+        """
+        import re
+
+        # Try to extract answer from common patterns
+        patterns = [
+            r'(?:final\s+)?answer\s*(?:is)?\s*:?\s*([^.;]+?)(?:[.;]|$)',
+            r'therefore,?\s+(?:the\s+answer\s+is\s*:?\s*)?([^.;]+?)(?:[.;]|$)',
+            r'the\s+answer\s+is\s+\(?([^.;)]+?)\)?(?:[.;]|$)',
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, response.lower())
+            if match:
+                return match.group(1).strip()
+
+        # Fallback: return first sentence
+        sentences = re.split(r'[.!?]\s+', response)
+        return sentences[0].strip() if sentences else response.strip()
 
     def _check_answer(self, predicted: str, gold: str) -> bool:
         """Check if predicted answer matches gold answer.
@@ -223,7 +268,7 @@ class RPELabeler(BaseLabeler):
         Returns:
             True if match
         """
-        # Simple exact match (can be improved with fuzzy matching, etc.)
+        # Simple normalized match
         pred_normalized = predicted.strip().lower()
         gold_normalized = gold.strip().lower()
 
@@ -255,29 +300,26 @@ class RPELabeler(BaseLabeler):
 
 
 def load_rpe_model(config: Dict[str, Any]):
-    """Load model and tokenizer for RPE labeling.
+    """Load vLLM model for RPE labeling.
 
     Args:
-        config: Configuration with model_name, model_path, device
+        config: Configuration with model_name and vLLM settings
 
     Returns:
-        Tuple of (model, tokenizer)
+        vLLM PolicyModel instance
     """
-    # Placeholder for model loading
-    # In real implementation, would use transformers library:
-    # from transformers import AutoModelForCausalLM, AutoTokenizer
-    #
-    # model_name = config.get("model_name")
-    # model_path = config.get("model_path", model_name)
-    #
-    # tokenizer = AutoTokenizer.from_pretrained(model_path)
-    # model = AutoModelForCausalLM.from_pretrained(
-    #     model_path,
-    #     torch_dtype=torch.float16,
-    #     device_map="auto",
-    # )
-    #
-    # return model, tokenizer
+    from ..models import load_policy_model
 
-    print(f"[Placeholder] Would load model: {config.get('model_name')}")
-    return None, None
+    return load_policy_model(config)
+
+
+def create_rpe_labeler(config: Dict[str, Any]) -> RPELabeler:
+    """Create RPELabeler with vLLM backend.
+
+    Args:
+        config: Configuration with model settings
+
+    Returns:
+        RPELabeler instance with vLLM model
+    """
+    return RPELabeler(config)

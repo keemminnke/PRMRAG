@@ -20,28 +20,28 @@ def print_trajectory_detail(result: Dict[str, Any], show_passages: bool = False)
     print("=" * 70)
 
     # Question and answer
-    print(f"\n📝 Question:")
+    print(f"\n Question:")
     print(f"   {result['question']}")
 
-    print(f"\n✅ Gold Answer:")
+    print(f"\n Gold Answer:")
     print(f"   {result['gold_answer']}")
 
-    status = "✅ CORRECT" if result['is_correct'] else "❌ INCORRECT"
+    status = " CORRECT" if result['is_correct'] else "❌ INCORRECT"
     print(f"\n🤖 Predicted Answer: {status}")
     print(f"   {result['predicted_answer']}")
 
     # Summary
-    print(f"\n📊 Summary:")
+    print(f"\n Summary:")
     print(f"   Total steps: {result['num_steps']}")
     print(f"   - CoT steps: {result['num_cot_steps']}")
     print(f"   - RAG steps: {result['num_rag_steps']}")
 
     # Step-by-step breakdown
-    print(f"\n🔍 Step-by-Step Breakdown:")
+    print(f"\n Step-by-Step Breakdown:")
     print("   " + "-" * 66)
 
     for step in result['steps']:
-        step_type = "🔵 CoT" if step['type'] == 'cot' else "🟢 RAG"
+        step_type = "CoT" if step['type'] == 'cot' else " RAG"
         label_marker = "✓" if step['label'] == 'good' else "✗"
 
         print(f"\n   Step {step['step_num']} {step_type} [{label_marker} {step['label']}]")
@@ -64,7 +64,7 @@ def print_trajectory_detail(result: Dict[str, Any], show_passages: bool = False)
 
     # RAG Impact Summary
     if result['has_rag']:
-        print(f"\n💡 RAG Impact Summary:")
+        print(f"\n RAG Impact Summary:")
         for intervention in result['rag_interventions']:
             label_marker = "✓" if intervention['label'] == 'good' else "✗"
             mc_change = intervention['mc_improvement']

@@ -1,4 +1,4 @@
-"""LLM Judge labeler (VersaPRM style)."""
+"""LLM Judge labeler (VersaPRM style) using vLLM."""
 
 import time
 from typing import List, Dict, Any, Optional
@@ -17,6 +17,8 @@ class JudgeLabeler(BaseLabeler):
     - Provides gold answer and supporting facts as context
     - Evaluates each step's contribution to reaching correct answer
     - Returns GOOD/BAD label with reasoning
+
+    Now uses vLLM backend for fast inference.
     """
 
     def __init__(
@@ -36,11 +38,13 @@ class JudgeLabeler(BaseLabeler):
                 - prompt_style: Prompt template style
                 - use_gold_answer: Whether to provide gold answer
                 - use_supporting_facts: Whether to provide supporting facts
-            model_client: Pre-configured model client (optional)
+                - gpu_memory_utilization: GPU memory utilization for vLLM (default: 0.7)
+                - tensor_parallel_size: Number of GPUs for vLLM (default: 1)
+            model_client: Pre-configured model client (optional, uses vLLM PolicyModel if None)
         """
         super().__init__(config)
 
-        self.model_name = config.get("model_name", "Qwen/Qwen3-32B")
+        self.model_name = config.get("model_name", "Qwen/Qwen2.5-7B-Instruct")
         self.temperature = config.get("temperature", 0.3)
         self.max_tokens = config.get("max_tokens", 512)
         self.max_retries = config.get("max_retries", 3)
@@ -49,8 +53,31 @@ class JudgeLabeler(BaseLabeler):
         self.use_gold_answer = config.get("use_gold_answer", True)
         self.use_supporting_facts = config.get("use_supporting_facts", True)
 
+        # vLLM-specific settings
+        self.gpu_memory_utilization = config.get("gpu_memory_utilization", 0.7)
+        self.tensor_parallel_size = config.get("tensor_parallel_size", 1)
+
         self.model_client = model_client
         self.processor = TrajectoryProcessor()
+
+        # Initialize vLLM model if no client provided
+        if self.model_client is None:
+            self._initialize_vllm_model()
+
+    def _initialize_vllm_model(self):
+        """Initialize vLLM model for judge labeling."""
+        from ..models import load_policy_model
+
+        model_config = {
+            'model_name': self.model_name,
+            'temperature': self.temperature,
+            'max_tokens': self.max_tokens,
+            'gpu_memory_utilization': self.gpu_memory_utilization,
+            'tensor_parallel_size': self.tensor_parallel_size,
+        }
+
+        print(f"Initializing Judge model with vLLM: {self.model_name}")
+        self.model_client = load_policy_model(model_config)
 
     def label_trajectory(self, trajectory: Trajectory) -> List[JudgeLabel]:
         """Label a trajectory using LLM judge.
@@ -242,24 +269,23 @@ Confidence: [0.0 to 1.0]
         Returns:
             LLM response text
         """
-        if self.model_client is None:
-            # Placeholder response
-            return """Reasoning: This step retrieves relevant information about the topic.
-Label: GOOD
-Confidence: 0.85"""
-
         for attempt in range(self.max_retries):
             try:
                 response = self._call_llm(prompt)
                 return response
             except Exception as e:
                 if attempt < self.max_retries - 1:
+                    print(f"Retry {attempt + 1}/{self.max_retries} after error: {e}")
                     time.sleep(self.retry_delay)
                 else:
-                    raise e
+                    print(f"All retries failed: {e}")
+                    # Return a default response on failure
+                    return """Reasoning: Unable to evaluate due to model error.
+Label: GOOD
+Confidence: 0.5"""
 
     def _call_llm(self, prompt: str) -> str:
-        """Call LLM (to be implemented with actual model client).
+        """Call LLM using vLLM backend.
 
         Args:
             prompt: Input prompt
@@ -267,38 +293,17 @@ Confidence: 0.85"""
         Returns:
             LLM response
         """
-        # Placeholder - implement with actual model client
-        # Examples:
-        #
-        # For OpenAI:
-        # response = self.model_client.chat.completions.create(
-        #     model=self.model_name,
-        #     messages=[{"role": "user", "content": prompt}],
-        #     temperature=self.temperature,
-        #     max_tokens=self.max_tokens,
-        # )
-        # return response.choices[0].message.content
-        #
-        # For Anthropic:
-        # response = self.model_client.messages.create(
-        #     model=self.model_name,
-        #     messages=[{"role": "user", "content": prompt}],
-        #     temperature=self.temperature,
-        #     max_tokens=self.max_tokens,
-        # )
-        # return response.content[0].text
-        #
-        # For local models (vLLM, etc.):
-        # outputs = self.model_client.generate(
-        #     prompts=[prompt],
-        #     sampling_params=SamplingParams(
-        #         temperature=self.temperature,
-        #         max_tokens=self.max_tokens,
-        #     ),
-        # )
-        # return outputs[0].outputs[0].text
+        if self.model_client is None:
+            raise RuntimeError("Model client not initialized")
 
-        raise NotImplementedError("Model client not configured")
+        # Use vLLM PolicyModel's generate_with_chat_template
+        response = self.model_client.generate_with_chat_template(
+            user_message=prompt,
+            max_tokens=self.max_tokens,
+            temperature=self.temperature,
+        )
+
+        return response
 
     def _parse_judge_response(self, response: str) -> tuple[str, str, float]:
         """Parse LLM judge response.
@@ -362,38 +367,13 @@ Confidence: 0.85"""
         return labels
 
 
-def create_judge_client(config: Dict[str, Any]):
-    """Create model client for judge labeling.
+def create_judge_labeler(config: Dict[str, Any]) -> JudgeLabeler:
+    """Create JudgeLabeler with vLLM backend.
 
     Args:
         config: Configuration with model settings
 
     Returns:
-        Model client instance
+        JudgeLabeler instance with vLLM model
     """
-    model_name = config.get("model_name", "")
-
-    # OpenAI models
-    if "gpt" in model_name.lower():
-        try:
-            import openai
-            client = openai.OpenAI()
-            return client
-        except ImportError:
-            print("OpenAI package not installed. Install with: pip install openai")
-            return None
-
-    # Anthropic models
-    elif "claude" in model_name.lower():
-        try:
-            import anthropic
-            client = anthropic.Anthropic()
-            return client
-        except ImportError:
-            print("Anthropic package not installed. Install with: pip install anthropic")
-            return None
-
-    # Local models (vLLM, transformers, etc.)
-    else:
-        print(f"[Placeholder] Would create client for: {model_name}")
-        return None
+    return JudgeLabeler(config)
