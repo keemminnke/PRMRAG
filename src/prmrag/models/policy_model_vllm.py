@@ -63,6 +63,7 @@ class PolicyModelVLLM:
             gpu_memory_utilization=gpu_memory_utilization,
             trust_remote_code=True,
             enforce_eager=True,  # Required for vLLM dev versions with GH200
+            disable_log_stats=True,  # Disable verbose logging
         )
 
         self.model_name = model_name
@@ -106,8 +107,8 @@ class PolicyModelVLLM:
             stop=stop_sequences,
         )
 
-        # Generate with vLLM
-        outputs = self.llm.generate([prompt], sampling_params)
+        # Generate with vLLM (use_tqdm=False to suppress progress bar)
+        outputs = self.llm.generate([prompt], sampling_params, use_tqdm=False)
 
         # Extract result - return string only (compatible with PolicyModel)
         output = outputs[0].outputs[0]
@@ -148,8 +149,8 @@ class PolicyModelVLLM:
             stop=stop_sequences,
         )
 
-        # Batch generate with vLLM (automatically optimized)
-        outputs = self.llm.generate(prompts, sampling_params)
+        # Batch generate with vLLM (automatically optimized, use_tqdm=False to suppress progress bar)
+        outputs = self.llm.generate(prompts, sampling_params, use_tqdm=False)
 
         # Extract results - return strings only (compatible with PolicyModel)
         results = []
