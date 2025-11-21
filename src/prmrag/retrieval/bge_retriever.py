@@ -1,5 +1,9 @@
 """BGE-M3 dense retriever for semantic search."""
 
+import warnings
+# Suppress XLMRobertaTokenizerFast warning from BGE-M3
+warnings.filterwarnings("ignore", message="You're using a XLMRobertaTokenizerFast")
+
 from typing import List, Dict, Any, Optional
 import numpy as np
 import torch
