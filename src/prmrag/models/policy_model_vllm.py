@@ -1,7 +1,15 @@
 """Policy model wrapper for trajectory generation using vLLM (for GH200)."""
 
+import random
+import numpy as np
 from typing import List, Optional
 from transformers import AutoTokenizer
+
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
 
 try:
     from vllm import LLM, SamplingParams
@@ -9,6 +17,16 @@ try:
 except ImportError:
     VLLM_AVAILABLE = False
     print("Warning: vLLM not available. Install it or use Docker image for GH200.")
+
+
+def set_seed(seed: int):
+    """Set random seed for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    if TORCH_AVAILABLE:
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
 
 
 class PolicyModelVLLM:
@@ -26,6 +44,7 @@ class PolicyModelVLLM:
         max_new_tokens: int = 200,
         temperature: float = 0.8,
         top_p: float = 0.95,
+        seed: int = 42,  # Random seed for reproducibility
         device: str = "cuda",  # Ignored, for compatibility with PolicyModel
         torch_dtype=None,  # Ignored, vLLM handles this automatically
     ):
@@ -38,6 +57,7 @@ class PolicyModelVLLM:
             max_new_tokens: Maximum tokens to generate
             temperature: Sampling temperature
             top_p: Nucleus sampling parameter
+            seed: Random seed for reproducibility (default: 42)
             device: Ignored (for compatibility with PolicyModel)
             torch_dtype: Ignored (vLLM handles dtype automatically)
         """
@@ -48,6 +68,11 @@ class PolicyModelVLLM:
             )
 
         print(f"Loading policy model with vLLM: {model_name}")
+
+        # Set random seed for reproducibility
+        self.seed = seed
+        set_seed(seed)
+        print(f"  Random seed set to: {seed}")
 
         # Load tokenizer separately for chat template formatting
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -64,6 +89,7 @@ class PolicyModelVLLM:
             trust_remote_code=True,
             enforce_eager=True,  # Required for vLLM dev versions with GH200
             disable_log_stats=True,  # Disable verbose logging
+            seed=seed,  # Set seed for vLLM sampling
         )
 
         self.model_name = model_name
@@ -72,7 +98,7 @@ class PolicyModelVLLM:
         self.temperature = temperature
         self.top_p = top_p
 
-        print(f"✓ vLLM model loaded successfully")
+        print(f"✓ vLLM model loaded successfully (seed={seed})")
 
     def generate(
         self,
@@ -255,6 +281,7 @@ def load_policy_model(config: dict) -> PolicyModelVLLM:
             - max_tokens: Max tokens per generation (default: 200)
             - tensor_parallel_size: Number of GPUs (default: 1)
             - gpu_memory_utilization: GPU memory utilization (default: 0.7)
+            - seed: Random seed for reproducibility (default: 42)
 
     Returns:
         PolicyModelVLLM instance
@@ -266,5 +293,6 @@ def load_policy_model(config: dict) -> PolicyModelVLLM:
         max_new_tokens=config.get('max_tokens', 200),
         temperature=config.get('temperature', 0.8),
         top_p=config.get('top_p', 0.95),
+        seed=config.get('seed', 42),
         device=config.get('device', 'cuda'),
     )
