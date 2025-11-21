@@ -210,6 +210,30 @@ You are a helpful assistant that solves problems step by step.<|im_end|>
         prompt = self.format_prompt_for_qwen(user_message)
         return self.generate(prompt, max_tokens, temperature, top_p, stop_sequences)
 
+    def batch_generate_with_chat_template(
+        self,
+        user_messages: List[str],
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        stop_sequences: Optional[List[str]] = None,
+    ) -> List[str]:
+        """Batch generate using Qwen chat template (optimized for MC rollouts).
+
+        Args:
+            user_messages: List of user prompts
+            max_tokens: Maximum tokens to generate per prompt
+            temperature: Sampling temperature
+            top_p: Nucleus sampling
+            stop_sequences: Stop sequences
+
+        Returns:
+            List of generated texts
+        """
+        # Format all prompts with chat template
+        prompts = [self.format_prompt_for_qwen(msg) for msg in user_messages]
+        return self.batch_generate(prompts, max_tokens, temperature, top_p, stop_sequences)
+
 
 # Alias for compatibility - use the same name as the HF version
 PolicyModel = PolicyModelVLLM

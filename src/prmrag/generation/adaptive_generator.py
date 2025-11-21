@@ -912,7 +912,7 @@ class AdaptiveTrajectoryGenerator:
         state: Dict[str, Any],
         gold_answer: Optional[str],
     ) -> float:
-        """Estimate success probability via MC rollouts."""
+        """Estimate success probability via MC rollouts (batch optimized for vLLM)."""
         if self.policy_model is None:
             # Placeholder: random estimate
             return np.random.uniform(0.3, 0.9)
@@ -925,10 +925,44 @@ class AdaptiveTrajectoryGenerator:
         # Use dynamic K (set after Step 1) or fallback to num_rollouts
         k = self.current_k if self.use_dynamic_k else self.num_rollouts
 
+        # Build K rollout prompts (same prompt, different sampling)
+        rollout_prompt = self._build_rollout_prompt(state)
+        prompts = [rollout_prompt] * k
+
+        # Batch generate all K rollouts at once (vLLM optimized)
+        if hasattr(self.policy_model, 'batch_generate_with_chat_template'):
+            # vLLM batch generation with chat template - much faster
+            responses = self.policy_model.batch_generate_with_chat_template(
+                user_messages=prompts,
+                max_tokens=1200,
+                temperature=self.temperature,
+                top_p=0.95,
+            )
+        elif hasattr(self.policy_model, 'batch_generate'):
+            # vLLM batch generation without chat template (legacy)
+            responses = self.policy_model.batch_generate(
+                prompts=prompts,
+                max_tokens=1200,
+                temperature=self.temperature,
+                top_p=0.95,
+            )
+        else:
+            # Fallback for HuggingFace Transformers (sequential)
+            responses = []
+            for prompt in prompts:
+                response = self.policy_model.generate_with_chat_template(
+                    user_message=prompt,
+                    max_tokens=1200,
+                    temperature=self.temperature,
+                    top_p=0.95,
+                )
+                responses.append(response)
+
+        # Process all responses
         successes = 0
         rollout_answers = []
-        for _ in range(k):
-            final_answer = self._rollout(state)
+        for response in responses:
+            final_answer = self._extract_answer(response)
             rollout_answers.append(final_answer[:50])  # Store first 50 chars for debugging
             if gold_answer and self._check_answer(final_answer, gold_answer):
                 successes += 1
@@ -944,23 +978,15 @@ class AdaptiveTrajectoryGenerator:
 
         return mc_value
 
-    def _rollout(self, state: Dict[str, Any]) -> str:
-        """Perform one rollout from current state.
-
-        Generate a complete solution from the current state by continuing
-        the reasoning until we reach a final answer.
+    def _build_rollout_prompt(self, state: Dict[str, Any]) -> str:
+        """Build rollout prompt from state (extracted for batch generation).
 
         Args:
-            state: Current state with 'question' and 'reasoning_history'
+            state: Current state with 'question', 'reasoning_history', 'passages', 'current_passages'
 
         Returns:
-            Final answer extracted from the rollout
+            Formatted prompt string for rollout generation
         """
-        if self.policy_model is None:
-            # Placeholder for testing without model
-            return "rollout_answer"
-
-        # Build rollout prompt with more structured instructions
         lines = [f"Question: {state['question']}\n"]
 
         # Add previous documents titles for reference (if any exist beyond current)
@@ -1006,7 +1032,29 @@ class AdaptiveTrajectoryGenerator:
             lines.append("\nAt the end, provide your final answer in this format:")
             lines.append('"Therefore, the answer is [your answer]."')
 
-        prompt = "\n".join(lines)
+        return "\n".join(lines)
+
+    def _rollout(self, state: Dict[str, Any]) -> str:
+        """Perform one rollout from current state.
+
+        Generate a complete solution from the current state by continuing
+        the reasoning until we reach a final answer.
+
+        Note: For batch rollouts (MC estimation), use _monte_carlo_estimate()
+        which calls batch_generate() for better performance with vLLM.
+
+        Args:
+            state: Current state with 'question' and 'reasoning_history'
+
+        Returns:
+            Final answer extracted from the rollout
+        """
+        if self.policy_model is None:
+            # Placeholder for testing without model
+            return "rollout_answer"
+
+        # Use shared prompt builder
+        prompt = self._build_rollout_prompt(state)
 
         # Generate complete solution (longer max_tokens for multi-hop reasoning)
         response = self.policy_model.generate_with_chat_template(
