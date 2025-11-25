@@ -518,7 +518,7 @@ class AdaptiveTrajectoryGenerator:
         if self.policy_model is None:
             # Placeholder for testing without model
             passage_text = self._format_passages(passages)
-            return f"<start_search>{query}<end_search> Based on retrieved information: {passage_text}"
+            return f"Thought: I need to search for information.\nAction: Search[{query}]\nObservation: Based on retrieved information: {passage_text}"
 
         # Format passages for the prompt
         passage_text = self._format_passages(passages)
@@ -540,15 +540,20 @@ class AdaptiveTrajectoryGenerator:
                 "Generate a reasoning step to answer the question using the retrieved documents.",
                 "",
                 "IMPORTANT RULES:",
-                "- Start with a search marker showing what you searched: <start_search>{query}<end_search>",
+                "- Follow the ReAct format: Thought, Action, Observation",
+                "- Start with: Thought: [your reasoning about what to do next]",
+                "- Then: Action: Search[{query}] (showing what you searched)",
+                "- Then: Observation: [information from retrieved documents]",
                 "- DO NOT hallucinate or invent information",
                 "- ONLY use information explicitly stated in the retrieved documents above",
                 "- If the documents do not contain relevant information, state: 'The retrieved documents do not contain relevant information'",
                 "- Cite which document you are using (e.g., 'According to [1]...')",
                 "",
                 f"Respond with EXACTLY ONE step in this format:",
-                f'"Step {step_num}: <start_search>{query}<end_search>"',
-                f'"[your reasoning based ONLY on the documents]"',
+                f'"Step {step_num}:"',
+                f'"Thought: [your thought about needing to search]"',
+                f'"Action: Search[{query}]"',
+                f'"Observation: [reasoning based ONLY on the documents]"',
                 "",
                 'If this is your final step, include: "Final Answer: [your answer]"',
                 "",
@@ -589,15 +594,20 @@ class AdaptiveTrajectoryGenerator:
                 "Continue solving the question using the retrieved documents.",
                 "",
                 "IMPORTANT RULES:",
-                "- Start with a search marker showing what you searched: <start_search>{query}<end_search>",
+                "- Follow the ReAct format: Thought, Action, Observation",
+                "- Start with: Thought: [your reasoning about what to do next]",
+                "- Then: Action: Search[{query}] (showing what you searched)",
+                "- Then: Observation: [information from retrieved documents]",
                 "- DO NOT hallucinate or invent information",
                 "- ONLY use information explicitly stated in the retrieved documents above",
                 "- If the documents do not contain relevant information, state: 'The retrieved documents do not contain relevant information'",
                 "- Cite which document you are using (e.g., 'According to [1]...')",
                 "",
                 f"Respond with EXACTLY ONE step in this format:",
-                f'"Step {step_num}: <start_search>{query}<end_search>"',
-                f'"[your reasoning based ONLY on the documents]"',
+                f'"Step {step_num}:"',
+                f'"Thought: [your thought about needing to search]"',
+                f'"Action: Search[{query}]"',
+                f'"Observation: [reasoning based ONLY on the documents]"',
                 "",
                 'If this is your final step, include: "Final Answer: [your answer]"',
                 "",

@@ -56,19 +56,18 @@ def load_validation_data(data_dir: Path, limit: int = None):
 
 
 def validate_rag_step_format(step_content: str, step_type: str) -> Dict[str, Any]:
-    """Validate if RAG step follows the required format.
+    """Validate if RAG step follows the required ReAct format.
 
     Checks for:
-    1. <start_search>query</end_search> tags
-    2. <document> tags (should be in passages, not step content)
-    3. Citation format (e.g., "According to [1]", "Based on [2]")
-    4. No hallucination markers
+    1. Action: Search[query] format
+    2. Citation format (e.g., "According to [1]", "Based on [2]")
+    3. Thought and Observation components (optional but recommended)
 
     Returns:
         Dict with validation results
     """
     validation = {
-        'has_search_tags': False,
+        'has_search_tags': False,  # Renamed but kept for compatibility; now checks Action
         'has_citations': False,
         'search_query': None,
         'num_citations': 0,
@@ -78,11 +77,11 @@ def validate_rag_step_format(step_content: str, step_type: str) -> Dict[str, Any
     if step_type != 'rag':
         return validation
 
-    # Check for <start_search> tags (note: <end_search> not </end_search>)
-    search_match = re.search(r'<start_search>(.*?)<end_search>', step_content, re.DOTALL)
-    if search_match:
-        validation['has_search_tags'] = True
-        validation['search_query'] = search_match.group(1).strip()
+    # Check for Action: Search[query] format (ReAct style)
+    action_match = re.search(r'Action:?\s*Search\s*\[\s*["\']?(.+?)["\']?\s*\]', step_content, re.IGNORECASE | re.DOTALL)
+    if action_match:
+        validation['has_search_tags'] = True  # Keep name for backward compatibility
+        validation['search_query'] = action_match.group(1).strip()
 
     # Check for citations: [1], [2], etc.
     citation_matches = re.findall(r'\[(\d+)\]', step_content)

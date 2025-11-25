@@ -41,14 +41,16 @@ class StepForcingPrompt:
         """
         prompt = f"""Question: {question}
 
-Please solve this problem step by step. When you reach the final answer, format your last step as:
-"Step N: [reasoning] Final Answer: [write the complete answer here]"
+Please solve this problem step by step. For each step, start with "Thought:" followed by your reasoning.
+
+When you reach the final answer, format your last step as:
+"Step N: Thought: [reasoning] Final Answer: [write the complete answer here]"
 
 IMPORTANT: After "Final Answer:", you MUST write the actual answer. Do not leave it blank.
 
 Start with:
 
-Step 1:"""
+Step 1: Thought:"""
 
         if context:
             prompt = f"""Question: {question}
@@ -56,14 +58,16 @@ Step 1:"""
 Context:
 {context}
 
-Please solve this problem step by step using the provided context. When you reach the final answer, format your last step as:
-"Step N: [reasoning] Final Answer: [write the complete answer here]"
+Please solve this problem step by step using the provided context. For each step, start with "Thought:" followed by your reasoning.
+
+When you reach the final answer, format your last step as:
+"Step N: Thought: [reasoning] Final Answer: [write the complete answer here]"
 
 IMPORTANT: After "Final Answer:", you MUST write the actual answer. Do not leave it blank.
 
 Start with:
 
-Step 1:"""
+Step 1: Thought:"""
 
         return prompt
 
@@ -92,15 +96,17 @@ Step 1:"""
 
 {steps_text}
 
-Continue solving. You MUST respond with EXACTLY ONE step in this format:
-"Step {next_step_num}: [your reasoning]"
+Continue solving. Start your next step with "Thought:" followed by your reasoning.
+
+You MUST respond with EXACTLY ONE step in this format:
+"Step {next_step_num}: Thought: [your reasoning]"
 
 If this is your final step, include: "Final Answer: [write the complete answer here]"
 IMPORTANT: After "Final Answer:", you MUST write the actual answer. Do not leave it blank.
 
 Do NOT write multiple steps. Write ONLY Step {next_step_num}.
 
-Step {next_step_num}:"""
+Step {next_step_num}: Thought:"""
 
         if context:
             prompt = f"""Question: {question}
@@ -110,15 +116,17 @@ Step {next_step_num}:"""
 Retrieved Information:
 {context}
 
-Continue solving using the retrieved information. You MUST respond with EXACTLY ONE step in this format:
-"Step {next_step_num}: [your reasoning]"
+Continue solving using the retrieved information. Start your next step with "Thought:" followed by your reasoning.
+
+You MUST respond with EXACTLY ONE step in this format:
+"Step {next_step_num}: Thought: [your reasoning]"
 
 If this is your final step, include: "Final Answer: [write the complete answer here]"
 IMPORTANT: After "Final Answer:", you MUST write the actual answer. Do not leave it blank.
 
 Do NOT write multiple steps. Write ONLY Step {next_step_num}.
 
-Step {next_step_num}:"""
+Step {next_step_num}: Thought:"""
 
         return prompt
 
@@ -155,6 +163,14 @@ class StepParser:
                                re.MULTILINE | re.DOTALL)
     SINGLE_STEP_PATTERN = re.compile(r'^Step\s+(\d+):\s*(.+)$',
                                        re.MULTILINE | re.DOTALL)
+
+    # ReAct format patterns
+    THOUGHT_PATTERN = re.compile(r'Thought:?\s*(.+?)(?=\n(?:Action|Observation|Final\s+Answer|$))',
+                                  re.IGNORECASE | re.DOTALL)
+    ACTION_PATTERN = re.compile(r'Action:?\s*(.+?)(?=\n(?:Observation|Thought|Final\s+Answer|$))',
+                                 re.IGNORECASE | re.DOTALL)
+    OBSERVATION_PATTERN = re.compile(r'Observation:?\s*(.+?)(?=\n(?:Thought|Action|Final\s+Answer|Step\s+\d+:|$))',
+                                      re.IGNORECASE | re.DOTALL)
 
     @staticmethod
     def parse_steps(text: str) -> List[ForcedStep]:
@@ -217,6 +233,63 @@ class StepParser:
         # Otherwise, assume the entire text is the step content
         # (model continued directly from "Step N:" prompt)
         return text if text else None
+
+    @staticmethod
+    def parse_react_components(text: str) -> Dict[str, Optional[str]]:
+        """Parse ReAct format components from step content.
+
+        Args:
+            text: Step content that may contain Thought, Action, Observation
+
+        Returns:
+            Dict with keys 'thought', 'action', 'observation' (values may be None)
+        """
+        result = {
+            'thought': None,
+            'action': None,
+            'observation': None
+        }
+
+        # Try to extract Thought
+        thought_match = StepParser.THOUGHT_PATTERN.search(text)
+        if thought_match:
+            result['thought'] = thought_match.group(1).strip()
+
+        # Try to extract Action (e.g., "Search[query]" or "Finish[answer]")
+        action_match = StepParser.ACTION_PATTERN.search(text)
+        if action_match:
+            result['action'] = action_match.group(1).strip()
+
+        # Try to extract Observation
+        obs_match = StepParser.OBSERVATION_PATTERN.search(text)
+        if obs_match:
+            result['observation'] = obs_match.group(1).strip()
+
+        return result
+
+    @staticmethod
+    def extract_search_query(action_text: str) -> Optional[str]:
+        """Extract search query from Action text.
+
+        Examples:
+            "Search[Kiss and Tell actress]" → "Kiss and Tell actress"
+            "Search[\"some query\"]" → "some query"
+
+        Args:
+            action_text: Action field text
+
+        Returns:
+            Extracted query or None
+        """
+        if not action_text:
+            return None
+
+        # Pattern: Search[query] or Search["query"]
+        match = re.search(r'Search\s*\[\s*["\']?(.+?)["\']?\s*\]', action_text, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+
+        return None
 
     @staticmethod
     def extract_final_answer(text: str) -> Optional[str]:
