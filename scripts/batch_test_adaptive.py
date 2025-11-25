@@ -115,7 +115,29 @@ def format_trajectory_for_review(trajectory, question_data: Dict[str, Any]) -> D
             'rpe': round(step.rpe, 3),
             'label': step.label,
             'is_rag': step.step_type.value == 'rag',
+
+            # === NEW PRM-RAG fields ===
+            # ReAct-style decomposition
+            'thought': getattr(step, 'thought', None),
+            'action': getattr(step, 'action', None).value if hasattr(step, 'action') and step.action else None,
+            'action_input': getattr(step, 'action_input', None),
+            'observation': getattr(step, 'observation', None),
+
+            # Retrieval info
+            'retrieval_query': getattr(step, 'retrieval_query', None),
+
+            # Counterfactual comparison
+            'counterfactual_mc_cot': round(step.counterfactual_mc_cot, 3) if getattr(step, 'counterfactual_mc_cot', None) is not None else None,
+            'counterfactual_mc_rag': round(step.counterfactual_mc_rag, 3) if getattr(step, 'counterfactual_mc_rag', None) is not None else None,
+
+            # Fine-grained labels
+            'retrieval_necessity': getattr(step, 'retrieval_necessity', None).value if hasattr(step, 'retrieval_necessity') and step.retrieval_necessity else None,
+            'confidence': round(step.confidence, 3) if getattr(step, 'confidence', None) is not None else None,
         }
+
+        # Add retrieval evidence if available
+        if hasattr(step, 'retrieval_evidence') and step.retrieval_evidence:
+            step_info['retrieval_evidence'] = step.retrieval_evidence.to_dict()
 
         if step_info['is_rag']:
             step_info['num_passages'] = len(step.used_passages)
