@@ -85,37 +85,37 @@ def extract_answer_from_text(text: str) -> str:
 
     # Pattern 1: "Answer: ..." or "The answer is ..."
     # Now allows commas in numbers and captures complete answers with units
-    # Stops at: period/semicolon OR connector words (because, since, etc.)
-    # BUT allows commas in numbers like "3,677"
+    # Stops at: sentence boundary (period + space + capital) OR connector words
+    # BUT allows commas in numbers like "3,677" AND abbreviations like "Dr.", "Mr.", "O."
+    # Sentence boundary = ". " + capital, BUT NOT if preceded by single capital (abbreviation)
+    # NOTE: Removed "as" from stopping words - too common ("served as", "known as", etc.)
     answer_patterns = [
         # "Final Answer: 3,677 seated" → "3,677 seated"
-        # Stops at period or connector words, but allows commas
-        r'(?:final\s+)?answer\s*(?:is)?\s*:?\s*([^.;]+?)(?:[.;]|\s+(?:because|since|as|which|that)\s+|$)',
+        # Captures until: ". " followed by capital (but NOT single-letter abbreviations like "O."), OR connector words
+        # Negative lookbehind (?<![A-Z]) ensures single capital + "." is not treated as sentence boundary
+        r'(?:final\s+)?answer\s*(?:is)?\s*:?\s*(.+?)(?:(?<![A-Z])\.(?=\s+[A-Z])|[;]|\s+(?:because|since|which|that)\s+|$)',
         # "Therefore, the answer is 3,677 seated" → "3,677 seated"
-        r'therefore,?\s+(?:the\s+answer\s+is\s*:?\s*)?([^.;]+?)(?:[.;]|\s+(?:because|since|as|which|that)\s+|$)',
+        r'therefore,?\s+(?:the\s+answer\s+is\s*:?\s*)?(.+?)(?:(?<![A-Z])\.(?=\s+[A-Z])|[;]|\s+(?:because|since|which|that)\s+|$)',
         # "In conclusion, 3,677 seated" → "3,677 seated"
-        r'(?:in\s+)?conclusion,?\s+([^.;]+?)(?:[.;]|\s+(?:because|since|as|which|that)\s+|$)',
+        r'(?:in\s+)?conclusion,?\s+(.+?)(?:(?<![A-Z])\.(?=\s+[A-Z])|[;]|\s+(?:because|since|which|that)\s+|$)',
         # "The answer is 3,677 seated" → "3,677 seated"
-        r'the\s+answer\s+is\s+\(?([^.;)]+?)\)?(?:[.;]|\s+(?:because|since|as|which|that)\s+|$)',
+        r'the\s+answer\s+is\s+\(?(.+?)\)?(?:(?<![A-Z])\.(?=\s+[A-Z])|[;]|\s+(?:because|since|which|that)\s+|$)',
     ]
 
     for pattern in answer_patterns:
-        match = re.search(pattern, text.lower())
+        # Use case-insensitive flag instead of .lower() to preserve case for look-ahead
+        match = re.search(pattern, text, re.IGNORECASE)
         if match:
             answer = match.group(1).strip()
             # Remove parentheses and extra whitespace
             answer = re.sub(r'[()]', '', answer).strip()
 
-            # Post-process: trim at "and", "or", "but" if they appear
-            # (but not if they're part of the answer itself)
-            for connector in [' and ', ' or ', ' but ']:
-                if connector in answer.lower():
-                    parts = answer.lower().split(connector, 1)
-                    # Only split if the first part looks like a complete answer
-                    # (has at least 1 word)
-                    if len(parts[0].strip().split()) >= 1:
-                        answer = parts[0].strip()
-                        break
+            # Clean up trailing period if present (but keep periods in abbreviations)
+            answer = answer.rstrip('.')
+
+            # Note: Removed post-processing split at "and"/"or"/"but" - these are too common
+            # in legitimate answers (e.g., "Health and Scientific Affairs", "cats or dogs")
+            # The regex patterns already handle subordinate clauses with "which", "that", etc.
 
             return answer
 
@@ -131,9 +131,13 @@ def extract_answer_from_text(text: str) -> str:
         # If first sentence is too long, take up to first connector
         if len(first_sent.split()) > 10:
             # Split at connectors but keep numerical commas
-            for connector in [' because ', ' since ', ' as ', ' which ', ' that ']:
-                if connector in first_sent.lower():
-                    first_sent = first_sent.lower().split(connector, 1)[0].strip()
+            # Removed "as" - too common in normal phrases ("served as", "known as", etc.)
+            for connector in [' because ', ' since ', ' which ', ' that ']:
+                lower_sent = first_sent.lower()
+                if connector in lower_sent:
+                    # Find position in lowercase, but split original to preserve case
+                    pos = lower_sent.find(connector)
+                    first_sent = first_sent[:pos].strip()
                     break
         return first_sent
 
