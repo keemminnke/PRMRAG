@@ -2,11 +2,12 @@
 """Batch test adaptive pipeline on multiple questions to analyze RAG effectiveness.
 
 This script:
-1. Tests N questions from HotpotQA validation set
+1. Tests N questions from HotpotQA dataset (train/validation/test split)
 2. Uses BeIR HotpotQA corpus with BGE-M3 embeddings
 3. Tracks which steps used RAG and which used CoT
 4. Saves detailed results for manual inspection
 5. Generates summary statistics including RAG effectiveness analysis
+6. Performs online RPE labeling (MC estimation for each step)
 """
 
 import sys
@@ -25,17 +26,18 @@ from prmrag.retrieval.bge_retriever import BGERetriever
 import re
 
 
-def load_validation_data(data_dir: Path, limit: int = None):
-    """Load validation questions and BeIR HotpotQA corpus.
+def load_data(data_dir: Path, split: str = "validation", limit: int = None):
+    """Load questions and BeIR HotpotQA corpus.
 
     Args:
         data_dir: Data directory
+        split: Data split to use ("train", "validation", or "test")
         limit: Limit number of questions
 
     Returns:
         Tuple of (questions, corpus)
     """
-    questions_file = data_dir / "raw" / "questions" / "hotpotqa_validation.jsonl"
+    questions_file = data_dir / "raw" / "questions" / f"hotpotqa_{split}.jsonl"
     corpus_file = data_dir / "raw" / "beir_hotpotqa_corpus.jsonl"
 
     # Load questions
@@ -204,13 +206,20 @@ def main():
         "--start-idx",
         type=int,
         default=0,
-        help="Starting index in validation set (default: 0)",
+        help="Starting index in dataset (default: 0)",
+    )
+    parser.add_argument(
+        "--split",
+        type=str,
+        default="train",
+        choices=["train", "validation", "test"],
+        help="Dataset split to use (default: train)",
     )
     parser.add_argument(
         "--num-rollouts",
         type=int,
         default=8,
-        help="Number of MC rollouts (default: 5)",
+        help="Number of MC rollouts (default: 8)",
     )
     parser.add_argument(
         "--output-dir",
@@ -230,6 +239,7 @@ def main():
     print("BATCH TEST: Adaptive MC-CoT + RAG Pipeline (Full Wiki)")
     print("=" * 70)
     print(f"\nConfiguration:")
+    print(f"  - Data split: {args.split}")
     print(f"  - Number of questions: {args.num_questions}")
     print(f"  - Starting index: {args.start_idx}")
     print(f"  - MC rollouts: {args.num_rollouts}")
@@ -240,11 +250,12 @@ def main():
     config_path = Path("configs/adaptive_generation.yaml")
     config = load_config(config_path)
 
-    # Load validation data
-    print(f"\n[1] Loading Full Wiki corpus...")
+    # Load data
+    print(f"\n[1] Loading {args.split} split and Full Wiki corpus...")
     data_dir = Path(__file__).parent.parent / "data"
-    questions, corpus = load_validation_data(
+    questions, corpus = load_data(
         data_dir,
+        split=args.split,
         limit=args.start_idx + args.num_questions
     )
     questions = questions[args.start_idx:args.start_idx + args.num_questions]
