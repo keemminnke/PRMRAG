@@ -88,18 +88,20 @@ def extract_answer_from_text(text: str) -> str:
     # Stops at: sentence boundary (period + space + capital) OR connector words
     # BUT allows commas in numbers like "3,677" AND abbreviations like "Dr.", "Mr.", "O."
     # Sentence boundary = ". " + capital, BUT NOT if preceded by single capital (abbreviation)
-    # NOTE: Removed "as" from stopping words - too common ("served as", "known as", etc.)
+    # NOTE: Removed "as", "which", "that" from stopping words
+    #       - "as" too common: "served as", "known as"
+    #       - "which", "that" are relative pronouns: "the car which won", "track that hosts"
     answer_patterns = [
         # "Final Answer: 3,677 seated" → "3,677 seated"
         # Captures until: ". " followed by capital (but NOT single-letter abbreviations like "O."), OR connector words
         # Negative lookbehind (?<![A-Z]) ensures single capital + "." is not treated as sentence boundary
-        r'(?:final\s+)?answer\s*(?:is)?\s*:?\s*(.+?)(?:(?<![A-Z])\.(?=\s+[A-Z])|[;]|\s+(?:because|since|which|that)\s+|$)',
+        r'(?:final\s+)?answer\s*(?:is)?\s*:?\s*(.+?)(?:(?<![A-Z])\.(?=\s+[A-Z])|[;]|\s+(?:because|since)\s+|$)',
         # "Therefore, the answer is 3,677 seated" → "3,677 seated"
-        r'therefore,?\s+(?:the\s+answer\s+is\s*:?\s*)?(.+?)(?:(?<![A-Z])\.(?=\s+[A-Z])|[;]|\s+(?:because|since|which|that)\s+|$)',
+        r'therefore,?\s+(?:the\s+answer\s+is\s*:?\s*)?(.+?)(?:(?<![A-Z])\.(?=\s+[A-Z])|[;]|\s+(?:because|since)\s+|$)',
         # "In conclusion, 3,677 seated" → "3,677 seated"
-        r'(?:in\s+)?conclusion,?\s+(.+?)(?:(?<![A-Z])\.(?=\s+[A-Z])|[;]|\s+(?:because|since|which|that)\s+|$)',
+        r'(?:in\s+)?conclusion,?\s+(.+?)(?:(?<![A-Z])\.(?=\s+[A-Z])|[;]|\s+(?:because|since)\s+|$)',
         # "The answer is 3,677 seated" → "3,677 seated"
-        r'the\s+answer\s+is\s+\(?(.+?)\)?(?:(?<![A-Z])\.(?=\s+[A-Z])|[;]|\s+(?:because|since|which|that)\s+|$)',
+        r'the\s+answer\s+is\s+\(?(.+?)\)?(?:(?<![A-Z])\.(?=\s+[A-Z])|[;]|\s+(?:because|since)\s+|$)',
     ]
 
     for pattern in answer_patterns:
@@ -131,8 +133,8 @@ def extract_answer_from_text(text: str) -> str:
         # If first sentence is too long, take up to first connector
         if len(first_sent.split()) > 10:
             # Split at connectors but keep numerical commas
-            # Removed "as" - too common in normal phrases ("served as", "known as", etc.)
-            for connector in [' because ', ' since ', ' which ', ' that ']:
+            # Removed "as", "which", "that" - too common as relative pronouns
+            for connector in [' because ', ' since ']:
                 lower_sent = first_sent.lower()
                 if connector in lower_sent:
                     # Find position in lowercase, but split original to preserve case
