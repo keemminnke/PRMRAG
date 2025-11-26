@@ -6,6 +6,11 @@ import numpy as np
 
 from .base_labeler import BaseLabeler
 from ..data.schemas import Trajectory, RPELabel, LabelType
+from ..utils.answer_utils import (
+    extract_answer_from_text,
+    normalize_answer,
+    check_answer_match,
+)
 
 
 class RPELabeler(BaseLabeler):
@@ -240,23 +245,7 @@ class RPELabeler(BaseLabeler):
         Returns:
             Extracted answer
         """
-        import re
-
-        # Try to extract answer from common patterns
-        patterns = [
-            r'(?:final\s+)?answer\s*(?:is)?\s*:?\s*([^.;]+?)(?:[.;]|$)',
-            r'therefore,?\s+(?:the\s+answer\s+is\s*:?\s*)?([^.;]+?)(?:[.;]|$)',
-            r'the\s+answer\s+is\s+\(?([^.;)]+?)\)?(?:[.;]|$)',
-        ]
-
-        for pattern in patterns:
-            match = re.search(pattern, response.lower())
-            if match:
-                return match.group(1).strip()
-
-        # Fallback: return first sentence
-        sentences = re.split(r'[.!?]\s+', response)
-        return sentences[0].strip() if sentences else response.strip()
+        return extract_answer_from_text(response)
 
     def _check_answer(self, predicted: str, gold: str) -> bool:
         """Check if predicted answer matches gold answer.
@@ -266,13 +255,16 @@ class RPELabeler(BaseLabeler):
             gold: Gold answer
 
         Returns:
-            True if match
+            True if match (>=50% token overlap)
         """
-        # Simple normalized match
-        pred_normalized = predicted.strip().lower()
-        gold_normalized = gold.strip().lower()
+        pred_extracted = extract_answer_from_text(predicted)
+        gold_extracted = extract_answer_from_text(gold)
 
-        return pred_normalized == gold_normalized or gold_normalized in pred_normalized
+        pred_norm = normalize_answer(pred_extracted)
+        gold_norm = normalize_answer(gold_extracted)
+
+        # Check match with 50% threshold (more lenient for RPE)
+        return check_answer_match(pred_norm, gold_norm, threshold=0.5)
 
     def label_batch(
         self,

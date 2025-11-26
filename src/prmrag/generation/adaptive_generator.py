@@ -13,11 +13,13 @@ from enum import Enum
 import numpy as np
 from tqdm import tqdm
 import re
-import string
-from collections import Counter
 
 from ..data.schemas import ActionType
-from ..retrieval import BM25Retriever
+from ..utils.answer_utils import (
+    normalize_answer,
+    extract_answer_from_text,
+    check_answer_match,
+)
 from .step_forcing import (
     ForcedStep,
     StepForcingPrompt,
@@ -25,167 +27,6 @@ from .step_forcing import (
     MultiPathSampler,
     format_trajectory_with_steps,
 )
-
-
-# ============================================================================
-# SQuAD-style Answer Normalization and Matching
-# ============================================================================
-
-def normalize_answer(text: str) -> str:
-    """Normalize answer text using SQuAD-style normalization.
-
-    This is the standard normalization used in RAG/QA papers for datasets like
-    HotpotQA, Natural Questions, TriviaQA.
-
-    Steps:
-    1. Lowercase
-    2. Remove articles (a, an, the)
-    3. Remove punctuation
-    4. Remove extra whitespace
-
-    Args:
-        text: Raw answer text
-
-    Returns:
-        Normalized answer text
-    """
-    # Lowercase
-    text = text.lower()
-
-    # Remove articles
-    text = re.sub(r'\b(a|an|the)\b', ' ', text)
-
-    # Remove punctuation
-    text = text.translate(str.maketrans('', '', string.punctuation))
-
-    # Remove extra whitespace
-    text = ' '.join(text.split())
-
-    return text.strip()
-
-
-def extract_answer_from_text(text: str) -> str:
-    """Extract answer part from model output.
-
-    Common patterns in RAG outputs:
-    - "Answer: ..."
-    - "The answer is ..."
-    - "(answer)" or "answer."
-    - First sentence
-
-    Handles numbers with commas (e.g., "3,677 seated") and units.
-
-    Args:
-        text: Model output text
-
-    Returns:
-        Extracted answer (concise, stopping at sentence boundaries or connectors)
-    """
-    text = text.strip()
-
-    # Pattern 1: "Answer: ..." or "The answer is ..."
-    # Now allows commas in numbers and captures complete answers with units
-    # Stops at: sentence boundary (period + space + capital) OR connector words
-    # BUT allows commas in numbers like "3,677" AND abbreviations like "Dr.", "Mr.", "O."
-    # Sentence boundary = ". " + capital, BUT NOT if preceded by single capital (abbreviation)
-    # NOTE: Removed "as", "which", "that" from stopping words
-    #       - "as" too common: "served as", "known as"
-    #       - "which", "that" are relative pronouns: "the car which won", "track that hosts"
-    answer_patterns = [
-        # "Final Answer: 3,677 seated" → "3,677 seated"
-        # Captures until: ". " followed by capital (but NOT single-letter abbreviations like "O."), OR connector words
-        # Negative lookbehind (?<![A-Z]) ensures single capital + "." is not treated as sentence boundary
-        r'(?:final\s+)?answer\s*(?:is)?\s*:?\s*(.+?)(?:(?<![A-Z])\.(?=\s+[A-Z])|[;]|\s+(?:because|since)\s+|$)',
-        # "Therefore, the answer is 3,677 seated" → "3,677 seated"
-        r'therefore,?\s+(?:the\s+answer\s+is\s*:?\s*)?(.+?)(?:(?<![A-Z])\.(?=\s+[A-Z])|[;]|\s+(?:because|since)\s+|$)',
-        # "In conclusion, 3,677 seated" → "3,677 seated"
-        r'(?:in\s+)?conclusion,?\s+(.+?)(?:(?<![A-Z])\.(?=\s+[A-Z])|[;]|\s+(?:because|since)\s+|$)',
-        # "The answer is 3,677 seated" → "3,677 seated"
-        r'the\s+answer\s+is\s+\(?(.+?)\)?(?:(?<![A-Z])\.(?=\s+[A-Z])|[;]|\s+(?:because|since)\s+|$)',
-    ]
-
-    for pattern in answer_patterns:
-        # Use case-insensitive flag instead of .lower() to preserve case for look-ahead
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            answer = match.group(1).strip()
-            # Remove parentheses and extra whitespace
-            answer = re.sub(r'[()]', '', answer).strip()
-
-            # Clean up trailing period if present (but keep periods in abbreviations)
-            answer = answer.rstrip('.')
-
-            # Note: Removed post-processing split at "and"/"or"/"but" - these are too common
-            # in legitimate answers (e.g., "Health and Scientific Affairs", "cats or dogs")
-            # The regex patterns already handle subordinate clauses with "which", "that", etc.
-
-            return answer
-
-    # Pattern 2: Check for content in parentheses at the end
-    paren_match = re.search(r'\(([^)]+)\)[.,;]?\s*$', text)
-    if paren_match:
-        return paren_match.group(1).strip()
-
-    # Pattern 3: Take first sentence as fallback, but limit length
-    sentences = re.split(r'[.!?]\s+', text)
-    if sentences:
-        first_sent = sentences[0].strip()
-        # If first sentence is too long, take up to first connector
-        if len(first_sent.split()) > 10:
-            # Split at connectors but keep numerical commas
-            # Removed "as", "which", "that" - too common as relative pronouns
-            for connector in [' because ', ' since ']:
-                lower_sent = first_sent.lower()
-                if connector in lower_sent:
-                    # Find position in lowercase, but split original to preserve case
-                    pos = lower_sent.find(connector)
-                    first_sent = first_sent[:pos].strip()
-                    break
-        return first_sent
-
-    return text
-
-
-def compute_f1(predicted: str, gold: str) -> float:
-    """Compute token-level F1 score (SQuAD-style).
-
-    Args:
-        predicted: Predicted answer (normalized)
-        gold: Gold answer (normalized)
-
-    Returns:
-        F1 score (0.0 to 1.0)
-    """
-    pred_tokens = predicted.split()
-    gold_tokens = gold.split()
-
-    if len(pred_tokens) == 0 or len(gold_tokens) == 0:
-        return int(pred_tokens == gold_tokens)
-
-    common = Counter(pred_tokens) & Counter(gold_tokens)
-    num_common = sum(common.values())
-
-    if num_common == 0:
-        return 0.0
-
-    precision = num_common / len(pred_tokens)
-    recall = num_common / len(gold_tokens)
-    f1 = 2 * precision * recall / (precision + recall)
-
-    return f1
-
-
-def compute_em(predicted: str, gold: str) -> bool:
-    """Compute exact match (SQuAD-style).
-
-    Args:
-        predicted: Predicted answer (normalized)
-        gold: Gold answer (normalized)
-
-    Returns:
-        True if exact match
-    """
-    return predicted == gold
 
 
 class StepType(str, Enum):
@@ -273,14 +114,14 @@ class AdaptiveTrajectoryGenerator:
     def __init__(
         self,
         policy_model,           # Small model for CoT generation
-        retriever: BM25Retriever,
+        retriever,              # Any retriever with retrieve() method
         config: Dict[str, Any],
     ):
         """Initialize adaptive trajectory generator.
 
         Args:
             policy_model: Model for generating CoT steps
-            retriever: BM25 retriever for RAG
+            retriever: Retriever for RAG (BGE, BM25, or Hybrid)
             config: Configuration dict with:
                 - num_rollouts: Number of MC rollouts
                 - max_steps: Maximum steps per trajectory
@@ -1096,31 +937,15 @@ class AdaptiveTrajectoryGenerator:
         Returns:
             True if token accuracy >= 0.8
         """
-        # Extract answer parts first
+        # Extract and normalize
         pred_extracted = extract_answer_from_text(predicted)
         gold_extracted = extract_answer_from_text(gold)
 
-        # Normalize both
         pred_norm = normalize_answer(pred_extracted)
         gold_norm = normalize_answer(gold_extracted)
 
-        # Exact match - always accept
-        if compute_em(pred_norm, gold_norm):
-            return True
-
-        # Token-level accuracy: what % of gold tokens are in prediction?
-        gold_tokens = gold_norm.split()
-        pred_tokens = pred_norm.split()
-
-        if not gold_tokens:  # Edge case: empty gold
-            return False
-
-        # Count how many gold tokens appear in prediction
-        matches = sum(1 for token in gold_tokens if token in pred_tokens)
-        accuracy = matches / len(gold_tokens)
-
-        # Accept if >= 80% of gold tokens are present
-        return accuracy >= 0.8
+        # Check match with 80% threshold
+        return check_answer_match(pred_norm, gold_norm, threshold=0.8)
 
     def _format_cot_prompt(self, state: Dict[str, Any]) -> str:
         """Format prompt for CoT generation."""
