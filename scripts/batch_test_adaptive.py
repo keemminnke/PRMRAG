@@ -22,8 +22,6 @@ from prmrag.models import load_policy_model
 from prmrag.utils import load_config
 from prmrag.generation.adaptive_generator import AdaptiveTrajectoryGenerator
 from prmrag.retrieval.bge_retriever import BGERetriever
-from prmrag.retrieval.bm25_retriever import BM25Retriever
-from prmrag.retrieval.hybrid_retriever import HybridRetriever
 import re
 
 
@@ -257,37 +255,16 @@ def main():
     policy_model = load_policy_model(config['policy_model'])
     print("✓ Model loaded")
 
-    # Initialize Hybrid Retriever (BM25 + BGE-M3)
-    print(f"\n[3] Initializing Hybrid Retriever (BM25 + BGE-M3)...")
-
-    # Initialize BM25
-    print("  [3.1] Building BM25 index...")
-    bm25_cache = "data/embeddings/beir_hotpotqa_bm25.pkl"
-    bm25_retriever = BM25Retriever(
-        corpus=corpus,
-        index_cache_path=bm25_cache
-    )
-
-    # Initialize BGE-M3
-    print("  [3.2] Loading BGE-M3 embeddings...")
+    # Initialize BGE-M3 retriever
+    print(f"\n[3] Initializing BGE-M3 retriever...")
     embedding_cache = "data/embeddings/beir_hotpotqa_bge_m3.npy"
-    bge_retriever = BGERetriever(
+
+    retriever = BGERetriever(
         corpus=corpus,
         batch_size=64,
         embedding_cache_path=embedding_cache
     )
-
-    # Create hybrid retriever with RRF fusion
-    print("  [3.3] Creating hybrid retriever with RRF...")
-    retriever = HybridRetriever(
-        bm25_retriever=bm25_retriever,
-        bge_retriever=bge_retriever,
-        fusion_method="rrf",  # Reciprocal Rank Fusion
-        k_sparse=50,          # Top-50 from BM25
-        k_dense=50,           # Top-50 from BGE
-        rrf_k=60,             # RRF constant
-    )
-    print(f"✓ Hybrid Retriever initialized")
+    print(f"✓ Retriever initialized")
 
     # Initialize adaptive generator
     print(f"\n[4] Initializing adaptive generator...")
