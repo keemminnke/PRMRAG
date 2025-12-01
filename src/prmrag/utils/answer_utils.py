@@ -76,11 +76,40 @@ def extract_answer_from_text(text: str) -> str:
     # 1) Explicit Final Answer (multi-line safe)
     final_match = re.search(r'final\s+answer\s*:?\s*(.+)', text, flags=re.IGNORECASE | re.DOTALL)
     if final_match:
-        remainder = final_match.group(1)
+        remainder = final_match.group(1).strip()
+
+        # Try to extract just the answer, not the explanation
+        # Stop at common explanation markers
+        explanation_markers = [
+            r'\s+(?:because|since|as|because of|due to|owing to|given that)\s+',
+            r'\s+(?:which|that|who|where|when)\s+',
+            r'[.,;]\s+(?:This|It|They|He|She|The)',  # New sentence starting
+        ]
+
+        for marker in explanation_markers:
+            match = re.search(marker, remainder, re.IGNORECASE)
+            if match:
+                remainder = remainder[:match.start()].strip()
+                break
+
+        # If still too long (> 15 words), take first sentence or phrase
+        words = remainder.split()
+        if len(words) > 15:
+            # Find first sentence-ending punctuation
+            sentence_match = re.search(r'^([^.!?]+)[.!?]', remainder)
+            if sentence_match:
+                remainder = sentence_match.group(1).strip()
+            else:
+                # Take first 10 words as fallback
+                remainder = ' '.join(words[:10])
+
+        # Handle multi-line: first non-empty line
         for line in remainder.splitlines():
             candidate = _clean_answer_span(line)
             if candidate:
                 return candidate
+
+        # Single line case
         candidate = _clean_answer_span(remainder)
         if candidate:
             return candidate

@@ -41,14 +41,7 @@ class StepForcingPrompt:
         """
         prompt = f"""Question: {question}
 
-Solve this step by step. For each step, start with "Thought:" followed by your reasoning.
-
-When you reach the final answer:
-"Step N: Thought: [reasoning] Final Answer: [your answer]"
-
-Start with:
-
-Step 1: Thought:"""
+Generate Step 1."""
 
         if context:
             prompt = f"""Question: {question}
@@ -56,14 +49,7 @@ Step 1: Thought:"""
 Context:
 {context}
 
-Solve this step by step using the provided context. Start each step with "Thought:".
-
-When you reach the final answer:
-"Step N: Thought: [reasoning] Final Answer: [your answer]"
-
-Start with:
-
-Step 1: Thought:"""
+Generate Step 1."""
 
         return prompt
 
@@ -92,14 +78,7 @@ Step 1: Thought:"""
 
 {steps_text}
 
-Continue solving. Respond with Step {next_step_num} only.
-
-Format:
-"Step {next_step_num}: Thought: [your reasoning]"
-
-If this is your final step, include: "Final Answer: [your answer]"
-
-Step {next_step_num}: Thought:"""
+Continue with Step {next_step_num}."""
 
         if context:
             prompt = f"""Question: {question}
@@ -109,14 +88,7 @@ Step {next_step_num}: Thought:"""
 Retrieved Information:
 {context}
 
-Continue solving using the retrieved information. Respond with Step {next_step_num} only.
-
-Format:
-"Step {next_step_num}: Thought: [your reasoning]"
-
-If this is your final step, include: "Final Answer: [your answer]"
-
-Step {next_step_num}: Thought:"""
+Continue with Step {next_step_num}."""
 
         return prompt
 
@@ -155,12 +127,14 @@ class StepParser:
                                        re.MULTILINE | re.DOTALL)
 
     # ReAct format patterns
-    THOUGHT_PATTERN = re.compile(r'Thought:?\s*(.+?)(?=\n(?:Action|Observation|Final\s+Answer|$))',
+    THOUGHT_PATTERN = re.compile(r'Thought:?\s*(.+?)(?=\n(?:Action|Observation|Sub-answer|Final\s+Answer|$))',
                                   re.IGNORECASE | re.DOTALL)
-    ACTION_PATTERN = re.compile(r'Action:?\s*(.+?)(?=\n(?:Observation|Thought|Final\s+Answer|$))',
+    ACTION_PATTERN = re.compile(r'Action:?\s*(.+?)(?=\n(?:Observation|Thought|Sub-answer|Final\s+Answer|$))',
                                  re.IGNORECASE | re.DOTALL)
-    OBSERVATION_PATTERN = re.compile(r'Observation:?\s*(.+?)(?=\n(?:Thought|Action|Final\s+Answer|Step\s+\d+:|$))',
+    OBSERVATION_PATTERN = re.compile(r'Observation:?\s*(.+?)(?=\n(?:Thought|Action|Sub-answer|Final\s+Answer|Step\s+\d+:|$))',
                                       re.IGNORECASE | re.DOTALL)
+    SUB_ANSWER_PATTERN = re.compile(r'Sub-answer:?\s*(.+?)(?=\n(?:Thought|Action|Observation|Final\s+Answer|Step\s+\d+:|$))',
+                                     re.IGNORECASE | re.DOTALL)
 
     @staticmethod
     def parse_steps(text: str) -> List[ForcedStep]:
@@ -229,15 +203,16 @@ class StepParser:
         """Parse ReAct format components from step content.
 
         Args:
-            text: Step content that may contain Thought, Action, Observation
+            text: Step content that may contain Thought, Action, Observation, Sub-answer
 
         Returns:
-            Dict with keys 'thought', 'action', 'observation' (values may be None)
+            Dict with keys 'thought', 'action', 'observation', 'sub_answer' (values may be None)
         """
         result = {
             'thought': None,
             'action': None,
-            'observation': None
+            'observation': None,
+            'sub_answer': None
         }
 
         # Try to extract Thought
@@ -254,6 +229,11 @@ class StepParser:
         obs_match = StepParser.OBSERVATION_PATTERN.search(text)
         if obs_match:
             result['observation'] = obs_match.group(1).strip()
+
+        # Try to extract Sub-answer
+        sub_answer_match = StepParser.SUB_ANSWER_PATTERN.search(text)
+        if sub_answer_match:
+            result['sub_answer'] = sub_answer_match.group(1).strip()
 
         return result
 

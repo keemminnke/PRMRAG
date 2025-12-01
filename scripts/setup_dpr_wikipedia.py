@@ -51,24 +51,13 @@ def download_and_convert_corpus(corpus_file: Path):
     # Note: We only need the text, not the DPR embeddings
     print("\n[1/2] Downloading corpus from HuggingFace...")
 
-    # Try different configs to get one without embeddings
-    try:
-        # Try to load without embeddings first
-        dataset = load_dataset(
-            "facebook/wiki_dpr",
-            "psgs_w100.nq.compressed",  # Compressed version, smaller download
-            split="train",
-            trust_remote_code=True
-        )
-    except Exception as e:
-        print(f"Failed to load compressed version: {e}")
-        print("Trying exact version...")
-        dataset = load_dataset(
-            "facebook/wiki_dpr",
-            "psgs_w100.nq.exact",
-            split="train",
-            trust_remote_code=True
-        )
+    # Use no_index.no_embeddings version (text only, no faiss, no embeddings)
+    dataset = load_dataset(
+        "facebook/wiki_dpr",
+        "psgs_w100.nq.no_index.no_embeddings",
+        split="train",
+        trust_remote_code=True
+    )
 
     print(f"✓ Loaded {len(dataset):,} passages")
 

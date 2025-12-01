@@ -34,33 +34,36 @@ def parse_rag_content(content: str) -> Dict[str, Optional[str]]:
 
     Expected format:
         Thought: <reasoning>
-        Action: Search[<query>] or Lookup[<term>]
+        Action: Search[query="..."] or Finish[answer="..."]
         Observation: <retrieved info>
+        Sub-answer: <intermediate answer>
 
     Returns:
-        Dict with keys: thought, action, action_input, observation
+        Dict with keys: thought, action, action_input, observation, sub_answer
     """
     result = {
         'thought': None,
         'action': None,
         'action_input': None,
         'observation': None,
+        'sub_answer': None,
     }
 
     # Parse Thought
-    thought_match = re.search(r'Thought:\s*(.+?)(?=\n(?:Action:|Observation:|$))', content, re.DOTALL | re.IGNORECASE)
+    thought_match = re.search(r'Thought:\s*(.+?)(?=\n(?:Action:|Observation:|Sub-answer:|$))', content, re.DOTALL | re.IGNORECASE)
     if thought_match:
         result['thought'] = thought_match.group(1).strip()
 
     # Parse Action and Action Input
-    action_match = re.search(r'Action:\s*(Search|Lookup)\[(.+?)\]', content, re.IGNORECASE)
+    # Match: Search[query="..."], Finish[answer="..."], or legacy Search[query]
+    action_match = re.search(r'Action:\s*(Search|Finish)\[(?:query=|answer=)?"?(.+?)"?\]', content, re.IGNORECASE)
     if action_match:
         result['action'] = action_match.group(1)
         result['action_input'] = action_match.group(2).strip()
 
     # Parse Observation
     # Match until next section or end of string
-    obs_match = re.search(r'Observation:\s*(.+?)(?=\n\s*(?:Thought:|Action:|Final Answer:)|$)', content, re.DOTALL | re.IGNORECASE)
+    obs_match = re.search(r'Observation:\s*(.+?)(?=\n\s*(?:Thought:|Action:|Sub-answer:|Final Answer:)|$)', content, re.DOTALL | re.IGNORECASE)
     if obs_match:
         result['observation'] = obs_match.group(1).strip()
     else:
@@ -68,6 +71,11 @@ def parse_rag_content(content: str) -> Dict[str, Optional[str]]:
         obs_match_simple = re.search(r'Observation:\s*(.+)', content, re.DOTALL | re.IGNORECASE)
         if obs_match_simple:
             result['observation'] = obs_match_simple.group(1).strip()
+
+    # Parse Sub-answer
+    sub_answer_match = re.search(r'Sub-answer:\s*(.+?)(?=\n\s*(?:Thought:|Action:|Final Answer:|Step\s+\d+:)|$)', content, re.DOTALL | re.IGNORECASE)
+    if sub_answer_match:
+        result['sub_answer'] = sub_answer_match.group(1).strip()
 
     return result
 
@@ -96,17 +104,12 @@ class AdaptiveStep:
     rpe: float                          # mc_after / mc_before
     label: Optional[str] = None         # RPE-based label: 'good' if rpe >= 0.8, 'bad' if rpe < 0.8
 
-    # Parsed structured fields (for RAG steps)
+    # Structured fields (for all steps)
     thought: Optional[str] = None       # Thought process
-    action: Optional[str] = None        # Legacy: "Search", "Lookup" for backward compatibility
-    action_input: Optional[str] = None  # Search query or lookup term
-    observation: Optional[str] = None   # Retrieved information summary
-
-    # Structured action space: a = (σ, δ)
-    # σ (termination_decision): whether to continue or terminate
-    termination_decision: str = "continue"  # "continue" | "terminate"
-    # δ (atomic_decision): whether to retrieve or use parametric knowledge
-    atomic_decision: str = "parametric"     # "retrieve" | "parametric"
+    action: str = "Reason"              # "Search" (RAG), "Reason" (CoT), "Finish" (final answer)
+    action_input: Optional[str] = None  # Search query (this IS the sub-query for RAG)
+    observation: Optional[str] = None   # Retrieved information summary (RAG only)
+    sub_answer: Optional[str] = None    # Intermediate answer extracted from observation
 
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -114,7 +117,7 @@ class AdaptiveStep:
         """Convert to dictionary."""
         return {
             'step_id': self.step_id,
-            'step_type': self.step_type.value,
+            'step_type': self.step_type.value,  # Keep for backward compatibility
             'text': self.text,
             'content': self.content,
             'used_passages': self.used_passages,
@@ -127,9 +130,7 @@ class AdaptiveStep:
             'action': self.action,
             'action_input': self.action_input,
             'observation': self.observation,
-            # Structured action space
-            'termination_decision': self.termination_decision,
-            'atomic_decision': self.atomic_decision,
+            'sub_answer': self.sub_answer,
             'metadata': self.metadata,
         }
 
@@ -285,11 +286,7 @@ class AdaptiveTrajectoryGenerator:
                     mc_after=mc_cot,
                     rpe=1.0,  # Dummy value, not used
                     label='good',
-                    # Legacy action field
                     action="Reason",
-                    # Structured action: a = (σ, δ)
-                    termination_decision="terminate" if has_answer else "continue",
-                    atomic_decision="parametric",
                     metadata={'accepted': 'cot_baseline', 'step1': True},
                 )
                 steps.append(step)
@@ -336,11 +333,7 @@ class AdaptiveTrajectoryGenerator:
                     mc_after=mc_cot,
                     rpe=rpe_cot,
                     label='good',
-                    # Legacy action field
                     action="Reason",
-                    # Structured action: a = (σ, δ)
-                    termination_decision="terminate" if has_answer else "continue",
-                    atomic_decision="parametric",
                     metadata={'accepted': 'cot', 'threshold': 0.8},
                 )
                 steps.append(step)
@@ -388,14 +381,10 @@ class AdaptiveTrajectoryGenerator:
                     label=label,
                     # Add parsed structured fields
                     thought=parsed_fields['thought'],
-                    action=parsed_fields['action'] if parsed_fields['action'] else "Search",  # Legacy
+                    action=parsed_fields['action'] if parsed_fields['action'] else "Search",
                     action_input=parsed_fields['action_input'],
                     observation=parsed_fields['observation'],
-                    # Structured action: a = (σ, δ)
-                    # σ: termination - based on Final Answer presence
-                    termination_decision="terminate" if has_answer else "continue",
-                    # δ: atomic - RAG step always performed retrieval
-                    atomic_decision="retrieve",  # Always "retrieve" for RAG steps (actual search was performed)
+                    sub_answer=parsed_fields['sub_answer'],
                     metadata={'accepted': 'rag', 'threshold': 0.8},
                 )
                 steps.append(step)
@@ -462,25 +451,14 @@ class AdaptiveTrajectoryGenerator:
         if step_num == 1:
             # Initial step with passages
             prompt_lines = [
-                f"## Question",
-                state['question'],
+                f"Question: {state['question']}",
                 "",
-                f"## Retrieved Documents",
+                f"Retrieved Documents:",
                 passage_text,
                 "",
-                f"## Task",
-                f"You searched for: {query}",
-                "Generate a reasoning step to answer the question using the retrieved documents above.",
+                f"Your search query was: {query}",
                 "",
-                f"Respond with Step {step_num} in ReAct format:",
-                f'"Step {step_num}:"',
-                f'"Thought: [your reasoning about the documents]"',
-                f'"Action: Search[{query}]"',
-                f'"Observation: [information from the documents with citations]"',
-                "",
-                'If this is your final step, include: "Final Answer: [your answer]"',
-                "",
-                f"Step {step_num}:"
+                f"Generate Step {step_num}."
             ]
         else:
             # Continuation step with passages
@@ -509,22 +487,12 @@ class AdaptiveTrajectoryGenerator:
                 prompt_lines.extend(previous_docs_section)
 
             prompt_lines.extend([
-                f"## Retrieved Documents (Current)",
+                f"Retrieved Documents (Current):",
                 passage_text,
                 "",
-                f"## Task",
-                f"You searched for: {query}",
-                "Continue solving the question using the retrieved documents above.",
+                f"Your search query was: {query}",
                 "",
-                f"Respond with Step {step_num} in ReAct format:",
-                f'"Step {step_num}:"',
-                f'"Thought: [your reasoning about the documents]"',
-                f'"Action: Search[{query}]"',
-                f'"Observation: [information from the documents with citations]"',
-                "",
-                'If this is your final step, include: "Final Answer: [your answer]"',
-                "",
-                f"Step {step_num}:"
+                f"Continue with Step {step_num}."
             ])
 
         prompt = "\n".join(prompt_lines)
@@ -941,21 +909,10 @@ class AdaptiveTrajectoryGenerator:
             lines.append("Reasoning so far:")
             for step_text in state['reasoning_history']:
                 lines.append(step_text)
-            lines.append("\nContinue solving this step by step.")
-            if state.get('current_passages'):
-                lines.append("Use the retrieved information above to support your answer.")
-            lines.append("Think carefully and show your reasoning.")
-            lines.append("At the end, provide your final answer in this format:")
-            lines.append('"Therefore, the answer is [your answer]."')
+            lines.append("")
+            lines.append("Continue solving and provide your final answer.")
         else:
-            lines.append("Let's solve this step by step:")
-            lines.append("1. Break down what the question is asking")
-            lines.append("2. Think through the problem carefully")
-            if state.get('current_passages'):
-                lines.append("3. Use the retrieved information above")
-            lines.append("3. Draw your conclusion")
-            lines.append("\nAt the end, provide your final answer in this format:")
-            lines.append('"Therefore, the answer is [your answer]."')
+            lines.append("Solve this question and provide your final answer.")
 
         return "\n".join(lines)
 

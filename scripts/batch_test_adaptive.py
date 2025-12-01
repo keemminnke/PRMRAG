@@ -117,24 +117,18 @@ def format_trajectory_for_review(trajectory, question_data: Dict[str, Any]) -> D
     for i, step in enumerate(trajectory.steps, 1):
         step_info = {
             'step_num': i,
-            'type': step.step_type.value,  # 'cot' or 'rag'
             'content': step.content,
             'mc_before': round(step.mc_before, 3),
             'mc_after': round(step.mc_after, 3),
             'rpe': round(step.rpe, 3),
             'label': step.label,
-            'is_rag': step.step_type.value == 'rag',
 
-            # === NEW PRM-RAG fields ===
-            # ReAct-style decomposition
+            # === ReAct structure ===
             'thought': getattr(step, 'thought', None),
-            'action': getattr(step, 'action', None),  # Legacy: "Search", "Lookup"
-            'action_input': getattr(step, 'action_input', None),
-            'observation': getattr(step, 'observation', None),
-
-            # Structured action space: a = (σ, δ)
-            'termination_decision': getattr(step, 'termination_decision', 'continue'),  # "continue" | "terminate"
-            'atomic_decision': getattr(step, 'atomic_decision', 'parametric'),  # "retrieve" | "parametric"
+            'action': getattr(step, 'action', 'Reason'),  # "Search" (RAG), "Reason" (CoT), "Finish" (final)
+            'action_input': getattr(step, 'action_input', None),  # Sub-query for RAG
+            'observation': getattr(step, 'observation', None),  # RAG only
+            'sub_answer': getattr(step, 'sub_answer', None),  # Intermediate answer
 
             # Retrieval info
             'retrieval_query': getattr(step, 'retrieval_query', None),
