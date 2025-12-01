@@ -1,329 +1,0 @@
-`torch_dtype` is deprecated! Use `dtype` instead!
-======================================================================
-BATCH TEST: Adaptive MC-CoT + RAG Pipeline (Full Wiki)
-======================================================================
-
-Configuration:
-  - Number of questions: 3
-  - Starting index: 0
-  - MC rollouts: 8
-  - Corpus: Full Wiki (5.23M)
-  - Output directory: outputs/batch_test
-
-[1] Loading Full Wiki corpus...
-✓ Loaded 3 questions and 5,233,329 corpus documents
-
-[2] Loading Qwen2.5-7B model...
-Loading policy model: Qwen/Qwen2.5-7B-Instruct
-Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  25%|██▌       | 1/4 [00:00<00:01,  2.11it/s]Loading checkpoint shards:  50%|█████     | 2/4 [00:00<00:00,  2.24it/s]Loading checkpoint shards:  75%|███████▌  | 3/4 [00:01<00:00,  2.28it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:01<00:00,  2.22it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:01<00:00,  2.22it/s]
-✓ Model loaded on cuda
-✓ Model loaded
-
-[3] Initializing BGE-M3 retriever...
-Loading BGE-M3 model on cuda...
-Fetching 30 files:   0%|          | 0/30 [00:00<?, ?it/s]Fetching 30 files: 100%|██████████| 30/30 [00:00<00:00, 15397.59it/s]
-✓ BGE-M3 model loaded
-Loading cached embeddings from data/embeddings/beir_hotpotqa_bge_m3.npy...
-✓ Loaded 5233329 cached embeddings
-✓ Retriever initialized
-
-[4] Initializing adaptive generator...
-✓ Generator initialized
-
-======================================================================
-PROCESSING 3 QUESTIONS
-======================================================================
-
-[1/3] Processing 5a8b57f25542995d1e6f1371...
-  Q: Were Scott Derrickson and Ed Wood of the same nationality?
-  Step 1: Always accepted as baseline (MC=1.000)
-  Step 1: Has 'Final Answer:' marker? False
-  Step 2: CoT RPE=0.619 < 0.8, trying RAG...
-    [QUERY DEBUG] Raw LLM response: nationality Scott Derrickson Ed Wood
-    [QUERY DEBUG] Extracted query: nationality Scott Derrickson Ed Wood
-    [RAG DEBUG] Query: nationality Scott Derrickson Ed Wood
-pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 1911.72it/s]
-You're using a XLMRobertaTokenizerFast tokenizer. Please note that with a fast tokenizer, using the `__call__` method is faster than using a method to encode the text followed by a call to the `pad` method to get a padded encoding.
-Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 66.07it/s]
-    [RAG DEBUG] Retrieved 5 passages, top title: Edward Scott (sportsman)
-    [RAG STEP DEBUG] Raw model response (first 200 chars): <start_search>nationality Scott Derrickson Ed Wood<end_search>
-According to [2], Ed Wood was an American filmmaker. According to [4], Scott Derrickson is an American director. Therefore, both Scott De
-    [RAG STEP DEBUG] Parsed content (first 200 chars): <start_search>nationality Scott Derrickson Ed Wood<end_search>
-According to [2], Ed Wood was an American filmmaker. According to [4], Scott Derrickson is an American director. Therefore, both Scott De
-    [MC DEBUG] Rollouts will use 5 retrieved passages
-    [MC DEBUG] MC=0.875 with 5 passages (successes: 7/8)
-  Step 2: RAG step added (RPE=0.866, label=good), checking for final answer...
-  Step 2: Has 'Final Answer:' marker? False
-    [MC DEBUG] Rollouts will use 5 retrieved passages
-    [MC DEBUG] MC=0.375 with 5 passages (successes: 3/8)
-  Step 3: CoT RPE=0.424 < 0.8, trying RAG...
-    [QUERY DEBUG] Raw LLM response: nationality Scott Derrickson
-    [QUERY DEBUG] Extracted query: nationality Scott Derrickson
-    [RAG DEBUG] Query: nationality Scott Derrickson
-pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 5315.97it/s]
-Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 72.36it/s]
-    [RAG DEBUG] Retrieved 5 passages, top title: Scott Derrickson
-    [RAG STEP DEBUG] Raw model response (first 200 chars): <start_search>nationality Scott Derrickson<end_search>
-According to [1], Scott Derrickson is an American director. Therefore, Scott Derrickson's nationality is American. Since Ed Wood was also America
-    [RAG STEP DEBUG] Parsed content (first 200 chars): <start_search>nationality Scott Derrickson<end_search>
-According to [1], Scott Derrickson is an American director. Therefore, Scott Derrickson's nationality is American. Since Ed Wood was also America
-    [MC DEBUG] Rollouts will use 10 retrieved passages
-    [MC DEBUG] MC=1.000 with 10 passages (successes: 8/8)
-  Step 3: RAG step added (RPE=1.130, label=good), checking for final answer...
-  Step 3: Has 'Final Answer:' marker? True
-  Step 3: ✓ Found final answer, terminating trajectory.
-  ✅ 3 steps (2 RAG steps) [Format: 2/2 (100%)]
-[2/3] Processing 5a8c7595554299585d9e36b6...
-  Q: What government position was held by the woman who portrayed Corliss Archer in t...
-    [MC DEBUG] MC=0.0! Gold: Chief of Protocol
-    [MC DEBUG] Sample rollouts: ['that demi moore', '[none]']
-  Step 1: Always accepted as baseline (MC=0.000)
-  Step 1: Has 'Final Answer:' marker? False
-    [MC DEBUG] MC=0.0! Gold: Chief of Protocol
-    [MC DEBUG] Sample rollouts: ['u', 'u']
-  Step 2: CoT RPE=0.000 < 0.8, trying RAG...
-    [QUERY DEBUG] Raw LLM response: Demi Moore government position
-    [QUERY DEBUG] Extracted query: Demi Moore government position
-    [RAG DEBUG] Query: Demi Moore government position
-pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 2389.92it/s]
-Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 72.04it/s]
-    [RAG DEBUG] Retrieved 5 passages, top title: Demi Moore
-    [RAG STEP DEBUG] Raw model response (first 200 chars): <start_search>Demi Moore government position<end_search>
-The retrieved documents do not contain any information regarding a government position held by Demi Moore. According to [1], Demi Moore is an A
-    [RAG STEP DEBUG] Parsed content (first 200 chars): <start_search>Demi Moore government position<end_search>
-The retrieved documents do not contain any information regarding a government position held by Demi Moore. According to [1], Demi Moore is an A
-    [MC DEBUG] Rollouts will use 5 retrieved passages
-    [MC DEBUG] MC=0.0! Gold: Chief of Protocol
-    [MC DEBUG] Sample rollouts: ['that demi moore did not hold any government positi', 'that there is no information provided indicating']
-  Step 2: RAG step added (RPE=0.000, label=bad), checking for final answer...
-  Step 2: Has 'Final Answer:' marker? False
-    [MC DEBUG] Rollouts will use 5 retrieved passages
-    [MC DEBUG] MC=0.0! Gold: Chief of Protocol
-    [MC DEBUG] Sample rollouts: ['that demi moore has not held any government positi', 'that demi moore has not held any government positi']
-  Step 3: CoT RPE=0.000 < 0.8, trying RAG...
-    [QUERY DEBUG] Raw LLM response: Demi Moore political career
-    [QUERY DEBUG] Extracted query: Demi Moore political career
-    [RAG DEBUG] Query: Demi Moore political career
-pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 3006.67it/s]
-Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 71.01it/s]
-    [RAG DEBUG] Retrieved 5 passages, top title: Demi Moore
-    [RAG STEP DEBUG] Raw model response (first 200 chars): <start_search>Demi Moore political career<end_search>
-The retrieved documents do not contain relevant information about Demi Moore holding any government position. Therefore, based on the given docume
-    [RAG STEP DEBUG] Parsed content (first 200 chars): <start_search>Demi Moore political career<end_search>
-The retrieved documents do not contain relevant information about Demi Moore holding any government position. Therefore, based on the given docume
-    [MC DEBUG] Rollouts will use 10 retrieved passages
-    [MC DEBUG] MC=0.0! Gold: Chief of Protocol
-    [MC DEBUG] Sample rollouts: ['based on the given information', 'that demi moore did not hold any government positi']
-  Step 3: RAG step added (RPE=0.000, label=bad), checking for final answer...
-  Step 3: Has 'Final Answer:' marker? False
-    [MC DEBUG] Rollouts will use 10 retrieved passages
-    [MC DEBUG] MC=0.0! Gold: Chief of Protocol
-    [MC DEBUG] Sample rollouts: ['that demi moore did not hold any government positi', 'that there is no indication']
-  Step 4: CoT RPE=0.000 < 0.8, trying RAG...
-    [QUERY DEBUG] Raw LLM response: Demi Moore political involvement
-    [QUERY DEBUG] Extracted query: Demi Moore political involvement
-    [RAG DEBUG] Query: Demi Moore political involvement
-pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 3701.95it/s]
-Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 70.75it/s]
-    [RAG DEBUG] Retrieved 5 passages, top title: Demi Moore
-    [RAG STEP DEBUG] Raw model response (first 200 chars): <start_search>Demi Moore political involvement<end_search>
-The retrieved documents do not contain relevant information about Demi Moore holding any government position. According to [1], Demi Moore is
-    [RAG STEP DEBUG] Parsed content (first 200 chars): <start_search>Demi Moore political involvement<end_search>
-The retrieved documents do not contain relevant information about Demi Moore holding any government position. According to [1], Demi Moore is
-    [MC DEBUG] Rollouts will use 15 retrieved passages
-    [MC DEBUG] MC=0.0! Gold: Chief of Protocol
-    [MC DEBUG] Sample rollouts: ['[demi moore did not hold any government position]', 'that demi moore did not hold any government positi']
-  Step 4: RAG step added (RPE=0.000, label=bad), checking for final answer...
-  Step 4: Has 'Final Answer:' marker? False
-    [MC DEBUG] Rollouts will use 15 retrieved passages
-    [MC DEBUG] MC=0.0! Gold: Chief of Protocol
-    [MC DEBUG] Sample rollouts: ['there is no evidence in the provided documents to ', '[demi moore has not held any government position]']
-  Step 5: CoT RPE=0.000 < 0.8, trying RAG...
-    [QUERY DEBUG] Raw LLM response: Demi Moore political roles
-    [QUERY DEBUG] Extracted query: Demi Moore political roles
-    [RAG DEBUG] Query: Demi Moore political roles
-pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 3751.61it/s]
-Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 71.57it/s]
-    [RAG DEBUG] Retrieved 5 passages, top title: Demi Moore
-    [RAG STEP DEBUG] Raw model response (first 200 chars): <start_search>Demi Moore political roles<end_search>
-The retrieved documents do not contain relevant information regarding any political roles or government positions held by Demi Moore. According to 
-    [RAG STEP DEBUG] Parsed content (first 200 chars): <start_search>Demi Moore political roles<end_search>
-The retrieved documents do not contain relevant information regarding any political roles or government positions held by Demi Moore. According to 
-    [MC DEBUG] Rollouts will use 20 retrieved passages
-    [MC DEBUG] MC=0.0! Gold: Chief of Protocol
-    [MC DEBUG] Sample rollouts: ['that there is no information indicating demi moore', 'that demi moore did not hold any government positi']
-  Step 5: RAG step added (RPE=0.000, label=bad), checking for final answer...
-  Step 5: Has 'Final Answer:' marker? False
-    [MC DEBUG] Rollouts will use 20 retrieved passages
-    [MC DEBUG] MC=0.0! Gold: Chief of Protocol
-    [MC DEBUG] Sample rollouts: ['[demi moore did not hold any government position]', 'ed based on the given information']
-  Step 6: CoT RPE=0.000 < 0.8, trying RAG...
-    [QUERY DEBUG] Raw LLM response: Demi Moore political offices
-    [QUERY DEBUG] Extracted query: Demi Moore political offices
-    [RAG DEBUG] Query: Demi Moore political offices
-pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 4112.06it/s]
-Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 71.06it/s]
-    [RAG DEBUG] Retrieved 5 passages, top title: Demi Moore
-    [RAG STEP DEBUG] Raw model response (first 200 chars): <start_search>Demi Moore political offices<end_search>
-The retrieved documents do not contain relevant information about Demi Moore holding any political office. According to [1], Demi Moore is an Ame
-    [RAG STEP DEBUG] Parsed content (first 200 chars): <start_search>Demi Moore political offices<end_search>
-The retrieved documents do not contain relevant information about Demi Moore holding any political office. According to [1], Demi Moore is an Ame
-    [MC DEBUG] Rollouts will use 25 retrieved passages
-    [MC DEBUG] MC=0.0! Gold: Chief of Protocol
-    [MC DEBUG] Sample rollouts: ['that demi moore did not hold any government positi', 'that demi moore did not hold any government positi']
-  Step 6: RAG step added (RPE=0.000, label=bad), checking for final answer...
-  Step 6: Has 'Final Answer:' marker? False
-    [MC DEBUG] Rollouts will use 25 retrieved passages
-    [MC DEBUG] MC=0.0! Gold: Chief of Protocol
-    [MC DEBUG] Sample rollouts: ['therefore', 'that demi moore did not hold any government positi']
-  Step 7: CoT RPE=0.000 < 0.8, trying RAG...
-    [QUERY DEBUG] Raw LLM response: Demi Moore political experience
-    [QUERY DEBUG] Extracted query: Demi Moore political experience
-    [RAG DEBUG] Query: Demi Moore political experience
-pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 3440.77it/s]
-Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 71.42it/s]
-    [RAG DEBUG] Retrieved 5 passages, top title: Demi Moore
-    [RAG STEP DEBUG] Raw model response (first 200 chars): <start_search>Demi Moore political experience<end_search>
-According to [1], Demi Moore is described as an American actress, former songwriter, and model without any mention of political involvement or
-    [RAG STEP DEBUG] Parsed content (first 200 chars): <start_search>Demi Moore political experience<end_search>
-According to [1], Demi Moore is described as an American actress, former songwriter, and model without any mention of political involvement or
-    [MC DEBUG] Rollouts will use 30 retrieved passages
-    [MC DEBUG] MC=0.0! Gold: Chief of Protocol
-    [MC DEBUG] Sample rollouts: ['that there is no evidence to suggest demi moore he', 'that demi moore did not hold any government positi']
-  Step 7: RAG step added (RPE=0.000, label=bad), checking for final answer...
-  Step 7: Has 'Final Answer:' marker? False
-    [MC DEBUG] Rollouts will use 30 retrieved passages
-    [MC DEBUG] MC=0.0! Gold: Chief of Protocol
-    [MC DEBUG] Sample rollouts: ['that demi moore did not hold any government positi', 'based on the provided information']
-  Step 8: CoT RPE=0.000 < 0.8, trying RAG...
-    [QUERY DEBUG] Raw LLM response: Demi Moore political positions
-    [QUERY DEBUG] Extracted query: Demi Moore political positions
-    [RAG DEBUG] Query: Demi Moore political positions
-pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 3806.08it/s]
-Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 72.80it/s]
-    [RAG DEBUG] Retrieved 5 passages, top title: Demi Moore
-    [RAG STEP DEBUG] Raw model response (first 200 chars): <start_search>Demi Moore political positions<end_search>
-The retrieved documents do not contain relevant information about Demi Moore holding any government position. According to [1], Demi Moore is a
-    [RAG STEP DEBUG] Parsed content (first 200 chars): <start_search>Demi Moore political positions<end_search>
-The retrieved documents do not contain relevant information about Demi Moore holding any government position. According to [1], Demi Moore is a
-    [MC DEBUG] Rollouts will use 35 retrieved passages
-    [MC DEBUG] MC=0.0! Gold: Chief of Protocol
-    [MC DEBUG] Sample rollouts: ['that demi moore did not hold any government positi', 'there is no record of the woman who portrayed corl']
-  Step 8: RAG step added (RPE=0.000, label=bad), checking for final answer...
-  Step 8: Has 'Final Answer:' marker? False
-    [MC DEBUG] Rollouts will use 35 retrieved passages
-    [MC DEBUG] MC=0.0! Gold: Chief of Protocol
-    [MC DEBUG] Sample rollouts: ['demi moore did not hold any government position', 'that demi moore did not hold any government positi']
-  Step 9: CoT RPE=0.000 < 0.8, trying RAG...
-    [QUERY DEBUG] Raw LLM response: Demi Moore political role government
-    [QUERY DEBUG] Extracted query: Demi Moore political role government
-    [RAG DEBUG] Query: Demi Moore political role government
-pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 4144.57it/s]
-Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 61.44it/s]
-    [RAG DEBUG] Retrieved 5 passages, top title: Demi Moore
-    [RAG STEP DEBUG] Raw model response (first 200 chars): <start_search>Demi Moore political role government<end_search>
-According to the provided documents, there is no information suggesting that Demi Moore held any government position or political role. T
-    [RAG STEP DEBUG] Parsed content (first 200 chars): <start_search>Demi Moore political role government<end_search>
-According to the provided documents, there is no information suggesting that Demi Moore held any government position or political role. T
-    [MC DEBUG] Rollouts will use 40 retrieved passages
-    [MC DEBUG] MC=0.0! Gold: Chief of Protocol
-    [MC DEBUG] Sample rollouts: ['[demi moore did not hold any government position]', '[demi moore did not hold any government position]']
-  Step 9: RAG step added (RPE=0.000, label=bad), checking for final answer...
-  Step 9: Has 'Final Answer:' marker? False
-    [MC DEBUG] Rollouts will use 40 retrieved passages
-    [MC DEBUG] MC=0.0! Gold: Chief of Protocol
-    [MC DEBUG] Sample rollouts: ['demi moore has not held any government position', 'demi moore has not held any government position']
-  Step 10: CoT RPE=0.000 < 0.8, trying RAG...
-    [QUERY DEBUG] Raw LLM response: Demi Moore government role
-    [QUERY DEBUG] Extracted query: Demi Moore government role
-    [RAG DEBUG] Query: Demi Moore government role
-pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 5127.51it/s]
-Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 63.77it/s]
-    [RAG DEBUG] Retrieved 5 passages, top title: Demi Moore
-    [RAG STEP DEBUG] Raw model response (first 200 chars): <start_search>Demi Moore government role<end_search>
-The retrieved documents do not contain relevant information. According to [1], Demi Moore is an American actress, former songwriter, and model with
-    [RAG STEP DEBUG] Parsed content (first 200 chars): <start_search>Demi Moore government role<end_search>
-The retrieved documents do not contain relevant information. According to [1], Demi Moore is an American actress, former songwriter, and model with
-    [MC DEBUG] Rollouts will use 45 retrieved passages
-    [MC DEBUG] MC=0.0! Gold: Chief of Protocol
-    [MC DEBUG] Sample rollouts: ['that demi moore did not hold any government positi', 'that demi moore did not hold any government positi']
-  Step 10: RAG step added (RPE=0.000, label=bad), checking for final answer...
-  Step 10: Has 'Final Answer:' marker? False
-  ❌ 10 steps (9 RAG steps) [Format: 7/9 (78%)]
-[3/3] Processing 5a85ea095542994775f606a8...
-  Q: What science fantasy young adult series, told in first person, has a set of comp...
-    [MC DEBUG] MC=0.0! Gold: Animorphs
-    [MC DEBUG] Sample rollouts: ['**"the old man\'s war" series by john scalzi**', '"the stormlight archive" series']
-  Step 1: Always accepted as baseline (MC=0.000)
-  Step 1: Has 'Final Answer:' marker? False
-    [MC DEBUG] MC=0.0! Gold: Animorphs
-    [MC DEBUG] Sample rollouts: ['**the stormlight archive**', 'therefore']
-  Step 2: CoT RPE=0.000 < 0.8, trying RAG...
-    [QUERY DEBUG] Raw LLM response: science fantasy first person young adult series companion books enslaved worlds alien species
-    [QUERY DEBUG] Extracted query: science fantasy first person young adult series companion books enslaved worlds alien species
-    [RAG DEBUG] Query: science fantasy first person young adult series companion books enslaved worlds 
-pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 1511.46it/s]
-Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 63.49it/s]
-    [RAG DEBUG] Retrieved 5 passages, top title: List of Uplift Universe species
-    [RAG STEP DEBUG] Raw model response (first 200 chars): <start_search>science fantasy first person young adult series companion books enslaved worlds alien species<end_search>
-Based on the information provided and the key elements of the question, the "Upl
-    [RAG STEP DEBUG] Parsed content (first 200 chars): <start_search>science fantasy first person young adult series companion books enslaved worlds alien species<end_search>
-Based on the information provided and the key elements of the question, the "Upl
-    [MC DEBUG] Rollouts will use 5 retrieved passages
-    [MC DEBUG] MC=0.0! Gold: Animorphs
-    [MC DEBUG] Sample rollouts: ['based on the available information', '"therefore']
-  Step 2: RAG step added (RPE=0.000, label=bad), checking for final answer...
-  Step 2: Has 'Final Answer:' marker? True
-  Step 2: ✓ Found final answer, terminating trajectory.
-  ❌ 2 steps (1 RAG steps) [Format: 1/1 (100%)]
-
-✓ Detailed results saved to: outputs/batch_test/results_20251120_101040.jsonl
-✓ Summary stats saved to: outputs/batch_test/summary_20251120_101040.json
-
-======================================================================
-SUMMARY STATISTICS
-======================================================================
-
-Total processed: 3
-Failed: 0
-
-Overall accuracy: 1/3 (33.3%)
-
---- RAG Usage Analysis ---
-Questions with RAG: 3
-  - Correct: 1/3 (33.3%)
-
-Questions without RAG (CoT only): 0
-  - Correct: 0/0 (0.0%)
-
---- Format Compliance Analysis ---
-
-Total RAG steps analyzed: 12
-  ✓ With <start_search> tags: 12/12 (100.0%)
-  ✓ With citations [N]: 10/12 (83.3%)
-  ✓ Fully compliant (both): 10/12 (83.3%)
-
-⚠️  Warning: 2 RAG steps are not fully compliant with format requirements
-
---- RAG Effectiveness Analysis ---
-
-Total RAG interventions: 12
-  ✓ Improved MC (mc_after > mc_before): 1/12 (8.3%)
-  ✗ Degraded MC (mc_after < mc_before): 1/12 (8.3%)
-  → Unchanged MC: 10/12
-
-  Average MC improvement: +0.000
-  RAG steps with RPE ≥ 0.8: 2/12 (16.7%)
-
-⚠️  Warning: RAG may not be effective: 1 improvements vs 1 degradations
-
-======================================================================
-NEXT STEPS
-======================================================================
-
-To analyze RAG effectiveness in detail:
-  python3 scripts/analyze_rag_impact.py outputs/batch_test/results_20251120_101040.jsonl
-
-To view specific trajectories:
-  python3 scripts/view_trajectory.py outputs/batch_test/results_20251120_101040.jsonl --filter-rag
-

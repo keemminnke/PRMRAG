@@ -54,7 +54,7 @@ class JudgeLabeler(BaseLabeler):
         self.use_supporting_facts = config.get("use_supporting_facts", True)
 
         # vLLM-specific settings
-        self.gpu_memory_utilization = config.get("gpu_memory_utilization", 0.7)
+        self.gpu_memory_utilization = config.get("gpu_memory_utilization", 0.8)
         self.tensor_parallel_size = config.get("tensor_parallel_size", 1)
 
         self.model_client = model_client

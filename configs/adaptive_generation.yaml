@@ -27,6 +27,7 @@ retrieval:
     model_name: "BAAI/bge-m3"
     batch_size: 64
     max_length: 512
+    embedding_cache: "data/embeddings/beir_hotpotqa_bge_m3.npy"
 
   # Wikipedia specific
   wikipedia:

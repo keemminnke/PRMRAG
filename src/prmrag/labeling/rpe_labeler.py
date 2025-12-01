@@ -54,7 +54,7 @@ class RPELabeler(BaseLabeler):
         self.max_tokens = config.get("max_tokens", 512)
 
         # vLLM-specific settings
-        self.gpu_memory_utilization = config.get("gpu_memory_utilization", 0.7)
+        self.gpu_memory_utilization = config.get("gpu_memory_utilization", 0.8)
         self.tensor_parallel_size = config.get("tensor_parallel_size", 1)
 
         self.model = model
@@ -201,9 +201,11 @@ class RPELabeler(BaseLabeler):
         prompt = self._format_prompt(question, prefix_steps)
 
         # Generate with vLLM
+        # Keep rollout short using step-based token budget
+        max_tokens = min(self.max_tokens, int(self.max_rollout_steps * 64))
         response = self.model.generate_with_chat_template(
             user_message=prompt,
-            max_tokens=self.max_tokens,
+            max_tokens=max_tokens,
             temperature=self.temperature,
         )
 
@@ -228,9 +230,16 @@ class RPELabeler(BaseLabeler):
 
         for i, step in enumerate(prefix_steps):
             lines.append(f"Step {i + 1}: {step.action}")
+            # Include retrieval evidence to stabilize MC estimates
+            if step.passages:
+                lines.append("Passages:")
+                for j, passage in enumerate(step.passages[:5]):
+                    lines.append(f"  [{j + 1}] {passage}")
             lines.append(f"Result: {step.observation}\n")
 
-        lines.append("Continue reasoning to answer the question.")
+        lines.append(
+            f"Continue reasoning to answer the question in at most {self.max_rollout_steps} short steps."
+        )
         lines.append("At the end, provide your final answer in this format:")
         lines.append('"Therefore, the answer is [your answer]."')
 

@@ -29,6 +29,49 @@ from .step_forcing import (
 )
 
 
+def parse_rag_content(content: str) -> Dict[str, Optional[str]]:
+    """Parse RAG step content into structured fields.
+
+    Expected format:
+        Thought: <reasoning>
+        Action: Search[<query>] or Lookup[<term>]
+        Observation: <retrieved info>
+
+    Returns:
+        Dict with keys: thought, action, action_input, observation
+    """
+    result = {
+        'thought': None,
+        'action': None,
+        'action_input': None,
+        'observation': None,
+    }
+
+    # Parse Thought
+    thought_match = re.search(r'Thought:\s*(.+?)(?=\n(?:Action:|Observation:|$))', content, re.DOTALL | re.IGNORECASE)
+    if thought_match:
+        result['thought'] = thought_match.group(1).strip()
+
+    # Parse Action and Action Input
+    action_match = re.search(r'Action:\s*(Search|Lookup)\[(.+?)\]', content, re.IGNORECASE)
+    if action_match:
+        result['action'] = action_match.group(1)
+        result['action_input'] = action_match.group(2).strip()
+
+    # Parse Observation
+    # Match until next section or end of string
+    obs_match = re.search(r'Observation:\s*(.+?)(?=\n\s*(?:Thought:|Action:|Final Answer:)|$)', content, re.DOTALL | re.IGNORECASE)
+    if obs_match:
+        result['observation'] = obs_match.group(1).strip()
+    else:
+        # Fallback: match until end of string
+        obs_match_simple = re.search(r'Observation:\s*(.+)', content, re.DOTALL | re.IGNORECASE)
+        if obs_match_simple:
+            result['observation'] = obs_match_simple.group(1).strip()
+
+    return result
+
+
 class StepType(str, Enum):
     """Type of step in adaptive trajectory."""
     COT = "cot"          # Pure reasoning step
@@ -52,6 +95,19 @@ class AdaptiveStep:
     mc_after: float                     # MC(s_t)
     rpe: float                          # mc_after / mc_before
     label: Optional[str] = None         # RPE-based label: 'good' if rpe >= 0.8, 'bad' if rpe < 0.8
+
+    # Parsed structured fields (for RAG steps)
+    thought: Optional[str] = None       # Thought process
+    action: Optional[str] = None        # Legacy: "Search", "Lookup" for backward compatibility
+    action_input: Optional[str] = None  # Search query or lookup term
+    observation: Optional[str] = None   # Retrieved information summary
+
+    # Structured action space: a = (σ, δ)
+    # σ (termination_decision): whether to continue or terminate
+    termination_decision: str = "continue"  # "continue" | "terminate"
+    # δ (atomic_decision): whether to retrieve or use parametric knowledge
+    atomic_decision: str = "parametric"     # "retrieve" | "parametric"
+
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -66,6 +122,14 @@ class AdaptiveStep:
             'mc_after': self.mc_after,
             'rpe': self.rpe,
             'label': self.label,
+            # Structured fields
+            'thought': self.thought,
+            'action': self.action,
+            'action_input': self.action_input,
+            'observation': self.observation,
+            # Structured action space
+            'termination_decision': self.termination_decision,
+            'atomic_decision': self.atomic_decision,
             'metadata': self.metadata,
         }
 
@@ -210,6 +274,7 @@ class AdaptiveTrajectoryGenerator:
             # Step 1: Always accept as baseline (no RPE calculation)
             if step_num == 1:
                 print(f"  Step 1: Always accepted as baseline (MC={mc_cot:.3f})")
+                has_answer = self._has_answer(cot_step_content)
                 step = AdaptiveStep(
                     step_id=t,
                     step_type=StepType.COT,
@@ -220,6 +285,11 @@ class AdaptiveTrajectoryGenerator:
                     mc_after=mc_cot,
                     rpe=1.0,  # Dummy value, not used
                     label='good',
+                    # Legacy action field
+                    action="Reason",
+                    # Structured action: a = (σ, δ)
+                    termination_decision="terminate" if has_answer else "continue",
+                    atomic_decision="parametric",
                     metadata={'accepted': 'cot_baseline', 'step1': True},
                 )
                 steps.append(step)
@@ -255,6 +325,7 @@ class AdaptiveTrajectoryGenerator:
             # (B) Check if CoT is acceptable (threshold: 0.8, using > 0.79 to avoid floating point issues)
             if rpe_cot > 0.79:
                 # Accept CoT step with 'good' label
+                has_answer = self._has_answer(cot_step_content)
                 step = AdaptiveStep(
                     step_id=t,
                     step_type=StepType.COT,
@@ -265,6 +336,11 @@ class AdaptiveTrajectoryGenerator:
                     mc_after=mc_cot,
                     rpe=rpe_cot,
                     label='good',
+                    # Legacy action field
+                    action="Reason",
+                    # Structured action: a = (σ, δ)
+                    termination_decision="terminate" if has_answer else "continue",
+                    atomic_decision="parametric",
                     metadata={'accepted': 'cot', 'threshold': 0.8},
                 )
                 steps.append(step)
@@ -296,6 +372,10 @@ class AdaptiveTrajectoryGenerator:
                 # Label as 'good' if RPE > 0.79 (effective 0.8 with floating point tolerance), else 'bad'
                 label = 'good' if rpe_rag > 0.79 else 'bad'
 
+                # Parse RAG step content into structured fields
+                parsed_fields = parse_rag_content(rag_step['content'])
+                has_answer = self._has_answer(rag_step['content'])
+
                 step = AdaptiveStep(
                     step_id=t,
                     step_type=StepType.RAG,
@@ -306,6 +386,16 @@ class AdaptiveTrajectoryGenerator:
                     mc_after=mc_rag,
                     rpe=rpe_rag,
                     label=label,
+                    # Add parsed structured fields
+                    thought=parsed_fields['thought'],
+                    action=parsed_fields['action'] if parsed_fields['action'] else "Search",  # Legacy
+                    action_input=parsed_fields['action_input'],
+                    observation=parsed_fields['observation'],
+                    # Structured action: a = (σ, δ)
+                    # σ: termination - based on Final Answer presence
+                    termination_decision="terminate" if has_answer else "continue",
+                    # δ: atomic - RAG step always performed retrieval
+                    atomic_decision="retrieve",  # Always "retrieve" for RAG steps (actual search was performed)
                     metadata={'accepted': 'rag', 'threshold': 0.8},
                 )
                 steps.append(step)
@@ -335,8 +425,8 @@ class AdaptiveTrajectoryGenerator:
             is_correct=is_correct,
             metadata={
                 'num_steps': len(steps),
-                'num_cot_steps': sum(1 for s in steps if s.step_type == StepType.COT),
-                'num_rag_steps': sum(1 for s in steps if s.step_type == StepType.RAG),
+                # num_cot_steps and num_rag_steps removed - can be calculated from steps
+                'has_rag': any(s.step_type == StepType.RAG for s in steps),
             },
         )
 
@@ -380,23 +470,13 @@ class AdaptiveTrajectoryGenerator:
                 "",
                 f"## Task",
                 f"You searched for: {query}",
-                "Generate a reasoning step to answer the question using the retrieved documents.",
+                "Generate a reasoning step to answer the question using the retrieved documents above.",
                 "",
-                "IMPORTANT RULES:",
-                "- Follow the ReAct format: Thought, Action, Observation",
-                "- Start with: Thought: [your reasoning about what to do next]",
-                "- Then: Action: Search[{query}] (showing what you searched)",
-                "- Then: Observation: [information from retrieved documents]",
-                "- DO NOT hallucinate or invent information",
-                "- ONLY use information explicitly stated in the retrieved documents above",
-                "- If the documents do not contain relevant information, state: 'The retrieved documents do not contain relevant information'",
-                "- Cite which document you are using (e.g., 'According to [1]...')",
-                "",
-                f"Respond with EXACTLY ONE step in this format:",
+                f"Respond with Step {step_num} in ReAct format:",
                 f'"Step {step_num}:"',
-                f'"Thought: [your thought about needing to search]"',
+                f'"Thought: [your reasoning about the documents]"',
                 f'"Action: Search[{query}]"',
-                f'"Observation: [reasoning based ONLY on the documents]"',
+                f'"Observation: [information from the documents with citations]"',
                 "",
                 'If this is your final step, include: "Final Answer: [your answer]"',
                 "",
@@ -434,27 +514,15 @@ class AdaptiveTrajectoryGenerator:
                 "",
                 f"## Task",
                 f"You searched for: {query}",
-                "Continue solving the question using the retrieved documents.",
+                "Continue solving the question using the retrieved documents above.",
                 "",
-                "IMPORTANT RULES:",
-                "- Follow the ReAct format: Thought, Action, Observation",
-                "- Start with: Thought: [your reasoning about what to do next]",
-                "- Then: Action: Search[{query}] (showing what you searched)",
-                "- Then: Observation: [information from retrieved documents]",
-                "- DO NOT hallucinate or invent information",
-                "- ONLY use information explicitly stated in the retrieved documents above",
-                "- If the documents do not contain relevant information, state: 'The retrieved documents do not contain relevant information'",
-                "- Cite which document you are using (e.g., 'According to [1]...')",
-                "",
-                f"Respond with EXACTLY ONE step in this format:",
+                f"Respond with Step {step_num} in ReAct format:",
                 f'"Step {step_num}:"',
-                f'"Thought: [your thought about needing to search]"',
+                f'"Thought: [your reasoning about the documents]"',
                 f'"Action: Search[{query}]"',
-                f'"Observation: [reasoning based ONLY on the documents]"',
+                f'"Observation: [information from the documents with citations]"',
                 "",
                 'If this is your final step, include: "Final Answer: [your answer]"',
-                "",
-                "Do NOT write multiple steps. Write ONLY Step {step_num}.",
                 "",
                 f"Step {step_num}:"
             ])

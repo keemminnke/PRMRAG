@@ -41,12 +41,10 @@ class StepForcingPrompt:
         """
         prompt = f"""Question: {question}
 
-Please solve this problem step by step. For each step, start with "Thought:" followed by your reasoning.
+Solve this step by step. For each step, start with "Thought:" followed by your reasoning.
 
-When you reach the final answer, format your last step as:
-"Step N: Thought: [reasoning] Final Answer: [write the complete answer here]"
-
-IMPORTANT: After "Final Answer:", you MUST write the actual answer. Do not leave it blank.
+When you reach the final answer:
+"Step N: Thought: [reasoning] Final Answer: [your answer]"
 
 Start with:
 
@@ -58,12 +56,10 @@ Step 1: Thought:"""
 Context:
 {context}
 
-Please solve this problem step by step using the provided context. For each step, start with "Thought:" followed by your reasoning.
+Solve this step by step using the provided context. Start each step with "Thought:".
 
-When you reach the final answer, format your last step as:
-"Step N: Thought: [reasoning] Final Answer: [write the complete answer here]"
-
-IMPORTANT: After "Final Answer:", you MUST write the actual answer. Do not leave it blank.
+When you reach the final answer:
+"Step N: Thought: [reasoning] Final Answer: [your answer]"
 
 Start with:
 
@@ -96,15 +92,12 @@ Step 1: Thought:"""
 
 {steps_text}
 
-Continue solving. Start your next step with "Thought:" followed by your reasoning.
+Continue solving. Respond with Step {next_step_num} only.
 
-You MUST respond with EXACTLY ONE step in this format:
+Format:
 "Step {next_step_num}: Thought: [your reasoning]"
 
-If this is your final step, include: "Final Answer: [write the complete answer here]"
-IMPORTANT: After "Final Answer:", you MUST write the actual answer. Do not leave it blank.
-
-Do NOT write multiple steps. Write ONLY Step {next_step_num}.
+If this is your final step, include: "Final Answer: [your answer]"
 
 Step {next_step_num}: Thought:"""
 
@@ -116,15 +109,12 @@ Step {next_step_num}: Thought:"""
 Retrieved Information:
 {context}
 
-Continue solving using the retrieved information. Start your next step with "Thought:" followed by your reasoning.
+Continue solving using the retrieved information. Respond with Step {next_step_num} only.
 
-You MUST respond with EXACTLY ONE step in this format:
+Format:
 "Step {next_step_num}: Thought: [your reasoning]"
 
-If this is your final step, include: "Final Answer: [write the complete answer here]"
-IMPORTANT: After "Final Answer:", you MUST write the actual answer. Do not leave it blank.
-
-Do NOT write multiple steps. Write ONLY Step {next_step_num}.
+If this is your final step, include: "Final Answer: [your answer]"
 
 Step {next_step_num}: Thought:"""
 

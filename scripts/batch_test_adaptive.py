@@ -26,19 +26,27 @@ from prmrag.retrieval.bge_retriever import BGERetriever
 import re
 
 
-def load_data(data_dir: Path, split: str = "validation", limit: int = None):
-    """Load questions and BeIR HotpotQA corpus.
+def load_data(data_dir: Path, split: str = "validation", limit: int = None, corpus_type: str = "dpr"):
+    """Load questions and Wikipedia corpus.
 
     Args:
         data_dir: Data directory
         split: Data split to use ("train", "validation", or "test")
         limit: Limit number of questions
+        corpus_type: Corpus type ("beir" or "dpr")
 
     Returns:
         Tuple of (questions, corpus)
     """
     questions_file = data_dir / "raw" / "questions" / f"hotpotqa_{split}.jsonl"
-    corpus_file = data_dir / "raw" / "beir_hotpotqa_corpus.jsonl"
+
+    # Select corpus based on type
+    if corpus_type == "dpr":
+        corpus_file = data_dir / "raw" / "dpr_wikipedia_psgs_w100.jsonl"
+    elif corpus_type == "beir":
+        corpus_file = data_dir / "raw" / "beir_hotpotqa_corpus.jsonl"
+    else:
+        raise ValueError(f"Unknown corpus type: {corpus_type}. Use 'beir' or 'dpr'.")
 
     # Load questions
     questions = []
@@ -120,9 +128,13 @@ def format_trajectory_for_review(trajectory, question_data: Dict[str, Any]) -> D
             # === NEW PRM-RAG fields ===
             # ReAct-style decomposition
             'thought': getattr(step, 'thought', None),
-            'action': getattr(step, 'action', None).value if hasattr(step, 'action') and step.action else None,
+            'action': getattr(step, 'action', None),  # Legacy: "Search", "Lookup"
             'action_input': getattr(step, 'action_input', None),
             'observation': getattr(step, 'observation', None),
+
+            # Structured action space: a = (σ, δ)
+            'termination_decision': getattr(step, 'termination_decision', 'continue'),  # "continue" | "terminate"
+            'atomic_decision': getattr(step, 'atomic_decision', 'parametric'),  # "retrieve" | "parametric"
 
             # Retrieval info
             'retrieval_query': getattr(step, 'retrieval_query', None),
@@ -227,6 +239,13 @@ def main():
         default="outputs/batch_test",
         help="Output directory for results (default: outputs/batch_test)",
     )
+    parser.add_argument(
+        "--corpus-type",
+        type=str,
+        default="dpr",
+        choices=["beir", "dpr"],
+        help="Corpus type: 'beir' (HotpotQA 5.23M) or 'dpr' (Wikipedia 21M) (default: dpr)",
+    )
     args = parser.parse_args()
 
     # Create output directory
@@ -235,15 +254,23 @@ def main():
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    # Determine corpus info
+    if args.corpus_type == "dpr":
+        corpus_name = "DPR Wikipedia"
+        corpus_size = "21M"
+    else:
+        corpus_name = "BeIR HotpotQA"
+        corpus_size = "5.23M"
+
     print("=" * 70)
-    print("BATCH TEST: Adaptive MC-CoT + RAG Pipeline (Full Wiki)")
+    print(f"BATCH TEST: Adaptive MC-CoT + RAG Pipeline ({corpus_name})")
     print("=" * 70)
     print(f"\nConfiguration:")
     print(f"  - Data split: {args.split}")
     print(f"  - Number of questions: {args.num_questions}")
     print(f"  - Starting index: {args.start_idx}")
     print(f"  - MC rollouts: {args.num_rollouts}")
-    print(f"  - Corpus: Full Wiki (5.23M)")
+    print(f"  - Corpus: {corpus_name} ({corpus_size})")
     print(f"  - Output directory: {output_dir}")
 
     # Load config
@@ -251,12 +278,13 @@ def main():
     config = load_config(config_path)
 
     # Load data
-    print(f"\n[1] Loading {args.split} split and Full Wiki corpus...")
+    print(f"\n[1] Loading {args.split} split and {corpus_name} corpus...")
     data_dir = Path(__file__).parent.parent / "data"
     questions, corpus = load_data(
         data_dir,
         split=args.split,
-        limit=args.start_idx + args.num_questions
+        limit=args.start_idx + args.num_questions,
+        corpus_type=args.corpus_type
     )
     questions = questions[args.start_idx:args.start_idx + args.num_questions]
     print(f"✓ Loaded {len(questions)} questions and {len(corpus):,} corpus documents")
@@ -268,7 +296,10 @@ def main():
 
     # Initialize BGE-M3 retriever
     print(f"\n[3] Initializing BGE-M3 retriever...")
-    embedding_cache = "data/embeddings/beir_hotpotqa_bge_m3.npy"
+    if args.corpus_type == "dpr":
+        embedding_cache = "data/embeddings/dpr_wikipedia_bge_m3.npy"
+    else:
+        embedding_cache = "data/embeddings/beir_hotpotqa_bge_m3.npy"
 
     retriever = BGERetriever(
         corpus=corpus,

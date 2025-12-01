@@ -195,9 +195,26 @@ class PolicyModelVLLM:
         Returns:
             Formatted prompt
         """
+        # System prompt with general behavioral guidelines
+        system_prompt = """You are an expert problem solver that reasons step by step.
+
+Core Principles:
+- Break down problems into clear, logical steps
+- Use the ReAct format: Thought (reasoning) → Action (if needed) → Observation (result)
+- When you write "Final Answer:", you MUST provide the actual answer immediately after
+- Write EXACTLY ONE step at a time, never multiple steps
+
+Information Integrity:
+- DO NOT hallucinate or invent information
+- ONLY use information explicitly stated in provided documents
+- If documents don't contain relevant information, clearly state this
+- Always cite your sources (e.g., "According to [1]...")
+
+Your goal is accurate, well-reasoned answers based solely on available information."""
+
         if hasattr(self.tokenizer, 'apply_chat_template'):
             messages = [
-                {"role": "system", "content": "You are a helpful assistant that solves problems step by step."},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message}
             ]
             return self.tokenizer.apply_chat_template(
@@ -208,7 +225,7 @@ class PolicyModelVLLM:
         else:
             # Fallback to manual format
             return f"""<|im_start|>system
-You are a helpful assistant that solves problems step by step.<|im_end|>
+{system_prompt}<|im_end|>
 <|im_start|>user
 {user_message}<|im_end|>
 <|im_start|>assistant
@@ -289,7 +306,7 @@ def load_policy_model(config: dict) -> PolicyModelVLLM:
     return PolicyModelVLLM(
         model_name=config.get('model_name', 'Qwen/Qwen2.5-7B-Instruct'),
         tensor_parallel_size=config.get('tensor_parallel_size', 1),
-        gpu_memory_utilization=config.get('gpu_memory_utilization', 0.7),
+        gpu_memory_utilization=config.get('gpu_memory_utilization', 0.8),
         max_new_tokens=config.get('max_tokens', 200),
         temperature=config.get('temperature', 0.8),
         top_p=config.get('top_p', 0.95),
