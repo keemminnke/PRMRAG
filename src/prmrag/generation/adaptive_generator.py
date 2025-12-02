@@ -257,6 +257,9 @@ class AdaptiveTrajectoryGenerator:
         # Don't compute MC for empty state (Step 0) - start with Step 1 as baseline
         mc_prev = None
 
+        # GenPRM-style early stopping: if RAG fails (MC < 0.01), set all future MC to 0
+        failed_after_rag = False
+
         for t in range(self.max_steps):
             step_num = t + 1
 
@@ -270,7 +273,13 @@ class AdaptiveTrajectoryGenerator:
 
             # Create temporary state with CoT step
             cot_state = self._apply_cot_step(current_state, cot_step_text, step_num)
-            mc_cot = self._monte_carlo_estimate(cot_state, gold_answer)
+
+            # If already failed after RAG, set MC to 0 without rollout
+            if failed_after_rag:
+                mc_cot = 0.0
+                print(f"  Step {step_num}: MC fixed to 0.0 (failed after RAG)")
+            else:
+                mc_cot = self._monte_carlo_estimate(cot_state, gold_answer)
 
             # Step 1: Always accept as baseline (no RPE calculation)
             if step_num == 1:
@@ -316,6 +325,37 @@ class AdaptiveTrajectoryGenerator:
                 continue
 
             # Step 2+: Compute RPE and check threshold
+            # If failed after RAG, skip RPE check and just accept with MC=0
+            if failed_after_rag:
+                rpe_cot = 0.0
+                # Accept step but with MC=0 and bad label
+                has_answer = self._has_answer(cot_step_content)
+                step = AdaptiveStep(
+                    step_id=t,
+                    step_type=StepType.COT,
+                    text=cot_step_text,
+                    content=cot_step_content,
+                    used_passages=[],
+                    mc_before=0.0,
+                    mc_after=0.0,
+                    rpe=0.0,
+                    label='bad',
+                    action="Reason",
+                    metadata={'accepted': 'cot_after_failure', 'threshold': 0.8},
+                )
+                steps.append(step)
+                current_state = cot_state
+                mc_prev = 0.0
+
+                # Check if we have an answer (still need to check for termination)
+                print(f"  Step {step_num}: CoT after failure (MC=0.0), checking for final answer...")
+                print(f"  Step {step_num}: Has 'Final Answer:' marker? {has_answer}")
+                if has_answer:
+                    final_answer = self._extract_answer(cot_step_content)
+                    print(f"  Step {step_num}: ✓ Found final answer, terminating trajectory.")
+                    break
+                continue
+
             # Use 0.01 as smoothing factor to avoid extreme RPE values when mc_prev is near 0
             rpe_cot = mc_cot / (mc_prev + 0.01)
 
@@ -390,6 +430,11 @@ class AdaptiveTrajectoryGenerator:
                 steps.append(step)
                 current_state = rag_state
                 mc_prev = mc_rag
+
+                # GenPRM-style: if RAG also fails (MC < 0.01), mark trajectory as irreversibly failed
+                if mc_rag < 0.01:
+                    failed_after_rag = True
+                    print(f"  Step {step_num}: RAG failed (MC={mc_rag:.3f} < 0.01), future steps will have MC=0")
 
                 # Check if RAG step contains final answer
                 has_answer = self._has_answer(rag_step['content'])
@@ -820,21 +865,20 @@ class AdaptiveTrajectoryGenerator:
 
         # Build K rollout prompts (same prompt, different sampling)
         rollout_prompt = self._build_rollout_prompt(state)
-        prompts = [rollout_prompt] * k
+
+        # Format with rollout-specific system prompt
+        if hasattr(self.policy_model, 'format_rollout_prompt'):
+            # Use rollout system prompt (complete solution generation)
+            formatted_prompts = [self.policy_model.format_rollout_prompt(rollout_prompt)] * k
+        else:
+            # Fallback: use regular prompts
+            formatted_prompts = [rollout_prompt] * k
 
         # Batch generate all K rollouts at once (vLLM optimized)
-        if hasattr(self.policy_model, 'batch_generate_with_chat_template'):
-            # vLLM batch generation with chat template - much faster
-            responses = self.policy_model.batch_generate_with_chat_template(
-                user_messages=prompts,
-                max_tokens=1200,
-                temperature=self.temperature,
-                top_p=0.95,
-            )
-        elif hasattr(self.policy_model, 'batch_generate'):
-            # vLLM batch generation without chat template (legacy)
+        if hasattr(self.policy_model, 'batch_generate'):
+            # vLLM batch generation - prompts already formatted with system instruction
             responses = self.policy_model.batch_generate(
-                prompts=prompts,
+                prompts=formatted_prompts,
                 max_tokens=1200,
                 temperature=self.temperature,
                 top_p=0.95,
@@ -842,9 +886,9 @@ class AdaptiveTrajectoryGenerator:
         else:
             # Fallback for HuggingFace Transformers (sequential)
             responses = []
-            for prompt in prompts:
-                response = self.policy_model.generate_with_chat_template(
-                    user_message=prompt,
+            for prompt in formatted_prompts:
+                response = self.policy_model.generate(
+                    prompt=prompt,
                     max_tokens=1200,
                     temperature=self.temperature,
                     top_p=0.95,
@@ -910,9 +954,9 @@ class AdaptiveTrajectoryGenerator:
             for step_text in state['reasoning_history']:
                 lines.append(step_text)
             lines.append("")
-            lines.append("Continue solving and provide your final answer.")
+            lines.append("Continue solving to reach the final answer.")
         else:
-            lines.append("Solve this question and provide your final answer.")
+            lines.append("Solve this question and provide the final answer.")
 
         return "\n".join(lines)
 

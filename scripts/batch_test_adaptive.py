@@ -146,7 +146,7 @@ def format_trajectory_for_review(trajectory, question_data: Dict[str, Any]) -> D
         if hasattr(step, 'retrieval_evidence') and step.retrieval_evidence:
             step_info['retrieval_evidence'] = step.retrieval_evidence.to_dict()
 
-        if step_info['is_rag']:
+        if step_info['action'] == 'Search':
             step_info['num_passages'] = len(step.used_passages)
             step_info['passage_titles'] = [p.get('title', 'Unknown') for p in step.used_passages]
 
@@ -168,7 +168,7 @@ def format_trajectory_for_review(trajectory, question_data: Dict[str, Any]) -> D
     # Find RAG intervention points
     rag_interventions = []
     for i, step in enumerate(steps_detail):
-        if step['is_rag']:
+        if step['action'] == 'Search':
             # Look at the step before and after to see the impact
             before_mc = step['mc_before']
             after_mc = step['mc_after']
@@ -182,6 +182,10 @@ def format_trajectory_for_review(trajectory, question_data: Dict[str, Any]) -> D
                 'passage_titles': step.get('passage_titles', []),
             })
 
+    # Count step types from steps_detail
+    num_cot_steps = sum(1 for s in steps_detail if s['action'] == 'Reason')
+    num_rag_steps = sum(1 for s in steps_detail if s['action'] == 'Search')
+
     return {
         'question_id': trajectory.trajectory_id,
         'question': trajectory.question,
@@ -189,9 +193,9 @@ def format_trajectory_for_review(trajectory, question_data: Dict[str, Any]) -> D
         'predicted_answer': trajectory.final_answer,
         'is_correct': trajectory.is_correct,
         'num_steps': len(trajectory.steps),
-        'num_cot_steps': trajectory.metadata['num_cot_steps'],
-        'num_rag_steps': trajectory.metadata['num_rag_steps'],
-        'has_rag': trajectory.metadata['num_rag_steps'] > 0,
+        'num_cot_steps': num_cot_steps,
+        'num_rag_steps': num_rag_steps,
+        'has_rag': num_rag_steps > 0,
         'steps': steps_detail,
         'rag_interventions': rag_interventions,
         'format_compliance': format_compliance,
