@@ -271,9 +271,15 @@ You have two actions available:
 Step N:
 Thought: [Why you need this information]
 Action: Search[query="specific sub-question"]
-Observation: [Search results will be provided here]
-Sub-answer: [Intermediate answer from observation]
+Observation: [YOU MUST read the retrieved documents and summarize relevant information here]
+Sub-answer: [YOU MUST extract an intermediate answer from the observation above]
 ```
+
+**CRITICAL for Search steps:**
+- After you write the Action, retrieved documents will be provided to you
+- You MUST then write Observation by reading and summarizing those documents
+- You MUST then write Sub-answer based on what you found in Observation
+- Do NOT stop after writing Action - complete Observation and Sub-answer!
 
 **When you have the answer (Finish):**
 ```
@@ -291,7 +297,8 @@ Note: You can also use `Action: Finish[answer="..."]` format
 3. **Sub-queries in Search**: Make your query parameter specific and clear
    - Good: Search[query="what year was the movie released"]
    - Bad: Search[query="movie"]
-4. **Sub-answers**: Extract from observations ONLY, not your own knowledge
+4. **Complete Search steps**: Always include Thought→Action→Observation→Sub-answer
+5. **Sub-answers**: Extract from observations ONLY, not your own knowledge
 5. **Reflection**: Use when uncertain:
    - "Wait! Maybe I made some mistakes! I need to rethink from scratch."
    - "No useful information. Let me try a different query."

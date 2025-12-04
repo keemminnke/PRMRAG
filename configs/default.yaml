@@ -30,7 +30,7 @@ rpe:
 # Judge Labeling (Large Model)
 # Using GPT-20B for label verification
 judge:
-  model_name: "Qwen/Qwen3-32B"  # GPT-20B for high-quality judgments
+  model_name: "Qwen/QwQ-32B"  # GPT-20B for high-quality judgments
   model_path: null
   device: "cuda"
   api_provider: "openai"  # openai, anthropic, custom

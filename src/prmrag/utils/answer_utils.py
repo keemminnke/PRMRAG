@@ -36,8 +36,15 @@ def normalize_answer(text: str) -> str:
     text = re.sub(r"'s\b", '', text)
     text = re.sub(r"s'\b", 's', text)  # "directors'" → "directors"
 
-    # Remove punctuation
+    # Remove punctuation BUT preserve periods in numbers (e.g., 6.213)
+    # First, protect decimal points by temporarily replacing them with a safe marker
+    text = re.sub(r'(\d)\.(\d)', r'\1DECIMALPOINT\2', text)
+
+    # Now remove punctuation
     text = text.translate(str.maketrans('', '', string.punctuation))
+
+    # Restore decimal points
+    text = text.replace('DECIMALPOINT', '.')
 
     # Normalize plural forms (optional but helps with director/directors)
     # Be conservative: only normalize common patterns
@@ -64,16 +71,25 @@ def extract_answer_from_text(text: str) -> str:
     """Extract the most plausible answer span from model output.
 
     Priority:
-    1) After explicit "Final Answer:" marker (supports multiline)
-    2) Common answer phrasings ("the answer is", "therefore, the answer is", etc.)
-    3) First non-empty line that is not an intermediate/next-query marker
+    1) Finish[answer="..."] pattern (ReAct format with explicit answer)
+    2) After explicit "Final Answer:" marker (supports multiline)
+    3) Common answer phrasings ("the answer is", "therefore, the answer is", etc.)
+    4) First non-empty line that is not an intermediate/next-query marker
     """
     if not text:
         return ""
 
     text = text.strip()
 
-    # 1) Explicit Final Answer (multi-line safe)
+    # 1) Finish[answer="..."] pattern - highest priority for explicit answers
+    # Matches: Finish[answer="Delhi"], Action: Finish[answer="2006"], etc.
+    finish_match = re.search(r'(?:Action:\s*)?Finish\[answer\s*=\s*["\']([^"\']+)["\']\]', text, flags=re.IGNORECASE)
+    if finish_match:
+        candidate = _clean_answer_span(finish_match.group(1))
+        if candidate:
+            return candidate
+
+    # 2) Explicit Final Answer (multi-line safe)
     final_match = re.search(r'final\s+answer\s*:?\s*(.+)', text, flags=re.IGNORECASE | re.DOTALL)
     if final_match:
         remainder = final_match.group(1).strip()
@@ -114,7 +130,7 @@ def extract_answer_from_text(text: str) -> str:
         if candidate:
             return candidate
 
-    # 2) Common phrasings (cross-line)
+    # 3) Common phrasings (cross-line)
     answer_patterns = [
         r'therefore,?\s+(?:the\s+answer\s+is\s*:?\s*)?(.+?)(?:(?<![A-Z])\.(?=\s+[A-Z])|[;]|\s+(?:because|since)\s+|$)',
         r'(?:the\s+)?answer\s+is\s*:?\s*(.+?)(?:(?<![A-Z])\.(?=\s+[A-Z])|[;]|\s+(?:because|since)\s+|$)',
@@ -128,14 +144,14 @@ def extract_answer_from_text(text: str) -> str:
             if candidate:
                 return candidate
 
-    # 3) Parenthetical tail
+    # 4) Parenthetical tail
     paren_match = re.search(r'\(([^)]+)\)[.,;]?\s*$', text, flags=re.DOTALL)
     if paren_match:
         candidate = _clean_answer_span(paren_match.group(1))
         if candidate:
             return candidate
 
-    # 4) Fallback: first non-empty line that is not an intermediate marker
+    # 5) Fallback: first non-empty line that is not an intermediate marker
     skip_prefixes = ("intermediate answer", "missing info", "next query target")
     for line in text.splitlines():
         if not line.strip():

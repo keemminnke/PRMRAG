@@ -503,7 +503,13 @@ class AdaptiveTrajectoryGenerator:
                 "",
                 f"Your search query was: {query}",
                 "",
-                f"Generate Step {step_num}."
+                f"Generate Step {step_num}.",
+                "",
+                "IMPORTANT: Provide complete Search step with ALL components:",
+                "- Thought: [your reasoning about what information you need]",
+                "- Action: Search[query=\"...\"]",
+                "- Observation: [READ the Retrieved Documents above and summarize relevant information]",
+                "- Sub-answer: [extract intermediate answer from your observation]",
             ]
         else:
             # Continuation step with passages
@@ -537,7 +543,13 @@ class AdaptiveTrajectoryGenerator:
                 "",
                 f"Your search query was: {query}",
                 "",
-                f"Continue with Step {step_num}."
+                f"Continue with Step {step_num}.",
+                "",
+                "IMPORTANT: Provide complete Search step with ALL components:",
+                "- Thought: [your reasoning about what information you need]",
+                "- Action: Search[query=\"...\"]",
+                "- Observation: [READ the Retrieved Documents (Current) above and summarize relevant information]",
+                "- Sub-answer: [extract intermediate answer from your observation]",
             ])
 
         prompt = "\n".join(prompt_lines)
@@ -1029,13 +1041,15 @@ class AdaptiveTrajectoryGenerator:
         return "\n".join(lines)
 
     def _has_answer(self, text: str) -> bool:
-        """Check if text contains the explicit 'Final Answer:' marker.
+        """Check if text contains final answer markers.
 
-        This uses a single, clear termination marker that the model is instructed
-        to use in its last step, rather than heuristic patterns.
+        Checks for both:
+        1. 'Final Answer:' marker (explicit instruction)
+        2. 'Finish[answer=' pattern (ReAct format)
         """
         text_lower = text.lower()
-        return 'final answer:' in text_lower
+        return ('final answer:' in text_lower or
+                'finish[answer=' in text_lower)
 
     def _extract_answer(self, text: str) -> str:
         """Extract answer from text using SQuAD-style extraction.

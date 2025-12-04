@@ -13,7 +13,7 @@ policy_model:
   model_name: "Qwen/Qwen2.5-7B-Instruct"  # Updated to Qwen3-7B equivalent
   model_path: null
   device: "cuda"
-  temperature: 0.8
+  temperature: 0.8  # Standard for diverse trajectory generation (following common practice)
   top_p: 0.95
   max_tokens: 200  # Per step
 
