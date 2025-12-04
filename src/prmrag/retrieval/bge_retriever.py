@@ -118,7 +118,44 @@ class BGERetriever:
         Returns:
             Loaded embeddings array
         """
-        return np.load(cache_path)
+        # Try standard np.load first
+        try:
+            embeddings = np.load(cache_path)
+            # If corpus is smaller, take only the first N embeddings
+            if len(embeddings) > len(self.corpus):
+                print(f"  Warning: Embedding file has {len(embeddings)} docs, "
+                      f"but corpus has {len(self.corpus)} docs. Using first {len(self.corpus)} embeddings.")
+                return embeddings[:len(self.corpus)]
+            return embeddings
+        except (ValueError, pickle.UnpicklingError):
+            # Fall back to memmap loading (used by embed_kilt_bge_m3.py)
+            # Calculate shape from file size and corpus length
+            file_size = Path(cache_path).stat().st_size
+            embed_dim = 1024  # BGE-M3 dimension
+            bytes_per_float16 = 2
+            num_docs_in_file = file_size // (embed_dim * bytes_per_float16)
+
+            # Load full memmap
+            full_embeddings = np.memmap(
+                cache_path,
+                dtype=np.float16,
+                mode='r',
+                shape=(num_docs_in_file, embed_dim)
+            )
+
+            # If corpus is smaller, take only the first N embeddings
+            if num_docs_in_file > len(self.corpus):
+                print(f"  Warning: Embedding file has {num_docs_in_file} docs, "
+                      f"but corpus has {len(self.corpus)} docs. Using first {len(self.corpus)} embeddings.")
+                # Load the subset into memory (memmap slicing still references the file)
+                return np.array(full_embeddings[:len(self.corpus)])
+            elif num_docs_in_file < len(self.corpus):
+                raise ValueError(
+                    f"Embedding file has only {num_docs_in_file} docs, "
+                    f"but corpus has {len(self.corpus)} docs"
+                )
+
+            return full_embeddings
 
     def retrieve(
         self,
