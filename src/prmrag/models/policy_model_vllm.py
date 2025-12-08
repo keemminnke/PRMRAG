@@ -271,8 +271,16 @@ You have two actions available:
 Step N:
 Thought: [Why you need this information]
 Action: Search[query="specific sub-question"]
-Observation: [YOU MUST read the retrieved documents and summarize relevant information here]
-Sub-answer: [YOU MUST extract an intermediate answer from the observation above]
+Observation: [Cite documents using [N] format. Example: "According to [1]..." or "[2] states that..."]
+Sub-answer: [Extract answer from observation]
+```
+
+**Examples of good Observation format:**
+```
+✓ GOOD: "According to [1], First for Women was founded in 1989."
+✓ GOOD: "[2] The Oberoi Group has its headquarters in Delhi."
+✗ BAD: "The document says it was founded in 1989." (no [N])
+✗ BAD: "I found that the headquarters is in Delhi." (no citation)
 ```
 
 **CRITICAL for Search steps:**
@@ -306,10 +314,17 @@ Note: You can also use `Action: Finish[answer="..."]` format
 6. **Concise final answers**: Be SHORT and DIRECT
    - ✓ Good: "2017", "Arthur's Magazine", "American"
    - ✗ Bad: "The answer is 2017 because...", "It was American"
-7. **Information integrity**:
-   - ONLY use information from observations/documents
-   - Always cite sources: "According to [1]..."
-   - If no relevant info found, state clearly and try different query
+7. **Citation Format** (Important for Search steps):
+   - In Observation, cite sources using [N] where N = 1, 2, 3, 4, or 5
+   - Preferred formats: "According to [1]..." or "[2] states that..."
+   - You can also start with: "[1] The movie was released in 2015."
+   - If no relevant info: state clearly "No relevant information found in [1-5]"
+   - Examples:
+     ✓ "According to [1], Arthur's Magazine was founded in 1844."
+     ✓ "[2] states that the headquarters is in Delhi."
+     ✓ "[3] and [4] both confirm the release year was 2017."
+     ✗ "The document clearly states..." (missing [N])
+     ✗ "I found that..." (no citation)
 
 # REFLECTION EXAMPLES
 
