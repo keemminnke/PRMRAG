@@ -381,6 +381,10 @@ def main():
         }
     }
 
+    # Open results file for incremental writing
+    results_file = output_dir / f"results_hybrid_{timestamp}.jsonl"
+    results_fp = open(results_file, 'w')
+
     for i, q in enumerate(questions, 1):
         question_id = q['_id']
         question = q['question']
@@ -405,6 +409,10 @@ def main():
             # Format result
             result = format_trajectory_for_review(trajectory, q)
             results.append(result)
+
+            # Write to file immediately (incremental save)
+            results_fp.write(json.dumps(result, ensure_ascii=False) + '\n')
+            results_fp.flush()  # Ensure it's written to disk
 
             # Update stats
             summary_stats['total'] += 1
@@ -452,6 +460,10 @@ def main():
 
             print(f"  {status} {result['num_steps']} steps {rag_info}")
 
+            # Print progress every 100 questions
+            if i % 100 == 0:
+                print(f"\n✓ Progress: {i}/{len(questions)} questions completed ({summary_stats['correct']}/{summary_stats['total']} correct, {summary_stats['correct']/max(summary_stats['total'],1)*100:.1f}%)\n")
+
         except Exception as e:
             print(f"  ❌ Error: {e}")
             import traceback
@@ -459,11 +471,8 @@ def main():
             summary_stats['failed'] += 1
             continue
 
-    # Save detailed results
-    results_file = output_dir / f"results_hybrid_{timestamp}.jsonl"
-    with open(results_file, 'w') as f:
-        for result in results:
-            f.write(json.dumps(result, ensure_ascii=False) + '\n')
+    # Close results file
+    results_fp.close()
     print(f"\n✓ Detailed results saved to: {results_file}")
 
     # Save summary stats

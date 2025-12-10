@@ -272,8 +272,8 @@ class RPELabeler(BaseLabeler):
         pred_norm = normalize_answer(pred_extracted)
         gold_norm = normalize_answer(gold_extracted)
 
-        # Check match with 50% threshold (more lenient for RPE)
-        return check_answer_match(pred_norm, gold_norm, threshold=0.5)
+        # Check match using cover exact match
+        return check_answer_match(pred_norm, gold_norm)
 
     def label_batch(
         self,

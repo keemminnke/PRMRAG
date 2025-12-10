@@ -80,6 +80,34 @@ def parse_rag_content(content: str) -> Dict[str, Optional[str]]:
     return result
 
 
+def extract_intermediate_answer(content: str) -> Optional[str]:
+    """Extract intermediate answer from CoT content.
+
+    Looks for patterns like:
+    - "Therefore, ..."
+    - "So, ..."
+    - "Thus, ..."
+    - Any conclusion-like statement
+
+    Returns:
+        Intermediate answer if found, else None
+    """
+    # Try common conclusion patterns
+    patterns = [
+        r'Therefore,\s*(.+?)(?:\n|$)',
+        r'So,\s*(.+?)(?:\n|$)',
+        r'Thus,\s*(.+?)(?:\n|$)',
+        r'In conclusion,\s*(.+?)(?:\n|$)',
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, content, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+
+    return None
+
+
 class StepType(str, Enum):
     """Type of step in adaptive trajectory."""
     COT = "cot"          # Pure reasoning step
@@ -254,8 +282,14 @@ class AdaptiveTrajectoryGenerator:
         }
 
         steps = []
-        # Don't compute MC for empty state (Step 0) - start with Step 1 as baseline
-        mc_prev = None
+
+        # Calculate MC on question alone BEFORE Step 1 (for proper RPE calculation)
+        print(f"\n[Pre-Step1] Calculating baseline MC on question alone...")
+        mc_question = self._monte_carlo_estimate(current_state, gold_answer)
+        print(f"[Pre-Step1] MC(question only) = {mc_question:.3f}")
+
+        # Use mc_question as baseline for Step 1
+        mc_prev = mc_question
 
         # GenPRM-style early stopping: if RAG fails (MC < 0.01), set all future MC to 0
         failed_after_rag = False
@@ -281,39 +315,52 @@ class AdaptiveTrajectoryGenerator:
             else:
                 mc_cot = self._monte_carlo_estimate(cot_state, gold_answer)
 
-            # Step 1: Always accept as baseline (no RPE calculation)
+            # Step 1: Use mc_question as baseline to enable proper RPE calculation
             if step_num == 1:
-                print(f"  Step 1: Always accepted as baseline (MC={mc_cot:.3f})")
+                # Calculate RPE: how much did Step 1 reasoning improve MC?
+                rpe_step1 = mc_cot / (mc_question + 0.01)  # Add epsilon to avoid division by zero
+                label_step1 = 'good' if rpe_step1 >= 0.79 else 'bad'  # Threshold 0.79 (effective 0.8)
+
+                print(f"  Step 1: MC(question)={mc_question:.3f} → MC(step1)={mc_cot:.3f}, RPE={rpe_step1:.3f} → label={label_step1}")
+
+                # CoT step: thought = full reasoning, action = Reason, observation = intermediate answer
                 has_answer = self._has_answer(cot_step_content)
+                intermediate_ans = extract_intermediate_answer(cot_step_content)
+
                 step = AdaptiveStep(
                     step_id=t,
                     step_type=StepType.COT,
                     text=cot_step_text,
                     content=cot_step_content,
                     used_passages=[],
-                    mc_before=0.0,  # No previous MC for step 1
+                    mc_before=mc_question,  # Use question-only MC as baseline
                     mc_after=mc_cot,
-                    rpe=1.0,  # Dummy value, not used
-                    label='good',
-                    action="Reason",
-                    metadata={'accepted': 'cot_baseline', 'step1': True},
+                    rpe=rpe_step1,
+                    label=label_step1,  # Now properly labeled based on RPE
+                    # CoT-specific fields
+                    thought=cot_step_content,  # Full reasoning process
+                    action="Reason",  # CoT always uses Reason action
+                    action_input=None,  # No search input for CoT
+                    observation=intermediate_ans,  # Intermediate conclusion if any
+                    sub_answer=None,  # CoT doesn't have sub-answer
+                    metadata={'accepted': 'step1_baseline', 'mc_question': mc_question},
                 )
                 steps.append(step)
                 current_state = cot_state
                 mc_prev = mc_cot
 
-                # Update dynamic K based on Step 1 MC (GenPRM-style)
+                # Update dynamic K based on question difficulty (mc_question, not mc after step 1)
                 if self.use_dynamic_k:
-                    if mc_cot < 0.1:
+                    if mc_question < 0.1:
                         self.current_k = self.k_hard
                         difficulty = "hard"
-                    elif mc_cot < 0.9:
+                    elif mc_question < 0.9:
                         self.current_k = self.k_medium
                         difficulty = "medium"
                     else:
                         self.current_k = self.k_easy
                         difficulty = "easy"
-                    print(f"  [Dynamic K] MC(s1)={mc_cot:.3f} → difficulty={difficulty} → K={self.current_k}")
+                    print(f"  [Dynamic K] MC(question)={mc_question:.3f} → difficulty={difficulty} → K={self.current_k}")
 
                 # Check if we have an answer
                 has_answer = self._has_answer(cot_step_content)
@@ -329,7 +376,10 @@ class AdaptiveTrajectoryGenerator:
             if failed_after_rag:
                 rpe_cot = 0.0
                 # Accept step but with MC=0 and bad label
+                # CoT step: thought = full reasoning, action = Reason, observation = intermediate answer
                 has_answer = self._has_answer(cot_step_content)
+                intermediate_ans = extract_intermediate_answer(cot_step_content)
+
                 step = AdaptiveStep(
                     step_id=t,
                     step_type=StepType.COT,
@@ -340,7 +390,12 @@ class AdaptiveTrajectoryGenerator:
                     mc_after=0.0,
                     rpe=0.0,
                     label='bad',
-                    action="Reason",
+                    # CoT-specific fields
+                    thought=cot_step_content,  # Full reasoning process
+                    action="Reason",  # CoT always uses Reason action
+                    action_input=None,  # No search input for CoT
+                    observation=intermediate_ans,  # Intermediate conclusion if any
+                    sub_answer=None,  # CoT doesn't have sub-answer
                     metadata={'accepted': 'cot_after_failure', 'threshold': 0.8},
                 )
                 steps.append(step)
@@ -362,7 +417,10 @@ class AdaptiveTrajectoryGenerator:
             # (B) Check if CoT is acceptable (threshold: 0.8, using > 0.79 to avoid floating point issues)
             if rpe_cot > 0.79:
                 # Accept CoT step with 'good' label
+                # CoT step: thought = full reasoning, action = Reason, observation = intermediate answer
                 has_answer = self._has_answer(cot_step_content)
+                intermediate_ans = extract_intermediate_answer(cot_step_content)
+
                 step = AdaptiveStep(
                     step_id=t,
                     step_type=StepType.COT,
@@ -373,7 +431,12 @@ class AdaptiveTrajectoryGenerator:
                     mc_after=mc_cot,
                     rpe=rpe_cot,
                     label='good',
-                    action="Reason",
+                    # CoT-specific fields
+                    thought=cot_step_content,  # Full reasoning process
+                    action="Reason",  # CoT always uses Reason action
+                    action_input=None,  # No search input for CoT
+                    observation=intermediate_ans,  # Intermediate conclusion if any
+                    sub_answer=None,  # CoT doesn't have sub-answer
                     metadata={'accepted': 'cot', 'threshold': 0.8},
                 )
                 steps.append(step)
@@ -1025,8 +1088,8 @@ class AdaptiveTrajectoryGenerator:
         pred_norm = normalize_answer(pred_extracted)
         gold_norm = normalize_answer(gold_extracted)
 
-        # Check match with 80% threshold
-        return check_answer_match(pred_norm, gold_norm, threshold=0.8)
+        # Check match using cover exact match
+        return check_answer_match(pred_norm, gold_norm)
 
     def _format_cot_prompt(self, state: Dict[str, Any]) -> str:
         """Format prompt for CoT generation."""
