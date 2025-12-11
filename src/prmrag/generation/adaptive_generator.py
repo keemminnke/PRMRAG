@@ -84,14 +84,19 @@ def extract_intermediate_answer(content: str) -> Optional[str]:
     """Extract intermediate answer from CoT content.
 
     Looks for patterns like:
+    - "Sub-answer: ..." (most common)
     - "Therefore, ..."
     - "So, ..."
     - "Thus, ..."
-    - Any conclusion-like statement
 
     Returns:
         Intermediate answer if found, else None
     """
+    # First try Sub-answer pattern (most reliable for CoT after RAG)
+    sub_answer_match = re.search(r'Sub-answer:\s*(.+?)(?=\n\s*(?:Thought:|Action:|Final Answer:|Step\s+\d+:)|$)', content, re.DOTALL | re.IGNORECASE)
+    if sub_answer_match:
+        return sub_answer_match.group(1).strip()
+
     # Try common conclusion patterns
     patterns = [
         r'Therefore,\s*(.+?)(?:\n|$)',
