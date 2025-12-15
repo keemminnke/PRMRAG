@@ -171,6 +171,7 @@ You are a helpful assistant that solves problems step by step.<|im_end|>
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         stop_sequences: Optional[List[str]] = None,
+        allow_observation: bool = False,
     ) -> str:
         """Generate using Qwen chat template.
 
@@ -180,6 +181,7 @@ You are a helpful assistant that solves problems step by step.<|im_end|>
             temperature: Sampling temperature
             top_p: Nucleus sampling
             stop_sequences: Stop sequences
+            allow_observation: Unused for HF backend; kept for API parity.
 
         Returns:
             Generated text

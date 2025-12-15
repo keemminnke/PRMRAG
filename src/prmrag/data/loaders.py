@@ -171,3 +171,34 @@ def load_hotpotqa_questions(
             questions.append(obj)
 
     return questions
+
+
+def load_questions_jsonl(
+    file_path: Union[str, Path],
+    limit: int | None = None,
+) -> List[Dict[str, Any]]:
+    """Load question records from a JSONL file.
+
+    This is a dataset-agnostic loader that returns raw dicts as-is.
+    """
+    file_path = Path(file_path)
+    questions: List[Dict[str, Any]] = []
+
+    with jsonlines.open(file_path) as reader:
+        for i, obj in enumerate(reader):
+            if limit and i >= limit:
+                break
+            questions.append(obj)
+
+    return questions
+
+
+def load_musique_questions(
+    file_path: Union[str, Path],
+    limit: int | None = None,
+) -> List[Dict[str, Any]]:
+    """Load MuSiQue questions from file.
+
+    Expected PRMRAG format is produced by `scripts/prepare_musique_questions.py`.
+    """
+    return load_questions_jsonl(file_path, limit=limit)

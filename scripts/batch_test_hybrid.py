@@ -9,6 +9,7 @@ This script uses:
 """
 
 import sys
+import os
 import json
 import argparse
 from pathlib import Path
@@ -26,8 +27,41 @@ from prmrag.retrieval.hybrid_retriever import HybridRetriever
 import re
 
 
+def get_truncated_text(doc_text_list, max_paragraphs=2, max_chars=1200):
+    """Smart truncation: paragraph-based with character safety net.
+
+    Wikipedia is top-heavy (most important info in first 1-2 paragraphs).
+    This prevents:
+    - Context overflow (20K+ chars → model slowdown)
+    - Lost-in-the-middle phenomenon
+    - Mid-sentence truncation artifacts
+
+    Args:
+        doc_text_list: List of paragraphs
+        max_paragraphs: Take first N paragraphs (default: 2)
+        max_chars: Safety limit even after paragraph selection (default: 1200)
+
+    Returns:
+        Truncated text string
+    """
+    if not doc_text_list:
+        return ""
+
+    # 1. Take first N paragraphs (core information)
+    selected_paragraphs = doc_text_list[:max_paragraphs]
+
+    # 2. Join them
+    joined_text = ' '.join(selected_paragraphs)
+
+    # 3. Safety net: character limit to prevent extreme cases
+    if len(joined_text) > max_chars:
+        joined_text = joined_text[:max_chars] + "..."
+
+    return joined_text
+
+
 def load_kilt_corpus(corpus_file: Path, limit: int = None) -> List[Dict[str, Any]]:
-    """Load KILT Wikipedia corpus.
+    """Load KILT Wikipedia corpus with smart truncation.
 
     Args:
         corpus_file: Path to KILT knowledge source JSONL file
@@ -47,11 +81,12 @@ def load_kilt_corpus(corpus_file: Path, limit: int = None) -> List[Dict[str, Any
             doc = json.loads(line)
 
             # KILT format: text is a list of paragraphs
-            # Join them into a single text
+            # Use smart truncation (first 2 paragraphs, max 1200 chars)
             if isinstance(doc['text'], list):
-                text = ' '.join(doc['text'])
+                text = get_truncated_text(doc['text'], max_paragraphs=2, max_chars=1200)
             else:
-                text = doc['text']
+                # Single string: still apply character limit
+                text = doc['text'][:1200] + ("..." if len(doc['text']) > 1200 else "")
 
             corpus.append({
                 'id': doc['_id'],
@@ -71,7 +106,7 @@ def load_questions(questions_file: Path, start_idx: int = 0, limit: int = None) 
 
     Args:
         questions_file: Path to questions JSONL file
-        start_idx: Starting index
+        start_idx: Starting line index in dataset (0-based)
         limit: Number of questions to load
 
     Returns:
@@ -87,6 +122,160 @@ def load_questions(questions_file: Path, start_idx: int = 0, limit: int = None) 
             questions.append(json.loads(line))
 
     return questions
+
+
+def load_questions_sequential(
+    questions_file: Path,
+    *,
+    start_idx: int = 0,
+    limit: int | None = None,
+    level: str | None = None,
+    start_filtered_idx: int | None = None,
+) -> List[Dict[str, Any]]:
+    """Load HotpotQA questions in dataset order with optional filtering.
+
+    Notes:
+    - If `level` is provided, only questions with matching `level` are considered.
+    - `start_filtered_idx` is the starting index within the filtered subset (0-based).
+      It takes precedence over `start_idx` when used with `level`.
+    - The returned question dicts are annotated with:
+        - `__dataset_idx`: original line index in the JSONL file
+        - `__filtered_idx`: index within the filtered subset (0-based, after applying `level`)
+    """
+    if level is None and start_filtered_idx is not None:
+        # Without filtering, `start_filtered_idx` is equivalent to `start_idx`.
+        start_idx = start_filtered_idx
+        start_filtered_idx = None
+
+    questions: List[Dict[str, Any]] = []
+    filtered_seen = 0
+
+    with open(questions_file, 'r') as f:
+        # Fast path: no filtering and no filtered start index.
+        if level is None and start_filtered_idx is None:
+            for dataset_idx, line in enumerate(f):
+                if dataset_idx < start_idx:
+                    continue
+                if limit and len(questions) >= limit:
+                    break
+                q = json.loads(line)
+                q['__dataset_idx'] = dataset_idx
+                questions.append(q)
+            return questions
+
+        for dataset_idx, line in enumerate(f):
+            q = json.loads(line)
+
+            q_level = q.get('level')
+            if level is not None and q_level != level:
+                continue
+
+            filtered_idx = filtered_seen
+            filtered_seen += 1
+
+            if start_filtered_idx is not None:
+                if filtered_idx < start_filtered_idx:
+                    continue
+            else:
+                if dataset_idx < start_idx:
+                    continue
+
+            q['__dataset_idx'] = dataset_idx
+            q['__filtered_idx'] = filtered_idx
+            questions.append(q)
+
+            if limit and len(questions) >= limit:
+                break
+
+    return questions
+
+
+def iter_jsonl_safely(path: Path):
+    """Yield JSON objects from a JSONL file, skipping malformed trailing lines."""
+    if not path.exists():
+        return
+    with open(path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                # Allow resuming even if the last line was partially written.
+                continue
+
+
+def load_processed_question_ids(results_file: Path, failures_file: Path) -> set[str]:
+    processed: set[str] = set()
+    for obj in iter_jsonl_safely(results_file):
+        qid = obj.get('question_id')
+        if qid:
+            processed.add(qid)
+    for obj in iter_jsonl_safely(failures_file):
+        qid = obj.get('question_id')
+        if qid:
+            processed.add(qid)
+    return processed
+
+
+def make_empty_summary_stats() -> Dict[str, Any]:
+    return {
+        'total': 0,
+        'correct': 0,
+        'with_rag': 0,
+        'with_rag_correct': 0,
+        'without_rag': 0,
+        'without_rag_correct': 0,
+        'failed': 0,
+        'format_compliance': {
+            'total_rag_steps': 0,
+            'rag_with_search_tags': 0,
+            'rag_with_citations': 0,
+            'rag_fully_compliant': 0,
+        },
+        'rag_effectiveness': {
+            'total_rag_steps': 0,
+            'rag_improved_mc': 0,
+            'rag_degraded_mc': 0,
+            'total_mc_improvement': 0.0,
+            'rpe_above_threshold': 0,
+        }
+    }
+
+
+def update_summary_stats(summary_stats: Dict[str, Any], result: Dict[str, Any]) -> None:
+    summary_stats['total'] += 1
+    if result.get('is_correct'):
+        summary_stats['correct'] += 1
+
+    if result.get('has_rag'):
+        summary_stats['with_rag'] += 1
+        if result.get('is_correct'):
+            summary_stats['with_rag_correct'] += 1
+
+        fc = result.get('format_compliance', {})
+        summary_stats['format_compliance']['total_rag_steps'] += fc.get('total_rag_steps', 0)
+        summary_stats['format_compliance']['rag_with_search_tags'] += fc.get('rag_with_search_tags', 0)
+        summary_stats['format_compliance']['rag_with_citations'] += fc.get('rag_with_citations', 0)
+        summary_stats['format_compliance']['rag_fully_compliant'] += fc.get('rag_fully_compliant', 0)
+
+        for intervention in result.get('rag_interventions', []):
+            summary_stats['rag_effectiveness']['total_rag_steps'] += 1
+            mc_imp = intervention.get('mc_improvement', 0.0)
+            summary_stats['rag_effectiveness']['total_mc_improvement'] += mc_imp
+
+            if mc_imp > 0:
+                summary_stats['rag_effectiveness']['rag_improved_mc'] += 1
+            elif mc_imp < 0:
+                summary_stats['rag_effectiveness']['rag_degraded_mc'] += 1
+
+            if intervention.get('rpe', 0.0) >= 0.8:
+                summary_stats['rag_effectiveness']['rpe_above_threshold'] += 1
+    else:
+        summary_stats['without_rag'] += 1
+        if result.get('is_correct'):
+            summary_stats['without_rag_correct'] += 1
 
 
 def validate_rag_step_format(step_content: str, step_type: str) -> Dict[str, Any]:
@@ -139,15 +328,25 @@ def format_trajectory_for_review(trajectory, question_data: Dict[str, Any]) -> D
             'label': step.label,
             'thought': getattr(step, 'thought', None),
             'action': getattr(step, 'action', 'Reason'),
-            'action_input': getattr(step, 'action_input', None),
-            'observation': getattr(step, 'observation', None),
-            'sub_answer': getattr(step, 'sub_answer', None),
-            'retrieval_query': getattr(step, 'retrieval_query', None),
-            'counterfactual_mc_cot': round(step.counterfactual_mc_cot, 3) if getattr(step, 'counterfactual_mc_cot', None) is not None else None,
-            'counterfactual_mc_rag': round(step.counterfactual_mc_rag, 3) if getattr(step, 'counterfactual_mc_rag', None) is not None else None,
-            'retrieval_necessity': getattr(step, 'retrieval_necessity', None).value if hasattr(step, 'retrieval_necessity') and step.retrieval_necessity else None,
-            'confidence': round(step.confidence, 3) if getattr(step, 'confidence', None) is not None else None,
         }
+
+        # Only include non-null optional fields
+        if hasattr(step, 'action_input') and step.action_input is not None:
+            step_info['action_input'] = step.action_input
+        if hasattr(step, 'observation') and step.observation is not None:
+            step_info['observation'] = step.observation
+        if hasattr(step, 'sub_answer') and step.sub_answer is not None:
+            step_info['sub_answer'] = step.sub_answer
+        if hasattr(step, 'retrieval_query') and step.retrieval_query is not None:
+            step_info['retrieval_query'] = step.retrieval_query
+        if hasattr(step, 'counterfactual_mc_cot') and step.counterfactual_mc_cot is not None:
+            step_info['counterfactual_mc_cot'] = round(step.counterfactual_mc_cot, 3)
+        if hasattr(step, 'counterfactual_mc_rag') and step.counterfactual_mc_rag is not None:
+            step_info['counterfactual_mc_rag'] = round(step.counterfactual_mc_rag, 3)
+        if hasattr(step, 'retrieval_necessity') and step.retrieval_necessity is not None:
+            step_info['retrieval_necessity'] = step.retrieval_necessity.value
+        if hasattr(step, 'confidence') and step.confidence is not None:
+            step_info['confidence'] = round(step.confidence, 3)
 
         if hasattr(step, 'retrieval_evidence') and step.retrieval_evidence:
             step_info['retrieval_evidence'] = step.retrieval_evidence.to_dict()
@@ -168,6 +367,9 @@ def format_trajectory_for_review(trajectory, question_data: Dict[str, Any]) -> D
                 format_compliance['rag_with_citations'] += 1
             if validation['has_search_tags'] and validation['has_citations']:
                 format_compliance['rag_fully_compliant'] += 1
+        else:
+            # CoT step: no retrieval
+            step_info['num_passages'] = 0
 
         steps_detail.append(step_info)
 
@@ -223,6 +425,25 @@ def main():
         help="Starting index in dataset (default: 0)",
     )
     parser.add_argument(
+        "--dataset",
+        type=str,
+        default="hotpotqa",
+        choices=["hotpotqa", "musique"],
+        help="Question dataset to use (default: hotpotqa)",
+    )
+    parser.add_argument(
+        "--question-level",
+        type=str,
+        default=None,
+        help="Filter questions by the JSONL 'level' field (e.g., HotpotQA: medium, MuSiQue: 2hop/3hop1/4hop3)",
+    )
+    parser.add_argument(
+        "--start-filtered-idx",
+        type=int,
+        default=None,
+        help="Starting index within the filtered subset (0-based); use with --question-level",
+    )
+    parser.add_argument(
         "--split",
         type=str,
         default="train",
@@ -266,6 +487,23 @@ def main():
         default=50,
         help="Top-K for BGE (default: 50)",
     )
+    parser.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        help="Run identifier used in output filenames (default: timestamp)",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume an existing run-id: append to JSONL and skip already processed question_ids",
+    )
+    parser.add_argument(
+        "--fsync",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Fsync JSONL after each write for crash-safe incremental saving (default: enabled)",
+    )
     args = parser.parse_args()
 
     # Create output directory
@@ -273,11 +511,21 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if args.resume and not args.run_id:
+        raise SystemExit("--resume requires --run-id so output filenames are deterministic.")
+    run_id = args.run_id or timestamp
+    results_file = output_dir / f"results_hybrid_{run_id}.jsonl"
+    failures_file = output_dir / f"failures_hybrid_{run_id}.jsonl"
+    if not args.resume and (results_file.exists() or failures_file.exists()):
+        raise SystemExit(
+            f"Output files already exist for run_id='{run_id}'. Use --resume or choose a different --run-id."
+        )
 
     print("=" * 70)
     print(f"BATCH TEST: HYBRID Retrieval (BM25 + BGE-M3)")
     print("=" * 70)
     print(f"\nConfiguration:")
+    print(f"  - Dataset: {args.dataset}")
     print(f"  - Data split: {args.split}")
     print(f"  - Number of questions: {args.num_questions}")
     print(f"  - Starting index: {args.start_idx}")
@@ -287,6 +535,12 @@ def main():
     print(f"  - BM25 top-K: {args.k_sparse}")
     print(f"  - BGE top-K: {args.k_dense}")
     print(f"  - Output directory: {output_dir}")
+    if args.question_level:
+        start_desc = args.start_filtered_idx if args.start_filtered_idx is not None else args.start_idx
+        print(f"  - Question level: {args.question_level} (start={start_desc})")
+    if args.run_id:
+        print(f"  - Run ID: {run_id}")
+    print(f"  - JSONL fsync: {args.fsync}")
 
     # Load config
     config_path = Path("configs/adaptive_generation.yaml")
@@ -300,8 +554,19 @@ def main():
     corpus = load_kilt_corpus(corpus_file, limit=args.corpus_limit)
 
     print(f"\n[2] Loading questions from {args.split} split...")
-    questions_file = data_dir / "raw" / "questions" / f"hotpotqa_{args.split}.jsonl"
-    questions = load_questions(questions_file, start_idx=args.start_idx, limit=args.num_questions)
+    questions_file = data_dir / "raw" / "questions" / f"{args.dataset}_{args.split}.jsonl"
+    if not questions_file.exists():
+        raise SystemExit(
+            f"Questions file not found: {questions_file}. "
+            f"If you're using MuSiQue, run: python3 scripts/prepare_musique_questions.py"
+        )
+    questions = load_questions_sequential(
+        questions_file,
+        start_idx=args.start_idx,
+        limit=args.num_questions,
+        level=args.question_level,
+        start_filtered_idx=args.start_filtered_idx,
+    )
     print(f"✓ Loaded {len(questions)} questions")
 
     # Load model
@@ -357,38 +622,34 @@ def main():
     print(f"PROCESSING {len(questions)} QUESTIONS")
     print(f"{'=' * 70}\n")
 
-    results = []
-    summary_stats = {
-        'total': 0,
-        'correct': 0,
-        'with_rag': 0,
-        'with_rag_correct': 0,
-        'without_rag': 0,
-        'without_rag_correct': 0,
-        'failed': 0,
-        'format_compliance': {
-            'total_rag_steps': 0,
-            'rag_with_search_tags': 0,
-            'rag_with_citations': 0,
-            'rag_fully_compliant': 0,
-        },
-        'rag_effectiveness': {
-            'total_rag_steps': 0,
-            'rag_improved_mc': 0,
-            'rag_degraded_mc': 0,
-            'total_mc_improvement': 0.0,
-            'rpe_above_threshold': 0,
-        }
-    }
+    summary_stats = make_empty_summary_stats()
 
-    # Open results file for incremental writing
-    results_file = output_dir / f"results_hybrid_{timestamp}.jsonl"
-    results_fp = open(results_file, 'w')
+    processed_question_ids: set[str] = set()
+    if args.resume:
+        if results_file.exists():
+            for obj in iter_jsonl_safely(results_file):
+                update_summary_stats(summary_stats, obj)
+        if failures_file.exists():
+            for _ in iter_jsonl_safely(failures_file):
+                summary_stats['failed'] += 1
+        processed_question_ids = load_processed_question_ids(results_file, failures_file)
+
+    remaining = sum(1 for q in questions if q.get('_id') not in processed_question_ids)
+    if processed_question_ids:
+        print(f"\n✓ Resume mode: {len(processed_question_ids)} already processed; {remaining} remaining in this selection")
+
+    # Open JSONL files for incremental writing
+    results_fp = open(results_file, 'a' if args.resume else 'w', encoding='utf-8')
+    failures_fp = open(failures_file, 'a' if args.resume else 'w', encoding='utf-8')
 
     for i, q in enumerate(questions, 1):
-        question_id = q['_id']
+        question_id = q.get('_id')
         question = q['question']
         gold_answer = q['answer']
+
+        if question_id in processed_question_ids:
+            print(f"[{i}/{len(questions)}] Skipping {question_id} (already saved)")
+            continue
 
         print(f"[{i}/{len(questions)}] Processing {question_id}...")
         print(f"  Q: {question[:80]}..." if len(question) > 80 else f"  Q: {question}")
@@ -404,50 +665,40 @@ def main():
             if trajectory is None:
                 print(f"  ❌ Generation failed (all steps rejected)")
                 summary_stats['failed'] += 1
+                failure_rec = {
+                    'question_id': question_id,
+                    'question': question,
+                    'gold_answer': gold_answer,
+                    'failure_type': 'generation_failed',
+                    'error': 'all_steps_rejected',
+                    'dataset_idx': q.get('__dataset_idx'),
+                    'filtered_idx': q.get('__filtered_idx'),
+                    'question_level': q.get('level'),
+                }
+                failures_fp.write(json.dumps(failure_rec, ensure_ascii=False) + '\n')
+                failures_fp.flush()
+                if args.fsync:
+                    os.fsync(failures_fp.fileno())
+                processed_question_ids.add(question_id)
                 continue
 
             # Format result
             result = format_trajectory_for_review(trajectory, q)
-            results.append(result)
+
+            # Add selection metadata (helps deterministic continuation)
+            result['dataset_idx'] = q.get('__dataset_idx')
+            result['filtered_idx'] = q.get('__filtered_idx')
+            result['question_level'] = q.get('level')
+            result['run_id'] = run_id
 
             # Write to file immediately (incremental save)
             results_fp.write(json.dumps(result, ensure_ascii=False) + '\n')
-            results_fp.flush()  # Ensure it's written to disk
+            results_fp.flush()
+            if args.fsync:
+                os.fsync(results_fp.fileno())
 
-            # Update stats
-            summary_stats['total'] += 1
-            if result['is_correct']:
-                summary_stats['correct'] += 1
-
-            if result['has_rag']:
-                summary_stats['with_rag'] += 1
-                if result['is_correct']:
-                    summary_stats['with_rag_correct'] += 1
-
-                # Update format compliance stats
-                fc = result['format_compliance']
-                summary_stats['format_compliance']['total_rag_steps'] += fc['total_rag_steps']
-                summary_stats['format_compliance']['rag_with_search_tags'] += fc['rag_with_search_tags']
-                summary_stats['format_compliance']['rag_with_citations'] += fc['rag_with_citations']
-                summary_stats['format_compliance']['rag_fully_compliant'] += fc['rag_fully_compliant']
-
-                # Update RAG effectiveness stats
-                for intervention in result['rag_interventions']:
-                    summary_stats['rag_effectiveness']['total_rag_steps'] += 1
-                    mc_imp = intervention['mc_improvement']
-                    summary_stats['rag_effectiveness']['total_mc_improvement'] += mc_imp
-
-                    if mc_imp > 0:
-                        summary_stats['rag_effectiveness']['rag_improved_mc'] += 1
-                    elif mc_imp < 0:
-                        summary_stats['rag_effectiveness']['rag_degraded_mc'] += 1
-
-                    if intervention['rpe'] >= 0.8:
-                        summary_stats['rag_effectiveness']['rpe_above_threshold'] += 1
-            else:
-                summary_stats['without_rag'] += 1
-                if result['is_correct']:
-                    summary_stats['without_rag_correct'] += 1
+            processed_question_ids.add(question_id)
+            update_summary_stats(summary_stats, result)
 
             # Print summary
             status = "✅" if result['is_correct'] else "❌"
@@ -469,15 +720,43 @@ def main():
             import traceback
             traceback.print_exc()
             summary_stats['failed'] += 1
+            failure_rec = {
+                'question_id': question_id,
+                'question': question,
+                'gold_answer': gold_answer,
+                'failure_type': 'exception',
+                'error': str(e),
+                'dataset_idx': q.get('__dataset_idx'),
+                'filtered_idx': q.get('__filtered_idx'),
+                'question_level': q.get('level'),
+            }
+            failures_fp.write(json.dumps(failure_rec, ensure_ascii=False) + '\n')
+            failures_fp.flush()
+            if args.fsync:
+                os.fsync(failures_fp.fileno())
+            processed_question_ids.add(question_id)
             continue
 
     # Close results file
     results_fp.close()
+    failures_fp.close()
     print(f"\n✓ Detailed results saved to: {results_file}")
+    print(f"✓ Failures saved to: {failures_file}")
 
     # Save summary stats
-    summary_file = output_dir / f"summary_hybrid_{timestamp}.json"
-    with open(summary_file, 'w') as f:
+    summary_file = output_dir / f"summary_hybrid_{run_id}.json"
+    summary_stats['run_id'] = run_id
+    summary_stats['selection'] = {
+        'dataset': args.dataset,
+        'split': args.split,
+        'num_questions': args.num_questions,
+        'start_idx': args.start_idx,
+        'question_level': args.question_level,
+        'start_filtered_idx': args.start_filtered_idx,
+        'results_file': str(results_file),
+        'failures_file': str(failures_file),
+    }
+    with open(summary_file, 'w', encoding='utf-8') as f:
         json.dump(summary_stats, f, indent=2)
     print(f"✓ Summary stats saved to: {summary_file}")
 

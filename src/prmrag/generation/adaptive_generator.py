@@ -179,10 +179,13 @@ class AdaptiveTrajectory:
     supporting_facts: Optional[List[str]] = None
     is_correct: Optional[bool] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # DPO Data: Rejected reasoning segments for preference learning
+    # These are segments where model tried pure reasoning but failed (RPE < 0.8)
+    rejected_segments: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
-        return {
+        result = {
             'trajectory_id': self.trajectory_id,
             'question': self.question,
             'steps': [s.to_dict() for s in self.steps],
@@ -192,6 +195,10 @@ class AdaptiveTrajectory:
             'is_correct': self.is_correct,
             'metadata': self.metadata,
         }
+        # Only include rejected_segments if not empty (for DPO training)
+        if self.rejected_segments:
+            result['rejected_segments'] = self.rejected_segments
+        return result
 
 
 class AdaptiveTrajectoryGenerator:
@@ -242,10 +249,11 @@ class AdaptiveTrajectoryGenerator:
 
         # Dynamic K settings for MC estimation (based on GenPRM)
         # K is adjusted based on problem difficulty (estimated from first step MC)
+        # Increased from 8/16/32 to 32/64/128 based on experiments showing 60% accuracy improvement
         self.use_dynamic_k = config.get('use_dynamic_k', True)
-        self.k_hard = config.get('k_hard', 32)      # MC(s1) < 0.1
-        self.k_medium = config.get('k_medium', 16)  # 0.1 <= MC(s1) < 0.9
-        self.k_easy = config.get('k_easy', 8)       # MC(s1) >= 0.9
+        self.k_hard = config.get('k_hard', 128)     # MC(s1) < 0.1
+        self.k_medium = config.get('k_medium', 64)  # 0.1 <= MC(s1) < 0.9
+        self.k_easy = config.get('k_easy', 32)      # MC(s1) >= 0.9
         self.current_k = self.num_rollouts  # Will be updated after first step
 
         # Step forcing settings
@@ -288,6 +296,11 @@ class AdaptiveTrajectoryGenerator:
 
         steps = []
 
+        # DPO Data Collection: Store rejected reasoning segments for preference learning
+        # These are segments where model attempted pure reasoning but MC was low (< 0.8)
+        # They serve as negative samples for DPO/RLHF training
+        rejected_segments = []
+
         # Calculate MC on question alone BEFORE Step 1 (for proper RPE calculation)
         print(f"\n[Pre-Step1] Calculating baseline MC on question alone...")
         mc_question = self._monte_carlo_estimate(current_state, gold_answer)
@@ -320,63 +333,125 @@ class AdaptiveTrajectoryGenerator:
             else:
                 mc_cot = self._monte_carlo_estimate(cot_state, gold_answer)
 
-            # Step 1: Use mc_question as baseline to enable proper RPE calculation
-            if step_num == 1:
-                # Calculate RPE: how much did Step 1 reasoning improve MC?
-                rpe_step1 = mc_cot / (mc_question + 0.01)  # Add epsilon to avoid division by zero
-                label_step1 = 'good' if rpe_step1 >= 0.79 else 'bad'  # Threshold 0.79 (effective 0.8)
+            # Update dynamic K based on question difficulty (only on step 1)
+            if step_num == 1 and self.use_dynamic_k:
+                if mc_question < 0.1:
+                    self.current_k = self.k_hard
+                    difficulty = "hard"
+                elif mc_question < 0.9:
+                    self.current_k = self.k_medium
+                    difficulty = "medium"
+                else:
+                    self.current_k = self.k_easy
+                    difficulty = "easy"
+                print(f"  [Dynamic K] MC(question)={mc_question:.3f} → difficulty={difficulty} → K={self.current_k}")
 
-                print(f"  Step 1: MC(question)={mc_question:.3f} → MC(step1)={mc_cot:.3f}, RPE={rpe_step1:.3f} → label={label_step1}")
+            # Intent-based routing (same logic for all steps)
+            # CHECK INTENT FIRST: Does model want to finish or search?
+            has_finish_intent = "Action: Finish" in cot_step_content or "Action:Finish" in cot_step_content
+            has_search_intent = "Action: Search" in cot_step_content or "Action:Search" in cot_step_content
 
-                # CoT step: thought = full reasoning, action = Reason, observation = intermediate answer
-                has_answer = self._has_answer(cot_step_content)
-                intermediate_ans = extract_intermediate_answer(cot_step_content)
-
+            # ================================================================
+            # PATH 0: VOLUNTARY FINISH - Model wants to provide final answer
+            # ================================================================
+            if has_finish_intent:
+                print(f"  Step {step_num}: Model requests FINISH - extracting final answer")
+                # Accept the CoT step as final answer step
                 step = AdaptiveStep(
                     step_id=t,
                     step_type=StepType.COT,
                     text=cot_step_text,
                     content=cot_step_content,
                     used_passages=[],
-                    mc_before=mc_question,  # Use question-only MC as baseline
+                    mc_before=mc_prev,
                     mc_after=mc_cot,
-                    rpe=rpe_step1,
-                    label=label_step1,  # Now properly labeled based on RPE
-                    # CoT-specific fields
-                    thought=cot_step_content,  # Full reasoning process
-                    action="Reason",  # CoT always uses Reason action
-                    action_input=None,  # No search input for CoT
-                    observation=intermediate_ans,  # Intermediate conclusion if any
-                    sub_answer=None,  # CoT doesn't have sub-answer
-                    metadata={'accepted': 'step1_baseline', 'mc_question': mc_question},
+                    rpe=mc_cot / (mc_prev + 0.01),
+                    label='good',
+                    thought=cot_step_content,
+                    action="Finish",
+                    action_input=None,
+                    observation=None,
+                    sub_answer=None,
+                    metadata={'voluntary_finish': True},
                 )
                 steps.append(step)
                 current_state = cot_state
-                mc_prev = mc_cot
+                print(f"  Step {step_num}: ✓ Voluntary FINISH accepted, terminating trajectory.")
+                break
 
-                # Update dynamic K based on question difficulty (mc_question, not mc after step 1)
-                if self.use_dynamic_k:
-                    if mc_question < 0.1:
-                        self.current_k = self.k_hard
-                        difficulty = "hard"
-                    elif mc_question < 0.9:
-                        self.current_k = self.k_medium
-                        difficulty = "medium"
-                    else:
-                        self.current_k = self.k_easy
-                        difficulty = "easy"
-                    print(f"  [Dynamic K] MC(question)={mc_question:.3f} → difficulty={difficulty} → K={self.current_k}")
+            if has_search_intent:
+                # ================================================================
+                # PATH A: VOLUNTARY SEARCH - Trust the model completely
+                # Key principle: "Trust Search, Verify Reasoning"
+                # - Model explicitly requests external knowledge (metacognition)
+                # - Skip MC verification entirely (no computation waste)
+                # - Execute RAG immediately and continue
+                # ================================================================
 
-                # Check if we have an answer
-                has_answer = self._has_answer(cot_step_content)
-                print(f"  Step {step_num}: Has 'Final Answer:' marker? {has_answer}")
+                # Extract model's search query from the generated content
+                import re
+                query_match = re.search(r'Search\s*\[\s*(?:query\s*=\s*)?["\']?(.+?)["\']?\s*\]', cot_step_content, re.IGNORECASE)
+                model_query = query_match.group(1).strip() if query_match else None
+
+                if model_query:
+                    print(f"  Step {step_num}: Model requests search with query: '{model_query[:60]}...'")
+                else:
+                    print(f"  Step {step_num}: Model requests search (voluntary) - extracting query failed, will generate new")
+
+                # Execute RAG with model's query (or generate new if extraction failed)
+                rag_result = self._try_rag_intervention(
+                    current_state, mc_prev, gold_answer, step_num,
+                    provided_query=model_query  # Pass model's query
+                )
+
+                rag_step, rag_state, mc_rag = rag_result
+
+                # RPE-based labeling (same as other steps)
+                rpe_rag = mc_rag / (mc_prev + 0.01)
+                label = 'good' if rpe_rag > 0.79 else 'bad'
+
+                parsed_fields = parse_rag_content(rag_step['content'])
+                has_answer = self._has_answer(rag_step['content'])
+
+                # Determine action from parsed content (could be Search or Finish)
+                parsed_action = parsed_fields.get('action') or "Search"
+
+                step = AdaptiveStep(
+                    step_id=t,
+                    step_type=StepType.RAG,
+                    text=rag_step['text'],
+                    content=rag_step['content'],
+                    used_passages=rag_step.get('passages', []),  # Key is 'passages' from _try_rag_intervention
+                    mc_before=mc_prev,
+                    mc_after=mc_rag,
+                    rpe=rpe_rag,
+                    label=label,
+                    thought=parsed_fields.get('thought'),
+                    action=parsed_action,
+                    action_input=parsed_fields.get('action_input'),
+                    observation=parsed_fields.get('observation'),
+                    sub_answer=parsed_fields.get('sub_answer'),
+                    metadata={
+                        'voluntary_search': True,
+                    },
+                )
+                steps.append(step)
+                current_state = rag_state
+                mc_prev = mc_rag
+
+                print(f"  Step {step_num}: ✓ Voluntary search (MC={mc_rag:.3f}, RPE={rpe_rag:.3f}, label={label})")
+
                 if has_answer:
-                    final_answer = self._extract_answer(cot_step_content)
+                    final_answer = self._extract_answer(rag_step['content'])
                     print(f"  Step {step_num}: ✓ Found final answer, terminating trajectory.")
                     break
                 continue
 
-            # Step 2+: Compute RPE and check threshold
+            # ================================================================
+            # PATH B: VOLUNTARY REASONING - Verify with MC before accepting
+            # ================================================================
+            print(f"  Step {step_num}: Model attempts pure reasoning (voluntary) - verifying with MC...")
+
             # If failed after RAG, skip RPE check and just accept with MC=0
             if failed_after_rag:
                 rpe_cot = 0.0
@@ -458,9 +533,34 @@ class AdaptiveTrajectoryGenerator:
                     break
 
             else:
-                # (C) CoT below threshold (RPE < 0.8), try RAG intervention
-                print(f"  Step {step_num}: CoT RPE={rpe_cot:.3f} < 0.8, trying RAG...")
+                # ================================================================
+                # (C) BACKTRACKING: CoT below threshold (RPE < 0.8)
+                # Key principle: "Verify Reasoning" - reject low-quality reasoning
+                # 1. Save rejected segment for DPO training (negative sample)
+                # 2. Discard the low-quality reasoning (backtrack)
+                # 3. Force RAG intervention to correct the trajectory
+                # ================================================================
+                print(f"  Step {step_num}: CoT RPE={rpe_cot:.3f} < 0.8 - REJECTED (backtracking)")
 
+                # Save rejected segment for DPO training
+                # This is valuable training data: the model tried pure reasoning but failed
+                rejected_segment = {
+                    'step_num': step_num,
+                    'content': cot_step_content,
+                    'text': cot_step_text,
+                    'mc_before': mc_prev,
+                    'mc_after': mc_cot,
+                    'rpe': rpe_cot,
+                    'reason': 'low_rpe',
+                    'context': current_state.get('reasoning_history', [])[-3:],  # Last 3 steps for context
+                }
+                rejected_segments.append(rejected_segment)
+                print(f"  Step {step_num}: ✗ Rejected segment saved for DPO (total: {len(rejected_segments)})")
+
+                # BACKTRACK: Do NOT add the rejected CoT step to the trajectory
+                # Instead, force RAG intervention from the current state
+
+                print(f"  Step {step_num}: Forcing RAG intervention (backtracking)...")
                 rag_result = self._try_rag_intervention(
                     current_state, mc_prev, gold_answer, step_num
                 )
@@ -477,6 +577,9 @@ class AdaptiveTrajectoryGenerator:
                 parsed_fields = parse_rag_content(rag_step['content'])
                 has_answer = self._has_answer(rag_step['content'])
 
+                # Determine action from parsed content (could be Search or Finish)
+                parsed_action = parsed_fields.get('action') or "Search"
+
                 step = AdaptiveStep(
                     step_id=t,
                     step_type=StepType.RAG,
@@ -488,12 +591,17 @@ class AdaptiveTrajectoryGenerator:
                     rpe=rpe_rag,
                     label=label,
                     # Add parsed structured fields
-                    thought=parsed_fields['thought'],
-                    action=parsed_fields['action'] if parsed_fields['action'] else "Search",
-                    action_input=parsed_fields['action_input'],
-                    observation=parsed_fields['observation'],
-                    sub_answer=parsed_fields['sub_answer'],
-                    metadata={'accepted': 'rag', 'threshold': 0.8},
+                    thought=parsed_fields.get('thought'),
+                    action=parsed_action,
+                    action_input=parsed_fields.get('action_input'),
+                    observation=parsed_fields.get('observation'),
+                    sub_answer=parsed_fields.get('sub_answer'),
+                    metadata={
+                        'accepted': 'rag_after_backtrack',
+                        'threshold': 0.8,
+                        'backtracked_from': cot_step_content[:100],  # First 100 chars of rejected segment
+                        'rejected_rpe': rpe_cot,
+                    },
                 )
                 steps.append(step)
                 current_state = rag_state
@@ -517,6 +625,10 @@ class AdaptiveTrajectoryGenerator:
         final_answer = self._extract_final_answer(steps)
         is_correct = self._check_answer(final_answer, gold_answer) if gold_answer else None
 
+        # Log DPO data collection summary
+        if rejected_segments:
+            print(f"\n[DPO Data] Collected {len(rejected_segments)} rejected segments for preference learning")
+
         return AdaptiveTrajectory(
             trajectory_id=trajectory_id,
             question=question,
@@ -529,7 +641,9 @@ class AdaptiveTrajectoryGenerator:
                 'num_steps': len(steps),
                 # num_cot_steps and num_rag_steps removed - can be calculated from steps
                 'has_rag': any(s.step_type == StepType.RAG for s in steps),
+                'num_backtracks': len(rejected_segments),  # Number of times we backtracked
             },
+            rejected_segments=rejected_segments,  # DPO training data
         )
 
     def _generate_rag_step_with_passages(
@@ -573,11 +687,15 @@ class AdaptiveTrajectoryGenerator:
                 "",
                 f"Generate Step {step_num}.",
                 "",
-                "IMPORTANT: Provide complete Search step with ALL components:",
-                "- Thought: [your reasoning about what information you need]",
-                "- Action: Search[query=\"...\"]",
-                "- Observation: [READ the Retrieved Documents above and summarize relevant information]",
-                "- Sub-answer: [extract intermediate answer from your observation]",
+                "IMPORTANT: Read the Retrieved Documents and decide your next action:",
+                "- If you have enough information to answer: Action: Finish[answer=\"entity name only\"]",
+                "- If you need more information: Action: Search[query=\"specific question\"]",
+                "",
+                "Format (Observation will be added automatically with document chunks):",
+                "- Thought: [analyze the retrieved information with citations [1], [2]...]",
+                "- Action: Finish[answer=\"...\"] OR Search[query=\"...\"]",
+                "",
+                "CRITICAL: Output ONLY the entity name in the answer. No sentences, no explanations.",
             ]
         else:
             # Continuation step with passages
@@ -613,11 +731,15 @@ class AdaptiveTrajectoryGenerator:
                 "",
                 f"Continue with Step {step_num}.",
                 "",
-                "IMPORTANT: Provide complete Search step with ALL components:",
-                "- Thought: [your reasoning about what information you need]",
-                "- Action: Search[query=\"...\"]",
-                "- Observation: [READ the Retrieved Documents (Current) above and summarize relevant information]",
-                "- Sub-answer: [extract intermediate answer from your observation]",
+                "IMPORTANT: Read the Retrieved Documents and decide your next action:",
+                "- If you have enough information to answer: Action: Finish[answer=\"entity name only\"]",
+                "- If you need more information: Action: Search[query=\"specific question\"]",
+                "",
+                "Format (Observation will be added automatically with document chunks):",
+                "- Thought: [analyze the retrieved information with citations [1], [2]...]",
+                "- Action: Finish[answer=\"...\"] OR Search[query=\"...\"]",
+                "",
+                "CRITICAL: Output ONLY the entity name in the answer. No sentences, no explanations.",
             ])
 
         prompt = "\n".join(prompt_lines)
@@ -630,6 +752,7 @@ class AdaptiveTrajectoryGenerator:
             temperature=self.temperature,
             top_p=0.95,
             stop_sequences=["\nStep"],  # Only stop at next step marker
+            allow_observation=True,  # RAG steps should include Observation/citations
         )
 
         # DEBUG: Show raw response
@@ -646,7 +769,30 @@ class AdaptiveTrajectoryGenerator:
         parsed_content = self.step_parser.parse_single_step_response(response, step_num)
         print(f"    [RAG STEP DEBUG] Parsed content (first 200 chars): {parsed_content[:200]}")
 
-        return parsed_content
+        # Add Observation section with actual retrieved document chunks
+        # Insert after Action line (standard ReAct format: Thought -> Action -> Observation)
+        observation_text = f"\nObservation:\n{passage_text}"
+
+        # Insert Observation after Action line
+        lines = parsed_content.split('\n')
+        result_lines = []
+        action_found = False
+
+        for line in lines:
+            result_lines.append(line)
+            # Insert Observation after Action line
+            if not action_found and line.strip().startswith('Action:'):
+                action_found = True
+                result_lines.append(observation_text)
+
+        # If no Action found, append at end (fallback)
+        if not action_found:
+            result_lines.append(observation_text)
+
+        final_content = '\n'.join(result_lines)
+        print(f"    [RAG STEP DEBUG] Final content with Observation (first 300 chars): {final_content[:300]}")
+
+        return final_content
 
     def _try_rag_intervention(
         self,
@@ -654,18 +800,30 @@ class AdaptiveTrajectoryGenerator:
         mc_prev: float,
         gold_answer: Optional[str],
         step_num: int,
+        provided_query: Optional[str] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any], float]:
         """Try RAG intervention when CoT is below threshold.
 
         Always returns a RAG result (never None).
         The caller decides whether to label it 'good' or 'bad' based on RPE >= 0.8.
 
+        Args:
+            current_state: Current trajectory state
+            mc_prev: Previous MC value
+            gold_answer: Gold answer for MC estimation
+            step_num: Current step number
+            provided_query: Optional query from model's Search action (if None, generate new)
+
         Returns:
             Tuple of (rag_step_info, new_state, mc_rag)
         """
-        # Generate a single RAG query using LLM
-        query = self._generate_rag_query(current_state)
-        print(f"    [RAG DEBUG] Query: {query[:80]}")
+        # Use provided query (from model's Search action) or generate new
+        if provided_query:
+            query = provided_query
+            print(f"    [RAG DEBUG] Using model's query: {query[:80]}")
+        else:
+            query = self._generate_rag_query(current_state)
+            print(f"    [RAG DEBUG] Generated query: {query[:80]}")
 
         # Retrieve passages
         passages = self.retriever.retrieve(query, top_k=self.top_k_passages)

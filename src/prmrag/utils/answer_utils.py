@@ -32,7 +32,7 @@ def normalize_answer(s: str) -> str:
         return re.sub(r"\b(a|an|the)\b", " ", text)
 
     def remove_titles(text):
-        return re.sub(r"\b(sir|mr|mrs|ms|dr|prof|professor)\b", " ", text)
+        return re.sub(r"\b(sir|mr|mrs|ms|dr|prof|professor|president|ceo|cfo|cto|coo|chairman|chairwoman|director|mayor|governor|senator|congressman|congresswoman|king|queen|prince|princess|duke|duchess|lord|lady|captain|general|colonel|admiral)\b", " ", text)
 
     def white_space_fix(text):
         return " ".join(text.split())
@@ -313,7 +313,9 @@ def extract_answer_from_text(text: str) -> str:
     text = text.strip()
 
     # 1) Finish[answer="..."] pattern
-    finish_match = re.search(r'(?:Action:\s*)?Finish\[answer\s*=\s*["\']([^"\']+)["\']\]', text, flags=re.IGNORECASE)
+    # Support both double and single quotes, and handle quotes within the answer
+    # Match: Finish[answer="..."] or Finish[answer='...'] (greedy until closing bracket)
+    finish_match = re.search(r'(?:Action:\s*)?Finish\[answer\s*=\s*["\'](.+?)["\']\]', text, flags=re.IGNORECASE | re.DOTALL)
     if finish_match:
         candidate = _clean_answer_span(finish_match.group(1))
         if candidate:

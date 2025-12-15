@@ -1,0 +1,873 @@
+✓ Using vLLM backend for PolicyModel
+======================================================================
+BATCH TEST: HYBRID Retrieval (BM25 + BGE-M3)
+======================================================================
+
+Configuration:
+  - Data split: train
+  - Number of questions: 1000
+  - Starting index: 0
+  - MC rollouts: 8
+  - Corpus: KILT Wikipedia (5.9M)
+  - Fusion method: rrf
+  - BM25 top-K: 50
+  - BGE top-K: 50
+  - Output directory: outputs/hotpotqa_train_medium
+  - Question level: medium (start=0)
+  - Run ID: train_medium_0000
+  - JSONL fsync: True
+
+[1] Loading KILT corpus...
+Loading KILT corpus from /root/.local/PRMRAG/data/kilt/kilt_knowledgesource.json...
+  Loaded 100,000 documents...
+  Loaded 200,000 documents...
+  Loaded 300,000 documents...
+  Loaded 400,000 documents...
+  Loaded 500,000 documents...
+  Loaded 600,000 documents...
+  Loaded 700,000 documents...
+  Loaded 800,000 documents...
+  Loaded 900,000 documents...
+  Loaded 1,000,000 documents...
+  Loaded 1,100,000 documents...
+  Loaded 1,200,000 documents...
+  Loaded 1,300,000 documents...
+  Loaded 1,400,000 documents...
+  Loaded 1,500,000 documents...
+  Loaded 1,600,000 documents...
+  Loaded 1,700,000 documents...
+  Loaded 1,800,000 documents...
+  Loaded 1,900,000 documents...
+  Loaded 2,000,000 documents...
+  Loaded 2,100,000 documents...
+  Loaded 2,200,000 documents...
+  Loaded 2,300,000 documents...
+  Loaded 2,400,000 documents...
+  Loaded 2,500,000 documents...
+  Loaded 2,600,000 documents...
+  Loaded 2,700,000 documents...
+  Loaded 2,800,000 documents...
+  Loaded 2,900,000 documents...
+  Loaded 3,000,000 documents...
+  Loaded 3,100,000 documents...
+  Loaded 3,200,000 documents...
+  Loaded 3,300,000 documents...
+  Loaded 3,400,000 documents...
+  Loaded 3,500,000 documents...
+  Loaded 3,600,000 documents...
+  Loaded 3,700,000 documents...
+  Loaded 3,800,000 documents...
+  Loaded 3,900,000 documents...
+  Loaded 4,000,000 documents...
+  Loaded 4,100,000 documents...
+  Loaded 4,200,000 documents...
+  Loaded 4,300,000 documents...
+  Loaded 4,400,000 documents...
+  Loaded 4,500,000 documents...
+  Loaded 4,600,000 documents...
+  Loaded 4,700,000 documents...
+  Loaded 4,800,000 documents...
+  Loaded 4,900,000 documents...
+  Loaded 5,000,000 documents...
+  Loaded 5,100,000 documents...
+  Loaded 5,200,000 documents...
+  Loaded 5,300,000 documents...
+  Loaded 5,400,000 documents...
+  Loaded 5,500,000 documents...
+  Loaded 5,600,000 documents...
+  Loaded 5,700,000 documents...
+  Loaded 5,800,000 documents...
+  Loaded 5,900,000 documents...
+✓ Loaded 5,903,530 documents
+
+[2] Loading questions from train split...
+✓ Loaded 1000 questions
+
+[3] Loading Qwen2.5-7B model...
+Loading policy model with vLLM: Qwen/Qwen2.5-7B-Instruct
+  Random seed set to: 42
+INFO 12-15 14:23:53 [utils.py:253] non-default args: {'trust_remote_code': True, 'seed': 42, 'disable_log_stats': True, 'enforce_eager': True, 'model': 'Qwen/Qwen2.5-7B-Instruct'}
+The argument `trust_remote_code` is to be used with Auto classes. It has no effect here and is ignored.
+INFO 12-15 14:23:54 [model.py:643] Resolved architecture: Qwen2ForCausalLM
+INFO 12-15 14:23:54 [model.py:1764] Using max model len 32768
+INFO 12-15 14:23:54 [scheduler.py:207] Chunked prefill is enabled with max_num_batched_tokens=16384.
+INFO 12-15 14:23:54 [vllm.py:508] Cudagraph is disabled under eager mode
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m INFO 12-15 14:23:55 [core.py:93] Initializing a V1 LLM engine (v0.11.2.dev94+ga2e9ebe9e.d20251120) with config: model='Qwen/Qwen2.5-7B-Instruct', speculative_config=None, tokenizer='Qwen/Qwen2.5-7B-Instruct', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=True, dtype=torch.bfloat16, max_seq_len=32768, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=True, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None), seed=42, served_model_name=Qwen/Qwen2.5-7B-Instruct, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'level': None, 'mode': <CompilationMode.NONE: 0>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['all'], 'splitting_ops': None, 'compile_mm_encoder': False, 'use_inductor': None, 'compile_sizes': [], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {}, 'max_cudagraph_capture_size': 0, 'local_cache_dir': None}
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m INFO 12-15 14:23:57 [parallel_state.py:1217] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://10.77.77.114:54859 backend=nccl
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m INFO 12-15 14:23:57 [parallel_state.py:1425] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank 0
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m INFO 12-15 14:23:57 [gpu_model_runner.py:3260] Starting to load model Qwen/Qwen2.5-7B-Instruct...
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m INFO 12-15 14:23:58 [cuda.py:415] Valid backends: ['FLASH_ATTN', 'FLASHINFER', 'TRITON_ATTN', 'FLEX_ATTENTION']
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m INFO 12-15 14:23:58 [cuda.py:424] Using FLASH_ATTN backend.
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m Exception in thread Thread-1 (_report_usage_worker):
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m Traceback (most recent call last):
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m   File "/usr/lib/python3.12/threading.py", line 1073, in _bootstrap_inner
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m     self.run()
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m   File "/usr/lib/python3.12/threading.py", line 1010, in run
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m     self._target(*self._args, **self._kwargs)
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m   File "/root/.local/vllm/vllm/usage/usage_lib.py", line 174, in _report_usage_worker
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m     self._report_usage_once(model_architecture, usage_context, extra_kvs)
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m   File "/root/.local/vllm/vllm/usage/usage_lib.py", line 259, in _report_usage_once
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m     self._send_to_server(data)
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m   File "/root/.local/vllm/vllm/usage/usage_lib.py", line 281, in _send_to_server
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m     global_http_client.post(_USAGE_STATS_SERVER, json=data)
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m   File "/usr/local/lib/python3.12/dist-packages/requests/sessions.py", line 637, in post
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m     return self.request("POST", url, data=data, json=json, **kwargs)
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m   File "/usr/local/lib/python3.12/dist-packages/requests/sessions.py", line 589, in request
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m     resp = self.send(prep, **send_kwargs)
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m   File "/usr/local/lib/python3.12/dist-packages/requests/sessions.py", line 746, in send
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m     r.content
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m   File "/usr/local/lib/python3.12/dist-packages/requests/models.py", line 902, in content
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m     self._content = b"".join(self.iter_content(CONTENT_CHUNK_SIZE)) or b""
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m   File "/usr/local/lib/python3.12/dist-packages/requests/models.py", line 820, in generate
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m     yield from self.raw.stream(chunk_size, decode_content=True)
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m   File "/usr/lib/python3/dist-packages/urllib3/response.py", line 1123, in stream
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m     yield from self.read_chunked(amt, decode_content=decode_content)
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m   File "/usr/lib/python3/dist-packages/urllib3/response.py", line 1271, in read_chunked
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m     decoded = self._decode(
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m               ^^^^^^^^^^^^^
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m   File "/usr/lib/python3/dist-packages/urllib3/response.py", line 613, in _decode
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m     data = self._decoder.decompress(data, max_length=max_length)
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m   File "/usr/lib/python3/dist-packages/urllib3/response.py", line 267, in decompress
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m     part = self._obj.decompress(data, max_length=max_length)
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m TypeError: decompress() takes at most 1 argument (2 given)
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m Loading safetensors checkpoint shards:   0% Completed | 0/4 [00:00<?, ?it/s]
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m Loading safetensors checkpoint shards:  25% Completed | 1/4 [00:00<00:01,  2.54it/s]
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m Loading safetensors checkpoint shards:  50% Completed | 2/4 [00:00<00:00,  2.51it/s]
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m Loading safetensors checkpoint shards:  75% Completed | 3/4 [00:01<00:00,  2.33it/s]
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:01<00:00,  2.47it/s]
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:01<00:00,  2.46it/s]
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m 
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m INFO 12-15 14:24:02 [default_loader.py:290] Loading weights took 1.64 seconds
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m INFO 12-15 14:24:02 [gpu_model_runner.py:3339] Model loading took 14.2488 GiB memory and 3.961686 seconds
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m INFO 12-15 14:24:04 [gpu_worker.py:337] Available KV cache memory: 65.45 GiB
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m INFO 12-15 14:24:05 [kv_cache_utils.py:1234] GPU KV cache size: 1,225,536 tokens
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m INFO 12-15 14:24:05 [kv_cache_utils.py:1239] Maximum concurrency for 32,768 tokens per request: 37.40x
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m INFO 12-15 14:24:10 [core.py:253] init engine (profile, create kv cache, warmup model) took 7.83 seconds
+[0;36m(EngineCore_DP0 pid=2851243)[0;0m INFO 12-15 14:24:11 [vllm.py:508] Cudagraph is disabled under eager mode
+INFO 12-15 14:24:12 [llm.py:352] Supported tasks: ['generate']
+[2025-12-15 14:24:12] INFO config.py:54: PyTorch version 2.10.0.dev20251119+cu128 available.
+✓ vLLM model loaded successfully (seed=42)
+✓ Model loaded
+
+[4] Initializing HYBRID retriever (BM25 + BGE-M3)...
+  [4.1] Initializing BGE-M3 retriever...
+Loading BGE-M3 model on cuda...
+Fetching 30 files:   0%|          | 0/30 [00:00<?, ?it/s]Fetching 30 files: 100%|██████████| 30/30 [00:00<00:00, 21425.02it/s]
+[2025-12-15 14:24:14] INFO runner.py:86: loading existing colbert_linear and sparse_linear---------
+✓ BGE-M3 model loaded
+Loading cached embeddings from /root/.local/PRMRAG/data/embeddings/kilt_wikipedia_bge_m3.npy...
+✓ Loaded 5903530 cached embeddings
+  [4.2] Initializing BM25 retriever...
+Loading cached BM25 index from /root/.local/PRMRAG/data/indexes/kilt_wikipedia_bm25.pkl...
+✓ Loaded BM25 index with 5903530 documents
+  [4.3] Combining with RRF fusion...
+✓ Hybrid retriever initialized:
+  - Fusion method: rrf
+  - BM25 top-K: 50
+  - BGE top-K: 50
+  - RRF constant k: 60
+✓ Hybrid retriever initialized!
+
+[5] Initializing adaptive generator...
+✓ Generator initialized
+
+======================================================================
+PROCESSING 1000 QUESTIONS
+======================================================================
+
+[1/1000] Processing 5a7a06935542990198eaf050...
+  Q: Which magazine was started first Arthur's Magazine or First for Women?
+
+[Pre-Step1] Calculating baseline MC on question alone...
+[Pre-Step1] MC(question only) = 1.000
+  [Dynamic K] MC(question)=1.000 → difficulty=easy → K=32
+  Step 1: Model attempts pure reasoning (voluntary) - verifying with MC...
+  Step 1: CoT accepted (RPE=0.990), checking for final answer...
+  Step 1: Has 'Final Answer:' marker? False
+  Step 2: Model requests search with query: 'founding year of Arthur's Magazine...'
+    [RAG DEBUG] Using model's query: founding year of Arthur's Magazine
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 3111.50it/s]
+You're using a XLMRobertaTokenizerFast tokenizer. Please note that with a fast tokenizer, using the `__call__` method is faster than using a method to encode the text followed by a call to the `pad` method to get a padded encoding.
+Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 63.33it/s]
+    [RAG DEBUG] Retrieved 5 passages, top title: Equus (magazine)
+    [RAG STEP DEBUG] Raw model response (first 200 chars): Thought: The magazine Arthur's Magazine from the 19th century [4] predates the 21st-century Arthur magazine [2]. For First for Women, I need to find its founding year.
+
+Action: Search[query="founding 
+    [RAG STEP DEBUG] Parsed content (first 200 chars): Thought: The magazine Arthur's Magazine from the 19th century [4] predates the 21st-century Arthur magazine [2]. For First for Women, I need to find its founding year.
+
+Action: Search[query="founding 
+    [RAG STEP DEBUG] Final content with Observation (first 300 chars): Thought: The magazine Arthur's Magazine from the 19th century [4] predates the 21st-century Arthur magazine [2]. For First for Women, I need to find its founding year.
+
+Action: Search[query="founding year of First for Women magazine"]
+
+Observation:
+[1] Equus (magazine): Equus (magazine)
+ Equus is a 
+    [MC DEBUG] Rollouts will use 5 current step passages (not accumulated)
+    [MC DEBUG] MC=0.719 with 5 passages, K=32 (successes: 23/32)
+  Step 2: ✓ Voluntary search (MC=0.719, RPE=0.712, label=bad)
+  Step 3: Model requests search with query: 'founding year of First for Women magazine...'
+    [RAG DEBUG] Using model's query: founding year of First for Women magazine
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 2295.73it/s]
+Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 52.37it/s]
+    [RAG DEBUG] Retrieved 5 passages, top title: Stern (magazine)
+    [RAG STEP DEBUG] Raw model response (first 200 chars): Action: Finish[answer="First for Women"]
+    [RAG STEP DEBUG] Parsed content (first 200 chars): Action: Finish[answer="First for Women"]
+    [RAG STEP DEBUG] Final content with Observation (first 300 chars): Action: Finish[answer="First for Women"]
+
+Observation:
+[1] Stern (magazine): Stern (magazine)
+ Stern (, German for "Star") is a weekly news magazine published in Hamburg, Germany, by Gruner + Jahr, a subsidiary of Bertelsmann.
+
+[2] First for Women: First for Women
+ First for Women is a woman's magaz
+    [MC DEBUG] Rollouts will use 5 current step passages (not accumulated)
+    [MC DEBUG] MC=0.969 with 5 passages, K=32 (successes: 31/32)
+  Step 3: ✓ Voluntary search (MC=0.969, RPE=1.329, label=good)
+  Step 3: ✓ Found final answer, terminating trajectory.
+  ❌ 3 steps (1 RAG steps) [Format: 1/1 (100%)]
+[2/1000] Processing 5a879ab05542996e4f30887e...
+  Q: The Oberoi family is part of a hotel company that has a head office in what city...
+
+[Pre-Step1] Calculating baseline MC on question alone...
+[Pre-Step1] MC(question only) = 0.250
+  [Dynamic K] MC(question)=0.250 → difficulty=medium → K=64
+  Step 1: Model attempts pure reasoning (voluntary) - verifying with MC...
+  Step 1: CoT accepted (RPE=1.082), checking for final answer...
+  Step 1: Has 'Final Answer:' marker? False
+  Step 2: Model requests search with query: 'Oberoi Hotels & Resorts head office location...'
+    [RAG DEBUG] Using model's query: Oberoi Hotels & Resorts head office location
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 1841.22it/s]
+Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 49.28it/s]
+    [RAG DEBUG] Retrieved 5 passages, top title: Denizen Hotels
+    [RAG STEP DEBUG] Raw model response (first 200 chars): Action: Finish[answer="Delhi"]
+    [RAG STEP DEBUG] Parsed content (first 200 chars): Action: Finish[answer="Delhi"]
+    [RAG STEP DEBUG] Final content with Observation (first 300 chars): Action: Finish[answer="Delhi"]
+
+Observation:
+[1] Denizen Hotels: Denizen Hotels
+ Denizen Hotels is a former proposed brand within the Hilton Family of hotels. Hilton targeted the brand to mark the company's entry into the global lifestyle brand sector, and introduced it on March 10, 2009, in Berlin,
+    [MC DEBUG] Rollouts will use 5 current step passages (not accumulated)
+    [MC DEBUG] MC=0.984 with 5 passages, K=64 (successes: 63/64)
+  Step 2: ✓ Voluntary search (MC=0.984, RPE=3.380, label=good)
+  Step 2: ✓ Found final answer, terminating trajectory.
+  ✅ 2 steps (CoT only)
+[3/1000] Processing 5a82171f5542990a1d231f4a...
+  Q:  What nationality was James Henry Miller's wife?
+
+[Pre-Step1] Calculating baseline MC on question alone...
+[Pre-Step1] MC(question only) = 0.625
+  [Dynamic K] MC(question)=0.625 → difficulty=medium → K=64
+  Step 1: Model attempts pure reasoning (voluntary) - verifying with MC...
+  Step 1: CoT accepted (RPE=1.083), checking for final answer...
+  Step 1: Has 'Final Answer:' marker? False
+  Step 2: Model requests search with query: 'James Henry Miller wife nationality...'
+    [RAG DEBUG] Using model's query: James Henry Miller wife nationality
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 2241.74it/s]
+Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 48.75it/s]
+    [RAG DEBUG] Retrieved 5 passages, top title: Ernest Clark (governor)
+    [RAG STEP DEBUG] Raw model response (first 200 chars): Thought: From the retrieved documents, it is clear that James Henry Miller's wife was June Miller, who was known to be his second wife. However, the nationality of June Miller is not explicitly mentio
+    [RAG STEP DEBUG] Parsed content (first 200 chars): Thought: From the retrieved documents, it is clear that James Henry Miller's wife was June Miller, who was known to be his second wife. However, the nationality of June Miller is not explicitly mentio
+    [RAG STEP DEBUG] Final content with Observation (first 300 chars): Thought: From the retrieved documents, it is clear that James Henry Miller's wife was June Miller, who was known to be his second wife. However, the nationality of June Miller is not explicitly mentioned in the provided documents.
+
+Action: Search[query="nationality of June Miller"]
+
+Observation:
+[1]
+    [MC DEBUG] Rollouts will use 5 current step passages (not accumulated)
+    [MC DEBUG] MC=0.891 with 5 passages, K=64 (successes: 57/64)
+  Step 2: ✓ Voluntary search (MC=0.891, RPE=1.277, label=good)
+  Step 3: Model requests FINISH - extracting final answer
+  Step 3: ✓ Voluntary FINISH accepted, terminating trajectory.
+  ✅ 3 steps (1 RAG steps) [Format: 1/1 (100%)]
+[4/1000] Processing 5a84dd955542997b5ce3ff79...
+  Q: Cadmium Chloride is slightly soluble in this chemical, it is also called what?
+
+[Pre-Step1] Calculating baseline MC on question alone...
+[Pre-Step1] MC(question only) = 0.125
+  [Dynamic K] MC(question)=0.125 → difficulty=medium → K=64
+  Step 1: Model attempts pure reasoning (voluntary) - verifying with MC...
+  Step 1: CoT RPE=0.579 < 0.8 - REJECTED (backtracking)
+  Step 1: ✗ Rejected segment saved for DPO (total: 1)
+  Step 1: Forcing RAG intervention (backtracking)...
+    [QUERY DEBUG] Raw LLM response: Cadmium Chloride solubility chemical name
+    [QUERY DEBUG] Extracted query: Cadmium Chloride solubility chemical name
+    [RAG DEBUG] Generated query: Cadmium Chloride solubility chemical name
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 2417.47it/s]
+Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 47.55it/s]
+    [RAG DEBUG] Retrieved 5 passages, top title: Barium chloride
+    [RAG STEP DEBUG] Raw model response (first 200 chars): Thought: Cadmium chloride is highly soluble in water but slightly soluble in alcohol. The question asks for a chemical it is slightly soluble in and the alternative name for it. Based on the informati
+    [RAG STEP DEBUG] Parsed content (first 200 chars): Thought: Cadmium chloride is highly soluble in water but slightly soluble in alcohol. The question asks for a chemical it is slightly soluble in and the alternative name for it. Based on the informati
+    [RAG STEP DEBUG] Final content with Observation (first 300 chars): Thought: Cadmium chloride is highly soluble in water but slightly soluble in alcohol. The question asks for a chemical it is slightly soluble in and the alternative name for it. Based on the information, it is slightly soluble in alcohol. However, the alternative name for Cadmium chloride is not pro
+    [MC DEBUG] Rollouts will use 5 current step passages (not accumulated)
+    [MC DEBUG] MC=0.766 with 5 passages, K=64 (successes: 49/64)
+  Step 1: RAG step added (RPE=5.671, label=good), checking for final answer...
+  Step 1: Has 'Final Answer:' marker? False
+  Step 2: Model requests FINISH - extracting final answer
+  Step 2: ✓ Voluntary FINISH accepted, terminating trajectory.
+
+[DPO Data] Collected 1 rejected segments for preference learning
+  ❌ 2 steps (1 RAG steps) [Format: 1/1 (100%)]
+[5/1000] Processing 5a7e36045542991319bc9440...
+  Q: Which tennis player won more Grand Slam titles, Henri Leconte or Jonathan Stark?
+
+[Pre-Step1] Calculating baseline MC on question alone...
+[Pre-Step1] MC(question only) = 0.797
+  [Dynamic K] MC(question)=0.797 → difficulty=medium → K=64
+  Step 1: Model attempts pure reasoning (voluntary) - verifying with MC...
+  Step 1: CoT accepted (RPE=1.123), checking for final answer...
+  Step 1: Has 'Final Answer:' marker? False
+  Step 2: Model requests search with query: 'Henri Leconte Grand Slam titles...'
+    [RAG DEBUG] Using model's query: Henri Leconte Grand Slam titles
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 2246.55it/s]
+Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 48.28it/s]
+    [RAG DEBUG] Retrieved 5 passages, top title: Andre Agassi
+    [RAG STEP DEBUG] Raw model response (first 200 chars): Thought: The retrieved information does not provide the exact number of Grand Slam titles won by Henri Leconte. I need to search for this specific information to compare it with Jonathan Stark's achie
+    [RAG STEP DEBUG] Parsed content (first 200 chars): Thought: The retrieved information does not provide the exact number of Grand Slam titles won by Henri Leconte. I need to search for this specific information to compare it with Jonathan Stark's achie
+    [RAG STEP DEBUG] Final content with Observation (first 300 chars): Thought: The retrieved information does not provide the exact number of Grand Slam titles won by Henri Leconte. I need to search for this specific information to compare it with Jonathan Stark's achievements.
+
+Action: Search[query="Henri Leconte Grand Slam titles"]
+
+Observation:
+[1] Andre Agassi: An
+    [MC DEBUG] Rollouts will use 5 current step passages (not accumulated)
+    [MC DEBUG] MC=0.656 with 5 passages, K=64 (successes: 42/64)
+  Step 2: ✓ Voluntary search (MC=0.656, RPE=0.716, label=bad)
+  Step 3: Model requests search with query: 'total Grand Slam titles Henri Leconte...'
+    [RAG DEBUG] Using model's query: total Grand Slam titles Henri Leconte
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 3146.51it/s]
+Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 49.68it/s]
+    [RAG DEBUG] Retrieved 5 passages, top title: Andre Agassi
+    [RAG STEP DEBUG] Raw model response (first 200 chars): Action: Search[query="Henri Leconte Grand Slam titles"]
+    [RAG STEP DEBUG] Parsed content (first 200 chars): Action: Search[query="Henri Leconte Grand Slam titles"]
+    [RAG STEP DEBUG] Final content with Observation (first 300 chars): Action: Search[query="Henri Leconte Grand Slam titles"]
+
+Observation:
+[1] Andre Agassi: Andre Agassi
+ Andre Kirk Agassi ( ; born April 29, 1970) is an American retired professional tennis player and former world No. 1 whose career spanned from the late 1980s to the mid-2000s. In singles, Agassi is a
+    [MC DEBUG] Rollouts will use 5 current step passages (not accumulated)
+    [MC DEBUG] MC=0.422 with 5 passages, K=64 (successes: 27/64)
+  Step 3: ✓ Voluntary search (MC=0.422, RPE=0.633, label=bad)
+  Step 4: Model requests search with query: 'Henri Leconte Grand Slam titles...'
+    [RAG DEBUG] Using model's query: Henri Leconte Grand Slam titles
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 3640.89it/s]
+Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 48.90it/s]
+    [RAG DEBUG] Retrieved 5 passages, top title: Andre Agassi
+    [RAG STEP DEBUG] Raw model response (first 200 chars): Thought: The retrieved information does not provide the exact number of Grand Slam titles won by Henri Leconte. I need to search for this specific information to compare it with Jonathan Stark's achie
+    [RAG STEP DEBUG] Parsed content (first 200 chars): Thought: The retrieved information does not provide the exact number of Grand Slam titles won by Henri Leconte. I need to search for this specific information to compare it with Jonathan Stark's achie
+    [RAG STEP DEBUG] Final content with Observation (first 300 chars): Thought: The retrieved information does not provide the exact number of Grand Slam titles won by Henri Leconte. I need to search for this specific information to compare it with Jonathan Stark's achievements.
+
+Action: Search[query="Henri Leconte Grand Slam titles"]
+
+Observation:
+[1] Andre Agassi: An
+    [MC DEBUG] Rollouts will use 5 current step passages (not accumulated)
+    [MC DEBUG] MC=0.484 with 5 passages, K=64 (successes: 31/64)
+  Step 4: ✓ Voluntary search (MC=0.484, RPE=1.122, label=good)
+  Step 5: Model requests search with query: 'Henri Leconte Grand Slam titles...'
+    [RAG DEBUG] Using model's query: Henri Leconte Grand Slam titles
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 3916.25it/s]
+Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 52.05it/s]
+    [RAG DEBUG] Retrieved 5 passages, top title: Andre Agassi
+    [RAG STEP DEBUG] Raw model response (first 200 chars): Thought: The retrieved information indicates that Henri Leconte reached the French Open men's singles final in 1988 and won the French Open men's doubles title in 1984. However, it does not specify th
+    [RAG STEP DEBUG] Parsed content (first 200 chars): Thought: The retrieved information indicates that Henri Leconte reached the French Open men's singles final in 1988 and won the French Open men's doubles title in 1984. However, it does not specify th
+    [RAG STEP DEBUG] Final content with Observation (first 300 chars): Thought: The retrieved information indicates that Henri Leconte reached the French Open men's singles final in 1988 and won the French Open men's doubles title in 1984. However, it does not specify the number of Grand Slam titles he won. I need to search for this specific information to compare it w
+    [MC DEBUG] Rollouts will use 5 current step passages (not accumulated)
+    [MC DEBUG] MC=0.578 with 5 passages, K=64 (successes: 37/64)
+  Step 5: ✓ Voluntary search (MC=0.578, RPE=1.169, label=good)
+  Step 6: Model requests search with query: 'Henri Leconte Grand Slam titles won...'
+    [RAG DEBUG] Using model's query: Henri Leconte Grand Slam titles won
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 3412.78it/s]
+Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 51.25it/s]
+    [RAG DEBUG] Retrieved 5 passages, top title: Andre Agassi
+    [RAG STEP DEBUG] Raw model response (first 200 chars): Action: Search[query="Henri Leconte Grand Slam titles won"]
+    [RAG STEP DEBUG] Parsed content (first 200 chars): Action: Search[query="Henri Leconte Grand Slam titles won"]
+    [RAG STEP DEBUG] Final content with Observation (first 300 chars): Action: Search[query="Henri Leconte Grand Slam titles won"]
+
+Observation:
+[1] Andre Agassi: Andre Agassi
+ Andre Kirk Agassi ( ; born April 29, 1970) is an American retired professional tennis player and former world No. 1 whose career spanned from the late 1980s to the mid-2000s. In singles, Agassi 
+    [MC DEBUG] Rollouts will use 5 current step passages (not accumulated)
+    [MC DEBUG] MC=0.484 with 5 passages, K=64 (successes: 31/64)
+  Step 6: ✓ Voluntary search (MC=0.484, RPE=0.824, label=good)
+  Step 7: Model requests search with query: 'Henri Leconte Grand Slam titles won...'
+    [RAG DEBUG] Using model's query: Henri Leconte Grand Slam titles won
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 3748.26it/s]
+Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 49.56it/s]
+    [RAG DEBUG] Retrieved 5 passages, top title: Andre Agassi
+    [RAG STEP DEBUG] Raw model response (first 200 chars): Thought: The retrieved information does not provide the exact number of Grand Slam titles won by Henri Leconte. I need to search for this specific information to compare it with Jonathan Stark's achie
+    [RAG STEP DEBUG] Parsed content (first 200 chars): Thought: The retrieved information does not provide the exact number of Grand Slam titles won by Henri Leconte. I need to search for this specific information to compare it with Jonathan Stark's achie
+    [RAG STEP DEBUG] Final content with Observation (first 300 chars): Thought: The retrieved information does not provide the exact number of Grand Slam titles won by Henri Leconte. I need to search for this specific information to compare it with Jonathan Stark's achievements.
+
+Action: Search[query="Henri Leconte Grand Slam titles won"]
+
+Observation:
+[1] Andre Agassi
+    [MC DEBUG] Rollouts will use 5 current step passages (not accumulated)
+    [MC DEBUG] MC=0.562 with 5 passages, K=64 (successes: 36/64)
+  Step 7: ✓ Voluntary search (MC=0.562, RPE=1.138, label=good)
+  Step 8: Model requests search with query: 'Henri Leconte Grand Slam titles won...'
+    [RAG DEBUG] Using model's query: Henri Leconte Grand Slam titles won
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 3640.89it/s]
+Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 51.00it/s]
+    [RAG DEBUG] Retrieved 5 passages, top title: Andre Agassi
+    [RAG STEP DEBUG] Raw model response (first 200 chars): Action: Search[query="Henri Leconte Grand Slam titles won"]
+    [RAG STEP DEBUG] Parsed content (first 200 chars): Action: Search[query="Henri Leconte Grand Slam titles won"]
+    [RAG STEP DEBUG] Final content with Observation (first 300 chars): Action: Search[query="Henri Leconte Grand Slam titles won"]
+
+Observation:
+[1] Andre Agassi: Andre Agassi
+ Andre Kirk Agassi ( ; born April 29, 1970) is an American retired professional tennis player and former world No. 1 whose career spanned from the late 1980s to the mid-2000s. In singles, Agassi 
+    [MC DEBUG] Rollouts will use 5 current step passages (not accumulated)
+    [MC DEBUG] MC=0.547 with 5 passages, K=64 (successes: 35/64)
+  Step 8: ✓ Voluntary search (MC=0.547, RPE=0.955, label=good)
+  Step 9: Model requests search with query: 'Jonathan Stark Grand Slam titles...'
+    [RAG DEBUG] Using model's query: Jonathan Stark Grand Slam titles
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 2668.13it/s]
+Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 50.38it/s]
+    [RAG DEBUG] Retrieved 5 passages, top title: Andre Agassi
+    [RAG STEP DEBUG] Raw model response (first 200 chars): Thought: The retrieved information indicates that Henri Leconte won the French Open men's doubles title in 1984 and reached the French Open men's singles final in 1988. However, it does not specify th
+    [RAG STEP DEBUG] Parsed content (first 200 chars): Thought: The retrieved information indicates that Henri Leconte won the French Open men's doubles title in 1984 and reached the French Open men's singles final in 1988. However, it does not specify th
+    [RAG STEP DEBUG] Final content with Observation (first 300 chars): Thought: The retrieved information indicates that Henri Leconte won the French Open men's doubles title in 1984 and reached the French Open men's singles final in 1988. However, it does not specify the number of Grand Slam titles he won. In contrast, Jonathan Stark won two Grand Slam doubles titles.
+    [MC DEBUG] Rollouts will use 5 current step passages (not accumulated)
+    [MC DEBUG] MC=0.922 with 5 passages, K=64 (successes: 59/64)
+  Step 9: ✓ Voluntary search (MC=0.922, RPE=1.655, label=good)
+  Step 9: ✓ Found final answer, terminating trajectory.
+  ✅ 9 steps (7 RAG steps) [Format: 7/7 (100%)]
+[6/1000] Processing 5a7d0db955429909bec76924...
+  Q: The Dutch-Belgian television series that "House of Anubis" was based on first ai...
+
+[Pre-Step1] Calculating baseline MC on question alone...
+[Pre-Step1] MC(question only) = 0.062
+  [Dynamic K] MC(question)=0.062 → difficulty=hard → K=128
+  Step 1: Model attempts pure reasoning (voluntary) - verifying with MC...
+  Step 1: CoT RPE=0.216 < 0.8 - REJECTED (backtracking)
+  Step 1: ✗ Rejected segment saved for DPO (total: 1)
+  Step 1: Forcing RAG intervention (backtracking)...
+    [QUERY DEBUG] Raw LLM response: Dutch-Belgian television series House of Anubis based year
+    [QUERY DEBUG] Extracted query: Dutch-Belgian television series House of Anubis based year
+    [RAG DEBUG] Generated query: Dutch-Belgian television series House of Anubis based year
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 2129.09it/s]
+Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 72.00it/s]
+    [RAG DEBUG] Retrieved 5 passages, top title: Mystery!
+    [RAG STEP DEBUG] Raw model response (first 200 chars): Thought: The Dutch-Belgian television series "Het Huis Anubis" was the basis for "House of Anubis." According to document [2], it first aired in September 2006.
+Action: Finish[answer="2006"]
+    [RAG STEP DEBUG] Parsed content (first 200 chars): Thought: The Dutch-Belgian television series "Het Huis Anubis" was the basis for "House of Anubis." According to document [2], it first aired in September 2006.
+Action: Finish[answer="2006"]
+    [RAG STEP DEBUG] Final content with Observation (first 300 chars): Thought: The Dutch-Belgian television series "Het Huis Anubis" was the basis for "House of Anubis." According to document [2], it first aired in September 2006.
+Action: Finish[answer="2006"]
+
+Observation:
+[1] Mystery!: Mystery!
+ Mystery! (also written MYSTERY!) is a television anthology series produ
+    [MC DEBUG] Rollouts will use 5 current step passages (not accumulated)
+    [MC DEBUG] MC=0.953 with 5 passages, K=128 (successes: 122/128)
+  Step 1: RAG step added (RPE=13.147, label=good), checking for final answer...
+  Step 1: Has 'Final Answer:' marker? True
+  Step 1: ✓ Found final answer, terminating trajectory.
+
+[DPO Data] Collected 1 rejected segments for preference learning
+  ✅ 1 steps (CoT only)
+[7/1000] Processing 5abd90545542996e802b47d7...
+  Q: Fast Cars, Danger, Fire and Knives includes guest appearances from which hip hop...
+
+[Pre-Step1] Calculating baseline MC on question alone...
+    [MC DEBUG] MC=0.0! K=128, Gold: Jaime Meline
+    [MC DEBUG] Sample rollouts: ['Asa Clinton Jr', 'Jimmy Iovine']
+[Pre-Step1] MC(question only) = 0.000
+    [MC DEBUG] MC=0.0! K=128, Gold: Jaime Meline
+    [MC DEBUG] Sample rollouts: ['Swizz Beatz', 'Anthony Tiffith (also known as Anthony Tiffiths) i']
+  [Dynamic K] MC(question)=0.000 → difficulty=hard → K=128
+  Step 1: Model attempts pure reasoning (voluntary) - verifying with MC...
+  Step 1: CoT RPE=0.000 < 0.8 - REJECTED (backtracking)
+  Step 1: ✗ Rejected segment saved for DPO (total: 1)
+  Step 1: Forcing RAG intervention (backtracking)...
+    [QUERY DEBUG] Raw LLM response: guest appearances Fast Cars Danger Fire Knives hip hop record executive
+    [QUERY DEBUG] Extracted query: guest appearances Fast Cars Danger Fire Knives hip hop record executive
+    [RAG DEBUG] Generated query: guest appearances Fast Cars Danger Fire Knives hip hop record executive
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 1758.62it/s]
+Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 50.91it/s]
+    [RAG DEBUG] Retrieved 5 passages, top title: The Medicine (Planet Asia album)
+    [RAG STEP DEBUG] Raw model response (first 200 chars): Thought: The document about "Fast Cars, Danger, Fire and Knives" mentions guest appearances but does not include a hip hop record executive. I need to search for this specific information.
+
+Action: Se
+    [RAG STEP DEBUG] Parsed content (first 200 chars): Thought: The document about "Fast Cars, Danger, Fire and Knives" mentions guest appearances but does not include a hip hop record executive. I need to search for this specific information.
+
+Action: Se
+    [RAG STEP DEBUG] Final content with Observation (first 300 chars): Thought: The document about "Fast Cars, Danger, Fire and Knives" mentions guest appearances but does not include a hip hop record executive. I need to search for this specific information.
+
+Action: Search[query="guest appearances Fast Cars Danger Fire Knives hip hop record executive"]
+
+Observation:
+
+    [MC DEBUG] Rollouts will use 5 current step passages (not accumulated)
+    [MC DEBUG] MC=0.0! K=128, Gold: Jaime Meline
+    [MC DEBUG] Sample rollouts: ['There is no information provided about a hip hop r', 'There are no hip hop record executive guest appear']
+  Step 1: RAG failed (MC=0.000 < 0.01), future steps will have MC=0
+  Step 1: RAG step added (RPE=0.000, label=bad), checking for final answer...
+  Step 1: Has 'Final Answer:' marker? False
+  Step 2: MC fixed to 0.0 (failed after RAG)
+  Step 2: Model requests search with query: 'hip hop record executives on Fast Cars Danger Fire Knives...'
+    [RAG DEBUG] Using model's query: hip hop record executives on Fast Cars Danger Fire Knives
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 2697.30it/s]
+Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 50.85it/s]
+    [RAG DEBUG] Retrieved 5 passages, top title: X Plastaz
+    [RAG STEP DEBUG] Raw model response (first 200 chars): Thought: The document about "Fast Cars, Danger, Fire and Knives" mentions guest appearances from Camu Tao and Metro of S.A. Smash and Definitive Jux label head El-P. There is no mention of a hip hop r
+    [RAG STEP DEBUG] Parsed content (first 200 chars): Thought: The document about "Fast Cars, Danger, Fire and Knives" mentions guest appearances from Camu Tao and Metro of S.A. Smash and Definitive Jux label head El-P. There is no mention of a hip hop r
+    [RAG STEP DEBUG] Final content with Observation (first 300 chars): Thought: The document about "Fast Cars, Danger, Fire and Knives" mentions guest appearances from Camu Tao and Metro of S.A. Smash and Definitive Jux label head El-P. There is no mention of a hip hop record executive.
+
+Action: Search[query="hip hop record executive guest appearance on Fast Cars Dange
+    [MC DEBUG] Rollouts will use 5 current step passages (not accumulated)
+    [MC DEBUG] MC=0.0! K=128, Gold: Jaime Meline
+    [MC DEBUG] Sample rollouts: ['There is no information in the provided documents ', 'Based on the information provided, there is no spe']
+  Step 2: ✓ Voluntary search (MC=0.000, RPE=0.000, label=bad)
+  Step 3: MC fixed to 0.0 (failed after RAG)
+  Step 3: Model requests FINISH - extracting final answer
+  Step 3: ✓ Voluntary FINISH accepted, terminating trajectory.
+
+[DPO Data] Collected 1 rejected segments for preference learning
+  ❌ 3 steps (2 RAG steps) [Format: 2/2 (100%)]
+[8/1000] Processing 5aba66c855429939ce03dcdb...
+  Q: Gunmen from Laredo starred which narrator of "Frontier"?
+
+[Pre-Step1] Calculating baseline MC on question alone...
+    [MC DEBUG] MC=0.0! K=128, Gold: Walter Darwin Coy
+    [MC DEBUG] Sample rollouts: ['John Carradine starred as the narrator of "Frontie', 'There is no narrator of "Frontier" who starred in ']
+[Pre-Step1] MC(question only) = 0.000
+    [MC DEBUG] MC=0.0! K=128, Gold: Walter Darwin Coy
+    [MC DEBUG] Sample rollouts: ['Alan Ladd starred in the film "Gunmen from Laredo"', 'James Arness, the narrator of "Frontier," did not ']
+  [Dynamic K] MC(question)=0.000 → difficulty=hard → K=128
+  Step 1: Model attempts pure reasoning (voluntary) - verifying with MC...
+  Step 1: CoT RPE=0.000 < 0.8 - REJECTED (backtracking)
+  Step 1: ✗ Rejected segment saved for DPO (total: 1)
+  Step 1: Forcing RAG intervention (backtracking)...
+    [QUERY DEBUG] Raw LLM response: narrator of Frontier
+    [QUERY DEBUG] Extracted query: narrator of Frontier
+    [RAG DEBUG] Generated query: narrator of Frontier
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 3211.57it/s]
+Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 53.76it/s]
+    [RAG DEBUG] Retrieved 5 passages, top title: Reed Hadley
+    [RAG STEP DEBUG] Raw model response (first 200 chars): Thought: The document [2] mentions that Frontier is a Canadian historical period drama television series. However, it does not provide information about the narrator of the series. I need to search fo
+    [RAG STEP DEBUG] Parsed content (first 200 chars): Thought: The document [2] mentions that Frontier is a Canadian historical period drama television series. However, it does not provide information about the narrator of the series. I need to search fo
+    [RAG STEP DEBUG] Final content with Observation (first 300 chars): Thought: The document [2] mentions that Frontier is a Canadian historical period drama television series. However, it does not provide information about the narrator of the series. I need to search for the narrator of the TV series Frontier.
+Action: Search[query="narrator of Frontier TV series"]
+
+Ob
+    [MC DEBUG] Rollouts will use 5 current step passages (not accumulated)
+    [MC DEBUG] MC=0.0! K=128, Gold: Walter Darwin Coy
+    [MC DEBUG] Sample rollouts: ['Reed Hadley', 'The given information does not specify the narrato']
+  Step 1: RAG failed (MC=0.000 < 0.01), future steps will have MC=0
+  Step 1: RAG step added (RPE=0.000, label=bad), checking for final answer...
+  Step 1: Has 'Final Answer:' marker? False
+  Step 2: MC fixed to 0.0 (failed after RAG)
+  Step 2: Model requests FINISH - extracting final answer
+  Step 2: ✓ Voluntary FINISH accepted, terminating trajectory.
+
+[DPO Data] Collected 1 rejected segments for preference learning
+  ❌ 2 steps (1 RAG steps) [Format: 1/1 (100%)]
+[9/1000] Processing 5a7722d655429966f1a36c99...
+  Q: Where did the form of music played by Die Rhöner Säuwäntzt originate?
+
+[Pre-Step1] Calculating baseline MC on question alone...
+    [MC DEBUG] MC=0.0! K=128, Gold: United States
+    [MC DEBUG] Sample rollouts: ['The form of music played by Die Rhöner Säuwäntzt, ', 'The form of music played by Die Rhöner Säuwäntzt o']
+[Pre-Step1] MC(question only) = 0.000
+    [MC DEBUG] MC=0.0! K=128, Gold: United States
+    [MC DEBUG] Sample rollouts: ['The form of music played by Die Rhöner Säuwäntzt, ', 'The form of music played by Die Rhöner Säuwäntzt o']
+  [Dynamic K] MC(question)=0.000 → difficulty=hard → K=128
+  Step 1: Model attempts pure reasoning (voluntary) - verifying with MC...
+  Step 1: CoT RPE=0.000 < 0.8 - REJECTED (backtracking)
+  Step 1: ✗ Rejected segment saved for DPO (total: 1)
+  Step 1: Forcing RAG intervention (backtracking)...
+    [QUERY DEBUG] Raw LLM response: Die Rhöner Säuwäntzt music origin
+    [QUERY DEBUG] Extracted query: Die Rhöner Säuwäntzt music origin
+    [RAG DEBUG] Generated query: Die Rhöner Säuwäntzt music origin
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 2664.74it/s]
+Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 53.62it/s]
+    [RAG DEBUG] Retrieved 5 passages, top title: Old Habits Die Hard
+    [RAG STEP DEBUG] Raw model response (first 200 chars): Action: Finish[answer="skiffle-blues"]
+    [RAG STEP DEBUG] Parsed content (first 200 chars): Action: Finish[answer="skiffle-blues"]
+    [RAG STEP DEBUG] Final content with Observation (first 300 chars): Action: Finish[answer="skiffle-blues"]
+
+Observation:
+[1] Old Habits Die Hard: Old Habits Die Hard
+ "Old Habits Die Hard" is a song from the 2004 movie "Alfie", with music by David Stewart and lyrics by Mick Jagger, and performed by Jagger. It won the 2005 Golden Globe Award for Best Original Song. H
+    [MC DEBUG] Rollouts will use 5 current step passages (not accumulated)
+    [MC DEBUG] MC=0.688 with 5 passages, K=128 (successes: 88/128)
+  Step 1: RAG step added (RPE=68.750, label=good), checking for final answer...
+  Step 1: Has 'Final Answer:' marker? True
+  Step 1: ✓ Found final answer, terminating trajectory.
+
+[DPO Data] Collected 1 rejected segments for preference learning
+  ❌ 1 steps (CoT only)
+[10/1000] Processing 5ae0d91e55429924de1b7198...
+  Q: The 1988 American comedy film, The Great Outdoors, starred a four-time Academy A...
+
+[Pre-Step1] Calculating baseline MC on question alone...
+[Pre-Step1] MC(question only) = 0.031
+  [Dynamic K] MC(question)=0.031 → difficulty=hard → K=128
+  Step 1: Model attempts pure reasoning (voluntary) - verifying with MC...
+  Step 1: CoT RPE=0.189 < 0.8 - REJECTED (backtracking)
+  Step 1: ✗ Rejected segment saved for DPO (total: 1)
+  Step 1: Forcing RAG intervention (backtracking)...
+    [QUERY DEBUG] Raw LLM response: The Great Outdoors 1988 Academy Award nominee Hollywood Walk of Fame year
+    [QUERY DEBUG] Extracted query: The Great Outdoors 1988 Academy Award nominee Hollywood Walk of Fame year
+    [RAG DEBUG] Generated query: The Great Outdoors 1988 Academy Award nominee Hollywood Walk of Fame year
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 1811.79it/s]
+Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 52.41it/s]
+    [RAG DEBUG] Retrieved 5 passages, top title: Sherry Lansing
+    [RAG STEP DEBUG] Raw model response (first 200 chars): Action: Search[query="The Great Outdoors 1988 Academy Award nominee Hollywood Walk of Fame year"]
+    [RAG STEP DEBUG] Parsed content (first 200 chars): Action: Search[query="The Great Outdoors 1988 Academy Award nominee Hollywood Walk of Fame year"]
+    [RAG STEP DEBUG] Final content with Observation (first 300 chars): Action: Search[query="The Great Outdoors 1988 Academy Award nominee Hollywood Walk of Fame year"]
+
+Observation:
+[1] Sherry Lansing: Sherry Lansing
+ Sherry Lansing (born July 31, 1944) is an American former actress and film studio executive. She is a former CEO of Paramount Pictures, and when she was
+    [MC DEBUG] Rollouts will use 5 current step passages (not accumulated)
+    [MC DEBUG] MC=0.047 with 5 passages, K=128 (successes: 6/128)
+  Step 1: RAG step added (RPE=1.136, label=good), checking for final answer...
+  Step 1: Has 'Final Answer:' marker? False
+    [MC DEBUG] MC=0.0! K=128, Gold: 2006
+    [MC DEBUG] Sample rollouts: ['1996', '2001']
+  Step 2: Model requests search with query: 'Sherry Lansing Hollywood Walk of Fame year...'
+    [RAG DEBUG] Using model's query: Sherry Lansing Hollywood Walk of Fame year
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 2851.33it/s]
+Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 50.80it/s]
+    [RAG DEBUG] Retrieved 5 passages, top title: Sherry Lansing
+    [RAG STEP DEBUG] Raw model response (first 200 chars): Action: Finish[answer="1996"]
+    [RAG STEP DEBUG] Parsed content (first 200 chars): Action: Finish[answer="1996"]
+    [RAG STEP DEBUG] Final content with Observation (first 300 chars): Action: Finish[answer="1996"]
+
+Observation:
+[1] Sherry Lansing: Sherry Lansing
+ Sherry Lansing (born July 31, 1944) is an American former actress and film studio executive. She is a former CEO of Paramount Pictures, and when she was the president of production at 20th Century Fox, she was the first 
+    [MC DEBUG] Rollouts will use 5 current step passages (not accumulated)
+    [MC DEBUG] MC=0.016 with 5 passages, K=128 (successes: 2/128)
+  Step 2: ✓ Voluntary search (MC=0.016, RPE=0.275, label=bad)
+  Step 2: ✓ Found final answer, terminating trajectory.
+
+[DPO Data] Collected 1 rejected segments for preference learning
+  ❌ 2 steps (1 RAG steps) [Format: 1/1 (100%)]
+[11/1000] Processing 5adc1309554299438c868d3b...
+  Q: Human Error" is the season finale of the third season of a tv show that aired on...
+
+[Pre-Step1] Calculating baseline MC on question alone...
+[Pre-Step1] MC(question only) = 0.438
+  [Dynamic K] MC(question)=0.438 → difficulty=medium → K=64
+  Step 1: Model attempts pure reasoning (voluntary) - verifying with MC...
+  Step 1: CoT accepted (RPE=1.693), checking for final answer...
+  Step 1: Has 'Final Answer:' marker? False
+  Step 2: Model attempts pure reasoning (voluntary) - verifying with MC...
+  Step 2: CoT accepted (RPE=1.302), checking for final answer...
+  Step 2: Has 'Final Answer:' marker? False
+  Step 3: Model requests search with query: 'network of 24 TV show...'
+    [RAG DEBUG] Using model's query: network of 24 TV show
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 2998.07it/s]
+Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 48.79it/s]
+    [RAG DEBUG] Retrieved 5 passages, top title: America's Next Top Model
+    [RAG STEP DEBUG] Raw model response (first 200 chars): Action: Finish[answer="Fox"]
+    [RAG STEP DEBUG] Parsed content (first 200 chars): Action: Finish[answer="Fox"]
+    [RAG STEP DEBUG] Final content with Observation (first 300 chars): Action: Finish[answer="Fox"]
+
+Observation:
+[1] America's Next Top Model: America's Next Top Model
+ America's Next Top Model (abbreviated ANTM and Top Model) is an American reality television series and interactive competition in which a number of aspiring models compete for the title of "America's N
+    [MC DEBUG] Rollouts will use 5 current step passages (not accumulated)
+    [MC DEBUG] MC=1.000 with 5 passages, K=64 (successes: 64/64)
+  Step 3: ✓ Voluntary search (MC=1.000, RPE=0.990, label=good)
+  Step 3: ✓ Found final answer, terminating trajectory.
+  ✅ 3 steps (CoT only)
+[12/1000] Processing 5ab345db55429969a97a8122...
+  Q: Which state does the drug stores, of which the CEO is Warren Bryant, are located...
+
+[Pre-Step1] Calculating baseline MC on question alone...
+[Pre-Step1] MC(question only) = 0.047
+  [Dynamic K] MC(question)=0.047 → difficulty=hard → K=128
+  Step 1: Model attempts pure reasoning (voluntary) - verifying with MC...
+  Step 1: CoT accepted (RPE=3.571), checking for final answer...
+  Step 1: Has 'Final Answer:' marker? False
+  Step 2: Model requests search with query: 'Warren Bryant CEO of drug store chain...'
+    [RAG DEBUG] Using model's query: Warren Bryant CEO of drug store chain
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 2117.27it/s]
+Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 49.12it/s]
+    [RAG DEBUG] Retrieved 5 passages, top title: Pier 1 Imports
+    [RAG STEP DEBUG] Raw model response (first 200 chars): Action: Search[query="Warren Bryant CEO drug store chain"]
+    [RAG STEP DEBUG] Parsed content (first 200 chars): Action: Search[query="Warren Bryant CEO drug store chain"]
+    [RAG STEP DEBUG] Final content with Observation (first 300 chars): Action: Search[query="Warren Bryant CEO drug store chain"]
+
+Observation:
+[1] Pier 1 Imports: Pier 1 Imports
+ Pier 1 Imports Inc. is a Fort Worth, Texas–based omnichannel retailer specializing in imported home furnishings and decor, particularly furniture, table-top items, decorative accessories, and
+    [MC DEBUG] Rollouts will use 5 current step passages (not accumulated)
+    [MC DEBUG] MC=0.008 with 5 passages, K=128 (successes: 1/128)
+  Step 2: ✓ Voluntary search (MC=0.008, RPE=0.037, label=bad)
+    [MC DEBUG] MC=0.0! K=128, Gold: Hawaii
+    [MC DEBUG] Sample rollouts: ['California', 'California']
+  Step 3: Model requests FINISH - extracting final answer
+  Step 3: ✓ Voluntary FINISH accepted, terminating trajectory.
+  ❌ 3 steps (1 RAG steps) [Format: 1/1 (100%)]
+[13/1000] Processing 5ac2a912554299218029dae8...
+  Q: Which band was founded first, Hole, the rock band that Courtney Love was a front...
+
+[Pre-Step1] Calculating baseline MC on question alone...
+[Pre-Step1] MC(question only) = 0.586
+  [Dynamic K] MC(question)=0.586 → difficulty=medium → K=64
+  Step 1: Model attempts pure reasoning (voluntary) - verifying with MC...
+  Step 1: CoT accepted (RPE=1.154), checking for final answer...
+  Step 1: Has 'Final Answer:' marker? False
+  Step 2: Model requests search with query: 'Hole band formation year...'
+    [RAG DEBUG] Using model's query: Hole band formation year
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 2790.62it/s]
+Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 50.71it/s]
+    [RAG DEBUG] Retrieved 5 passages, top title: Black Hole Sun
+    [RAG STEP DEBUG] Raw model response (first 200 chars): Thought: From the retrieved documents, I know that Hole was formed in 1989 [2]. However, I need to find the formation year of The Wolfhounds to compare.
+
+Action: Search[query="The Wolfhounds band form
+    [RAG STEP DEBUG] Parsed content (first 200 chars): Thought: From the retrieved documents, I know that Hole was formed in 1989 [2]. However, I need to find the formation year of The Wolfhounds to compare.
+
+Action: Search[query="The Wolfhounds band form
+    [RAG STEP DEBUG] Final content with Observation (first 300 chars): Thought: From the retrieved documents, I know that Hole was formed in 1989 [2]. However, I need to find the formation year of The Wolfhounds to compare.
+
+Action: Search[query="The Wolfhounds band formation year"]
+
+Observation:
+[1] Black Hole Sun: Black Hole Sun
+ "Black Hole Sun" is a song by the Ame
+    [MC DEBUG] Rollouts will use 5 current step passages (not accumulated)
+    [MC DEBUG] MC=0.625 with 5 passages, K=64 (successes: 40/64)
+  Step 2: ✓ Voluntary search (MC=0.625, RPE=0.896, label=good)
+  Step 3: Model requests search with query: 'The Wolfhounds band formation year...'
+    [RAG DEBUG] Using model's query: The Wolfhounds band formation year
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 2964.17it/s]
+Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 48.85it/s]
+    [RAG DEBUG] Retrieved 5 passages, top title: Ian Keatley
+    [RAG STEP DEBUG] Raw model response (first 200 chars): Action: Finish[answer="The Wolfhounds"]
+    [RAG STEP DEBUG] Parsed content (first 200 chars): Action: Finish[answer="The Wolfhounds"]
+    [RAG STEP DEBUG] Final content with Observation (first 300 chars): Action: Finish[answer="The Wolfhounds"]
+
+Observation:
+[1] Ian Keatley: Ian Keatley
+ Ian James T. Keatley (born 1 April 1987) is an Irish rugby union player who currently plays for Italian side Benetton in the Pro14. He plays primarily as a fly-half, but can also play as a centre or fullback.
+
+[2] Th
+    [MC DEBUG] Rollouts will use 5 current step passages (not accumulated)
+    [MC DEBUG] MC=0.984 with 5 passages, K=64 (successes: 63/64)
+  Step 3: ✓ Voluntary search (MC=0.984, RPE=1.550, label=good)
+  Step 3: ✓ Found final answer, terminating trajectory.
+  ✅ 3 steps (1 RAG steps) [Format: 1/1 (100%)]
+[14/1000] Processing 5a7272eb5542997f827839d7...
+  Q: How old is the female main protagonist of Catching Fire?
+
+[Pre-Step1] Calculating baseline MC on question alone...
+    [MC DEBUG] MC=0.0! K=64, Gold: 16-year-old
+    [MC DEBUG] Sample rollouts: ['if Katniss was 16 when she won the 74th Hunger Gam', 'Katniss Everdeen, the female main protagonist of C']
+[Pre-Step1] MC(question only) = 0.000
+    [MC DEBUG] MC=0.0! K=64, Gold: 16-year-old
+    [MC DEBUG] Sample rollouts: ['The female main protagonist of Catching Fire is 12', 'Katniss Everdeen, the female main protagonist of C']
+  [Dynamic K] MC(question)=0.000 → difficulty=hard → K=128
+  Step 1: Model attempts pure reasoning (voluntary) - verifying with MC...
+  Step 1: CoT RPE=0.000 < 0.8 - REJECTED (backtracking)
+  Step 1: ✗ Rejected segment saved for DPO (total: 1)
+  Step 1: Forcing RAG intervention (backtracking)...
+    [QUERY DEBUG] Raw LLM response: Catching Fire female main protagonist age
+    [QUERY DEBUG] Extracted query: Catching Fire female main protagonist age
+    [RAG DEBUG] Generated query: Catching Fire female main protagonist age
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 2424.45it/s]
+Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 48.72it/s]
+    [RAG DEBUG] Retrieved 5 passages, top title: Catching Fire
+    [RAG STEP DEBUG] Raw model response (first 200 chars): Thought: The document [1] provides information about Catching Fire and mentions Katniss Everdeen as the female main protagonist. However, it does not specify her age.
+Action: Search[query="Catching Fi
+    [RAG STEP DEBUG] Parsed content (first 200 chars): Thought: The document [1] provides information about Catching Fire and mentions Katniss Everdeen as the female main protagonist. However, it does not specify her age.
+Action: Search[query="Catching Fi
+    [RAG STEP DEBUG] Final content with Observation (first 300 chars): Thought: The document [1] provides information about Catching Fire and mentions Katniss Everdeen as the female main protagonist. However, it does not specify her age.
+Action: Search[query="Catching Fire female main protagonist age"]
+
+Observation:
+[1] Catching Fire: Catching Fire
+ Catching Fire is a 
+    [MC DEBUG] Rollouts will use 5 current step passages (not accumulated)
+    [MC DEBUG] MC=0.0! K=128, Gold: 16-year-old
+    [MC DEBUG] Sample rollouts: ['Katniss is likely to be around 17-18 years old in ', 'Katniss Everdeen, the female main protagonist of C']
+  Step 1: RAG failed (MC=0.000 < 0.01), future steps will have MC=0
+  Step 1: RAG step added (RPE=0.000, label=bad), checking for final answer...
+  Step 1: Has 'Final Answer:' marker? False
+  Step 2: MC fixed to 0.0 (failed after RAG)
+  Step 2: Model requests search with query: 'age of Katniss Everdeen in Catching Fire...'
+    [RAG DEBUG] Using model's query: age of Katniss Everdeen in Catching Fire
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 2597.09it/s]
+Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 47.81it/s]
+    [RAG DEBUG] Retrieved 5 passages, top title: Catching Fire
+    [RAG STEP DEBUG] Raw model response (first 200 chars): Action: Search[query="Katniss Everdeen age in Catching Fire"]
+    [RAG STEP DEBUG] Parsed content (first 200 chars): Action: Search[query="Katniss Everdeen age in Catching Fire"]
+    [RAG STEP DEBUG] Final content with Observation (first 300 chars): Action: Search[query="Katniss Everdeen age in Catching Fire"]
+
+Observation:
+[1] Catching Fire: Catching Fire
+ Catching Fire is a 2009 science fiction young adult novel by the American novelist Suzanne Collins, the second book in "The Hunger Games trilogy". As the sequel to the 2008 bestseller "The H
+    [MC DEBUG] Rollouts will use 5 current step passages (not accumulated)
+    [MC DEBUG] MC=0.008 with 5 passages, K=128 (successes: 1/128)
+  Step 2: ✓ Voluntary search (MC=0.008, RPE=0.781, label=bad)
+  Step 3: MC fixed to 0.0 (failed after RAG)
+  Step 3: Model requests search with query: 'Katniss Everdeen age at beginning of Catching Fire...'
+    [RAG DEBUG] Using model's query: Katniss Everdeen age at beginning of Catching Fire
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 2989.53it/s]
+Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 48.31it/s]
+    [RAG DEBUG] Retrieved 5 passages, top title: Catching Fire
+    [RAG STEP DEBUG] Raw model response (first 200 chars): Action: Search[query="Katniss Everdeen age at beginning of Catching Fire"]
+    [RAG STEP DEBUG] Parsed content (first 200 chars): Action: Search[query="Katniss Everdeen age at beginning of Catching Fire"]
+    [RAG STEP DEBUG] Final content with Observation (first 300 chars): Action: Search[query="Katniss Everdeen age at beginning of Catching Fire"]
+
+Observation:
+[1] Catching Fire: Catching Fire
+ Catching Fire is a 2009 science fiction young adult novel by the American novelist Suzanne Collins, the second book in "The Hunger Games trilogy". As the sequel to the 2008 best
+    [MC DEBUG] Rollouts will use 5 current step passages (not accumulated)
+    [MC DEBUG] MC=0.0! K=128, Gold: 16-year-old
+    [MC DEBUG] Sample rollouts: ['17 years old', '16 years old']
+  Step 3: ✓ Voluntary search (MC=0.000, RPE=0.000, label=bad)
+  Step 4: MC fixed to 0.0 (failed after RAG)
+  Step 4: Model requests search with query: 'Katniss Everdeen age at the start of Catching Fire...'
+    [RAG DEBUG] Using model's query: Katniss Everdeen age at the start of Catching Fire
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 3070.50it/s]
+Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 48.39it/s]
+    [RAG DEBUG] Retrieved 5 passages, top title: Catching Fire
+    [RAG STEP DEBUG] Raw model response (first 200 chars): Action: Search[query="Katniss Everdeen age at the start of Catching Fire"]
+    [RAG STEP DEBUG] Parsed content (first 200 chars): Action: Search[query="Katniss Everdeen age at the start of Catching Fire"]
+    [RAG STEP DEBUG] Final content with Observation (first 300 chars): Action: Search[query="Katniss Everdeen age at the start of Catching Fire"]
+
+Observation:
+[1] Catching Fire: Catching Fire
+ Catching Fire is a 2009 science fiction young adult novel by the American novelist Suzanne Collins, the second book in "The Hunger Games trilogy". As the sequel to the 2008 best
+    [MC DEBUG] Rollouts will use 5 current step passages (not accumulated)
+    [MC DEBUG] MC=0.008 with 5 passages, K=128 (successes: 1/128)
+  Step 4: ✓ Voluntary search (MC=0.008, RPE=0.781, label=bad)
+  Step 5: MC fixed to 0.0 (failed after RAG)
+  Step 5: Model requests FINISH - extracting final answer
+  Step 5: ✓ Voluntary FINISH accepted, terminating trajectory.
+
+[DPO Data] Collected 1 rejected segments for preference learning
+  ❌ 5 steps (4 RAG steps) [Format: 4/4 (100%)]
+[15/1000] Processing 5ac2c3545542990b17b1548b...
+  Q: Chang Ucchin was born in korea during a time that ended with the conclusion of w...
+
+[Pre-Step1] Calculating baseline MC on question alone...
+[Pre-Step1] MC(question only) = 0.133
+  [Dynamic K] MC(question)=0.133 → difficulty=medium → K=64
+  Step 1: Model attempts pure reasoning (voluntary) - verifying with MC...
+  Step 1: CoT accepted (RPE=6.674), checking for final answer...
+  Step 1: Has 'Final Answer:' marker? False
+  Step 2: Model requests search with query: 'end of Japanese colonial rule in Korea...'
+    [RAG DEBUG] Using model's query: end of Japanese colonial rule in Korea
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 1/1 [00:00<00:00, 2244.14it/s]
+Inference Embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Inference Embeddings: 100%|██████████| 1/1 [00:00<00:00, 48.79it/s]
