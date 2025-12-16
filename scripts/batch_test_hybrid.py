@@ -24,6 +24,7 @@ from prmrag.generation.adaptive_generator import AdaptiveTrajectoryGenerator
 from prmrag.retrieval.bge_retriever import BGERetriever
 from prmrag.retrieval.bm25_retriever import BM25Retriever
 from prmrag.retrieval.hybrid_retriever import HybridRetriever
+from prmrag.retrieval.bge_reranker import BGEReranker
 import re
 
 
@@ -476,18 +477,6 @@ def main():
         help="Fusion method: rrf or weighted (default: rrf)",
     )
     parser.add_argument(
-        "--k-sparse",
-        type=int,
-        default=50,
-        help="Top-K for BM25 (default: 50)",
-    )
-    parser.add_argument(
-        "--k-dense",
-        type=int,
-        default=50,
-        help="Top-K for BGE (default: 50)",
-    )
-    parser.add_argument(
         "--run-id",
         type=str,
         default=None,
@@ -503,6 +492,23 @@ def main():
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Fsync JSONL after each write for crash-safe incremental saving (default: enabled)",
+    )
+    parser.add_argument(
+        "--use-reranker",
+        action="store_true",
+        help="Enable BGE reranker for improved retrieval quality (default: disabled)",
+    )
+    parser.add_argument(
+        "--rerank-top-n",
+        type=int,
+        default=20,
+        help="Rerank top-N candidates from fusion (default: 20)",
+    )
+    parser.add_argument(
+        "--question-ids-file",
+        type=str,
+        default=None,
+        help="File containing question IDs to process (one per line)",
     )
     args = parser.parse_args()
 
@@ -532,12 +538,19 @@ def main():
     print(f"  - MC rollouts: {args.num_rollouts}")
     print(f"  - Corpus: KILT Wikipedia (5.9M)")
     print(f"  - Fusion method: {args.fusion_method}")
-    print(f"  - BM25 top-K: {args.k_sparse}")
-    print(f"  - BGE top-K: {args.k_dense}")
+    print(f"  - BM25 top-K: 50 (fixed)")
+    print(f"  - BGE top-K: 50 (fixed)")
+    print(f"  - Dynamic K: 32/64/128 (based on difficulty)")
+    if args.use_reranker:
+        print(f"  - Reranker: ENABLED (rerank top-{args.rerank_top_n})")
+    else:
+        print(f"  - Reranker: disabled")
     print(f"  - Output directory: {output_dir}")
     if args.question_level:
         start_desc = args.start_filtered_idx if args.start_filtered_idx is not None else args.start_idx
         print(f"  - Question level: {args.question_level} (start={start_desc})")
+    if args.question_ids_file:
+        print(f"  - Question IDs file: {args.question_ids_file}")
     if args.run_id:
         print(f"  - Run ID: {run_id}")
     print(f"  - JSONL fsync: {args.fsync}")
@@ -567,7 +580,15 @@ def main():
         level=args.question_level,
         start_filtered_idx=args.start_filtered_idx,
     )
-    print(f"✓ Loaded {len(questions)} questions")
+
+    # Filter by question IDs if file provided
+    if args.question_ids_file:
+        with open(args.question_ids_file, 'r') as f:
+            target_ids = set(line.strip() for line in f if line.strip())
+        questions = [q for q in questions if q.get('_id') in target_ids]
+        print(f"✓ Filtered to {len(questions)} questions from {args.question_ids_file}")
+    else:
+        print(f"✓ Loaded {len(questions)} questions")
 
     # Load model
     print(f"\n[3] Loading Qwen2.5-7B model...")
@@ -594,14 +615,22 @@ def main():
         index_cache_path=str(bm25_cache)
     )
 
+    # BGE Reranker (optional)
+    reranker = None
+    if args.use_reranker:
+        print(f"  [4.3] Initializing BGE Reranker...")
+        reranker = BGEReranker(device="cuda")
+
     # Hybrid retriever
-    print(f"  [4.3] Combining with {args.fusion_method.upper()} fusion...")
+    print(f"  [4.4] Combining with {args.fusion_method.upper()} fusion...")
     hybrid_retriever = HybridRetriever(
         bm25_retriever=bm25_retriever,
         bge_retriever=bge_retriever,
         fusion_method=args.fusion_method,
-        k_sparse=args.k_sparse,
-        k_dense=args.k_dense,
+        k_sparse=50,  # Fixed: BM25 retrieves top-50
+        k_dense=50,   # Fixed: BGE retrieves top-50
+        reranker=reranker,
+        rerank_top_n=args.rerank_top_n if args.use_reranker else 20,
     )
     print(f"✓ Hybrid retriever initialized!")
 

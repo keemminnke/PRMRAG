@@ -22,6 +22,8 @@ class HybridRetriever:
         k_dense: int = 50,   # Top-K for BGE
         alpha: float = 0.5,  # Weight for weighted sum (alpha * BM25 + (1-alpha) * BGE)
         rrf_k: int = 60,     # Constant for RRF formula
+        reranker = None,     # Optional BGE reranker
+        rerank_top_n: int = 20,  # Rerank top-N candidates from fusion
     ):
         """Initialize hybrid retriever.
 
@@ -41,6 +43,8 @@ class HybridRetriever:
         self.k_dense = k_dense
         self.alpha = alpha
         self.rrf_k = rrf_k
+        self.reranker = reranker
+        self.rerank_top_n = rerank_top_n
 
         print(f"✓ Hybrid retriever initialized:")
         print(f"  - Fusion method: {fusion_method}")
@@ -50,6 +54,8 @@ class HybridRetriever:
             print(f"  - Alpha (BM25 weight): {alpha}")
         elif fusion_method == "rrf":
             print(f"  - RRF constant k: {rrf_k}")
+        if reranker is not None:
+            print(f"  - Reranker: enabled (rerank top-{rerank_top_n} candidates)")
 
     def _normalize_scores(self, scores: List[float]) -> List[float]:
         """Min-max normalize scores to [0, 1].
@@ -159,7 +165,7 @@ class HybridRetriever:
             top_k: Number of final documents to return
 
         Returns:
-            List of retrieved documents with fused scores
+            List of retrieved documents with fused scores (and rerank scores if reranker enabled)
         """
         # Step 1: Retrieve from both BM25 and BGE
         bm25_results = self.bm25.retrieve(query, top_k=self.k_sparse)
@@ -173,14 +179,18 @@ class HybridRetriever:
         else:
             raise ValueError(f"Unknown fusion method: {self.fusion_method}")
 
-        # Step 3: Sort by fused score and get top-k
+        # Step 3: Get candidates for reranking (or final results if no reranker)
+        # If reranker is enabled, get more candidates (rerank_top_n)
+        # Otherwise, just get top_k
+        num_candidates = self.rerank_top_n if self.reranker else top_k
+
         sorted_doc_ids = sorted(
             fused_scores.keys(),
             key=lambda doc_id: fused_scores[doc_id],
             reverse=True
-        )[:top_k]
+        )[:num_candidates]
 
-        # Step 4: Build final results
+        # Step 4: Build candidate results
         # Create a doc_id -> doc mapping for quick lookup
         doc_map = {}
         for result in bm25_results + bge_results:
@@ -188,15 +198,21 @@ class HybridRetriever:
             if doc_id not in doc_map:
                 doc_map[doc_id] = result
 
-        final_results = []
+        candidate_results = []
         for doc_id in sorted_doc_ids:
             doc = doc_map[doc_id]
-            final_results.append({
+            candidate_results.append({
                 'doc_id': doc_id,
                 'title': doc['title'],
                 'text': doc['text'],
                 'score': fused_scores[doc_id],
             })
+
+        # Step 5: Rerank if reranker is available
+        if self.reranker:
+            final_results = self.reranker.rerank(query, candidate_results, top_k=top_k)
+        else:
+            final_results = candidate_results
 
         return final_results
 

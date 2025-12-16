@@ -16,6 +16,7 @@ policy_model:
   temperature: 0.8  # Standard for diverse trajectory generation (following common practice)
   top_p: 0.95
   max_tokens: 200  # Per step
+  gpu_memory_utilization: 0.45  # vLLM GPU memory usage (0.0-1.0)
 
 # Retrieval settings
 retrieval:

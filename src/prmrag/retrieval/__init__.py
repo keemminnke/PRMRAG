@@ -7,6 +7,7 @@ from .bge_retriever import BGERetriever
 from .bm25_retriever import BM25Retriever
 from .hybrid_retriever import HybridRetriever
 from .wikipedia_retriever import WikipediaRetriever, create_retriever
+from .bge_reranker import BGEReranker
 
 
 def load_hotpotqa_corpus(corpus_path: str) -> List[Dict[str, Any]]:
@@ -37,6 +38,7 @@ __all__ = [
     'BM25Retriever',
     'HybridRetriever',
     'WikipediaRetriever',
+    'BGEReranker',
     'load_hotpotqa_corpus',
     'create_retriever',
 ]
