@@ -199,7 +199,7 @@ class JudgeLabeler(BaseLabeler):
             for i, fact in enumerate(trajectory.supporting_facts, 1):
                 prompt_parts.append(f"{i}. {fact}")
 
-        # Add previous steps for context
+        # Add previous steps for context (without detailed passages)
         if prefix_steps:
             prompt_parts.extend([
                 "",
@@ -207,7 +207,11 @@ class JudgeLabeler(BaseLabeler):
             ])
             for i, prev_step in enumerate(prefix_steps, 1):
                 prompt_parts.append(f"Step {i}: {prev_step.action}")
-                prompt_parts.append(f"Result: {prev_step.observation[:200]}...")
+                # Only show if retrieved passages (summarize)
+                if prev_step.passages and prev_step.passages[0]:
+                    num_passages = len(prev_step.passages)
+                    prompt_parts.append(f"  → Retrieved {num_passages} passage(s)")
+                # Don't show detailed observation for previous steps
 
         # Add current step to evaluate
         prompt_parts.extend([
