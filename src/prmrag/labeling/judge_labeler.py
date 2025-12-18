@@ -300,14 +300,46 @@ Confidence: 0.5"""
         if self.model_client is None:
             raise RuntimeError("Model client not initialized")
 
-        # Use vLLM PolicyModel's generate_with_chat_template
-        response = self.model_client.generate_with_chat_template(
-            user_message=prompt,
+        # Format Judge prompt with chat template
+        # QwQ-32B is a chat model and needs proper formatting
+        formatted_prompt = self._format_judge_prompt_for_chat(prompt)
+
+        # Use raw generate() with formatted chat template
+        response = self.model_client.generate(
+            prompt=formatted_prompt,
             max_tokens=self.max_tokens,
             temperature=self.temperature,
         )
 
+        # DEBUG: Print raw response
+        print(f"[DEBUG] Raw Judge Response:\n{response}\n")
+
         return response
+
+    def _format_judge_prompt_for_chat(self, user_message: str) -> str:
+        """Format Judge prompt for chat model (e.g., QwQ-32B).
+
+        Args:
+            user_message: VersaPRM-style judge prompt
+
+        Returns:
+            Formatted prompt with chat template
+        """
+        if hasattr(self.model_client, 'tokenizer') and hasattr(self.model_client.tokenizer, 'apply_chat_template'):
+            messages = [
+                {"role": "user", "content": user_message}
+            ]
+            return self.model_client.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+        else:
+            # Fallback to manual Qwen format
+            return f"""<|im_start|>user
+{user_message}<|im_end|>
+<|im_start|>assistant
+"""
 
     def _parse_judge_response(self, response: str) -> tuple[str, str, float]:
         """Parse LLM judge response.
