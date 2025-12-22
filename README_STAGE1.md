@@ -1,513 +1,541 @@
-# Stage 1: Adaptive MC-CoT + RAG Trajectory Generation
+# Stage 1: Auto-Labeling Pipeline with Consensus Filtering
 
-## 개요
+**목표**: Policy Model의 RAG-CoT trajectory에 대해 RPE와 Judge를 활용한 consensus filtering으로 고품질 training label을 자동 생성
 
-Stage 1은 **Adaptive MC-CoT + RAG Intervention**을 통해 고품질 trajectory를 생성합니다.
+**핵심 아이디어**:
+- MC-based RPE (Monte Carlo confidence change)와 LLM Judge (QwQ-32B)의 label이 **일치하는 step만 사용**
+- Disagreement는 필터링 → 높은 신뢰도의 0/1 label 확보
+- Judge의 reasoning도 함께 저장하여 rationale 학습 가능
 
-### 핵심 아이디어
+---
 
-"CoT를 하다가 MC가 떨어지면 → RAG로 개입 → MC가 회복되면 계속"
+## 전체 파이프라인
 
 ```
-Question
-  ↓
-[CoT Step] → MC 계산 → RPE >= 1-δ?
-  ↓ Yes                    ↓ No
-Accept                  [Rollback]
-  ↓                         ↓
-Next step             [RAG Intervention]
-                          ↓
-                    Generate queries
-                    Retrieve passages
-                    Select best (MC)
-                          ↓
-                    RPE >= 1+ε?
-                      ↓ Yes    ↓ No
-                    Accept   Terminate
+Step 1: Policy Model Trajectory Generation
+         ↓
+    RAG-CoT trajectories (.jsonl)
+    - question, steps (thought, action, observation)
+         ↓
+Step 2: RPE Labeling (MC-based)
+         ↓
+    RPE labels (GOOD/BAD per step)
+    - mc_before, mc_after, rpe score
+         ↓
+Step 3: Judge Labeling (QwQ-32B)
+         ↓
+    Judge labels + reasoning (GOOD/BAD per step)
+    - judge_label, judge_reasoning (200 chars), confidence
+         ↓
+Step 4: Consensus Filtering & Merging
+         ↓
+    Final Training Data
+    - Consensus steps only (RPE = Judge)
+    - Includes judge reasoning
+    - Binary labels: 0 (BAD), 1 (GOOD)
 ```
 
-## 알고리즘
+---
 
-### 1. 초기 상태
-```python
-s_0 = {
-    'question': q,
-    'reasoning_history': [],
-    'passages': []
-}
-MC_0 = MC(s_0)
+## Step 1: Policy Model로 Trajectory 생성
+
+### 개요
+- Policy model (Qwen2.5-7B-Instruct + vLLM)이 RAG-CoT 추론 수행
+- HotpotQA 데이터셋에서 질문 샘플링
+- Hybrid retrieval (BM25 + dense) + reranker (BGE-reranker-v2-m3) 사용
+
+### 실행
+```bash
+python scripts/batch_test_hybrid.py \
+  --dataset hotpotqa \
+  --split train \
+  --question-level medium \
+  --num-questions 1000 \
+  --use-reranker \
+  --rerank-top-n 20 \
+  --output-dir outputs/hotpotqa_train_medium_reranker \
+  --run-id reranker_1000_medium
 ```
 
-### 2. 각 Step에서
-
-#### (A) CoT Step 시도
-```python
-# 1. CoT step 생성
-cot_step = LLM.generate_reasoning(s_{t-1})
-
-# 2. MC 계산
-MC_prev = MC(s_{t-1})
-MC_cot = MC(s_t with cot_step)
-
-# 3. RPE 계산
-P_cot = MC_cot / MC_prev
-```
-
-#### (B) CoT 채택 여부
-```python
-if P_cot >= (1 - δ):  # 예: 0.8 (RPE threshold)
-    # Accept CoT
-    steps.append({
-        'step_type': 'cot',
-        'action': 'Reason',
-        'text': cot_step,
-        'mc_before': MC_prev,
-        'mc_after': MC_cot,
-        'rpe': P_cot,
-        'label': 'good' if P_cot >= 0.8 else 'bad'
-    })
-    continue
-```
-
-#### (C) RAG Intervention
-```python
-else:
-    # CoT 실패 → RAG 시도
-    queries = generate_rag_queries(s_{t-1})
-
-    best_mc = -inf
-    for query in queries:
-        passages = retrieve(query, top_k=5)
-        s_rag = apply_rag(s_{t-1}, passages)
-        mc_rag = MC(s_rag)
-
-        if mc_rag > best_mc:
-            best_mc = mc_rag
-            best_rag = (query, passages, s_rag)
-
-    P_rag = best_mc / MC_prev
-
-    if P_rag >= (1 + ε):  # 예: 1.1
-        # Accept RAG
-        steps.append({
-            'step_type': 'rag',
-            'action': 'Search',
-            'action_input': query,  # Sub-query
-            'observation': format_passages(passages),
-            'sub_answer': extract_answer(observation),
-            'passages': passages,
-            'mc_before': MC_prev,
-            'mc_after': best_mc,
-            'rpe': P_rag,
-            'label': 'good' if P_rag >= 0.8 else 'bad'
-        })
-        continue
-    else:
-        # 둘 다 실패 → trajectory 종료
-        break
-```
-
-### 3. 출력 형식
-
+### 출력 형식
 ```json
 {
-  "trajectory_id": "q001_0",
-  "question": "What is...?",
+  "question_id": "5ab42ebd5542992339550047",
+  "question": "Who hosted both Miss USA 1968 and The Price Is Right?",
+  "gold_answer": "Bob Barker",
+  "predicted_answer": "Bob Barker",
+  "is_correct": true,
   "steps": [
     {
-      "step_id": 0,
-      "step_type": "cot",
-      "text": "Step 1: Let me think...",
-      "content": "Let me think...",
-      "used_passages": [],
-      "mc_before": 0.5,
-      "mc_after": 0.7,
-      "rpe": 1.4,
-      "label": "good",
-
-      "thought": "I need to understand the question first",
+      "step_num": 1,
+      "thought": "To answer this question, I need to recall who hosted...",
       "action": "Reason",
-      "action_input": null,
-      "observation": null,
-      "sub_answer": null,
-      "metadata": {"accepted": "cot", "threshold": 0.8}
+      "content": "To answer this question, I need to recall who hosted...",
+      "num_passages": 0
     },
     {
-      "step_id": 1,
-      "step_type": "rag",
-      "text": "Step 2: Thought: I need more information...",
-      "content": "Thought: I need more information...\nAction: Search[query=\"...\"]\nObservation: ...\nSub-answer: ...",
-      "used_passages": [
-        {"doc_id": "doc_1", "title": "...", "text": "...", "score": 0.9}
-      ],
-      "mc_before": 0.7,
-      "mc_after": 0.85,
-      "rpe": 1.21,
-      "label": "good",
-
-      "thought": "I need more information about...",
+      "step_num": 2,
+      "thought": "Based on the retrieved information, Bob Barker hosted Miss USA 1968...",
       "action": "Search",
-      "action_input": "who directed the film",
-      "observation": "According to [1], the director is...",
-      "sub_answer": "The director is David O. Russell",
-      "metadata": {"accepted": "rag", "threshold": 0.8}
-    }
-  ],
-  "final_answer": "The answer is...",
-  "gold_answer": "...",
-  "is_correct": true,
-  "metadata": {
-    "num_steps": 2,
-    "num_cot_steps": 1,
-    "num_rag_steps": 1
-  }
+      "content": "Bob Barker hosted Miss USA 1968...",
+      "observation": "1. Miss USA 1968 was the 17th Miss USA pageant...",
+      "num_passages": 5
+    },
+    ...
+  ]
 }
 ```
 
-### 4. ReAct 구조
+**파일 위치**: `outputs/hotpotqa_train_medium_reranker/results_*.jsonl`
 
-각 step은 **ReAct format**을 따릅니다:
+---
 
+## Step 2: RPE Labeling (MC-based)
+
+### 개요
+- Monte Carlo confidence 변화로 각 step의 품질 평가
+- mc_after / mc_before 비율 (Relative Probability Elevation)
+- Threshold 기반 GOOD/BAD 분류
+
+### RPE Score 계산
+```python
+rpe = mc_after / mc_before if mc_before > 0 else 0
+
+# Label assignment (threshold-based)
+if rpe >= 1.5:
+    label = "good"  # Significant improvement
+elif rpe < 0.8:
+    label = "bad"   # Significant degradation
+else:
+    label = "borderline"  # Filtered in binary mode
 ```
-Step N:
-Thought: [reasoning about what's needed]
-Action: Search[query="sub-question"] or Finish[answer="..."]
-Observation: [retrieved information - RAG only]
-Sub-answer: [intermediate answer extracted from observation]
+
+### 이미 포함됨
+- Policy model 실행 시 자동으로 MC confidence 계산
+- 결과 파일에 `mc_before`, `mc_after`, `label` 필드 포함
+
+### 출력 예시
+```json
+{
+  "step_num": 1,
+  "mc_before": 0.164,
+  "mc_after": 0.305,
+  "rpe": 1.75,
+  "label": "good"
+}
 ```
 
-#### 액션 타입:
-- **Search**: 외부 정보 검색 필요 (RAG step)
-  - Format: `Action: Search[query="specific sub-question"]`
-  - action_input에 sub-query 저장
+---
 
-- **Reason**: 내부 추론 (CoT step)
-  - Format: 자유 형식 추론
-  - action_input은 null
+## Step 3: Judge Labeling (QwQ-32B)
 
-- **Finish**: 최종 답변
-  - Format: `Action: Finish[answer="direct answer"]` 또는 `Final Answer: ...`
+### 개요
+- QwQ-32B (32B reasoning model)를 Oracle로 사용
+- VersaPRM-style prompt로 각 step 평가
+- **Oracle Input Format** 적용:
+  - **Past steps**: Thought + Action만 (Observation 제거 - 이미 다음 step의 Thought에 반영됨)
+  - **Current step**: Thought + Action + **Observation** (평가 대상 - 검색된 문서가 좋은지 나쁜지 판단)
 
-## 사용법
+### Judge Prompt 구조
+```
+# Question
+<질문>
 
-### 1. DPR Wikipedia Corpus 준비
+# Correct Answer
+<정답>
+
+# Previous Steps (Context Only)
+Step 1:
+Thought: ...
+Action: ...
+[Observation 제거 - 토큰 절약]
+
+# Current Step to Evaluate
+Thought: ...
+Action: ...
+Observation (Retrieved Information):
+<현재 step의 검색 결과 - 평가 필수>
+
+# Your Evaluation
+Reasoning: [Brief explanation in 2-3 sentences]
+Label: [GOOD or BAD]
+Confidence: [0.0 to 1.0]
+```
+
+### 실행
+```bash
+python scripts/judge_label_qwq.py
+```
+
+**설정**:
+```python
+config = {
+    'model_name': 'Qwen/QwQ-32B',
+    'temperature': 0.3,
+    'max_tokens': 3072,  # QwQ의 긴 CoT 완성 허용
+    'gpu_memory_utilization': 0.95,
+    'prompt_style': 'versaprm',
+    'use_gold_answer': True,
+}
+```
+
+### 출력 형식
+```json
+{
+  "question_id": "5ab42ebd5542992339550047",
+  "question": "Who hosted both Miss USA 1968 and The Price Is Right?",
+  "gold_answer": "Bob Barker",
+  "steps": [
+    {
+      "step_num": 1,
+      "rpe_label": "good",
+      "judge_label": "GOOD",
+      "judge_reasoning": "The step correctly identifies the need to connect the host of both Miss USA 1968 and *The Price Is Right*, aligning with the question's requirements. While it does not yet retrieve specific informatio...",
+      "judge_confidence": 0.95,
+      "mc_before": 0.164,
+      "mc_after": 0.305,
+      "rpe": 1.75
+    }
+  ]
+}
+```
+
+**파일 위치**: `outputs/test_consensus_5q_judge_labels.jsonl`
+
+### 주요 개선사항
+
+#### 1. max_tokens 증가 (1024 → 3072)
+QwQ-32B는 reasoning model로 긴 chain-of-thought를 생성합니다.
+```python
+# Before: Truncated response
+max_tokens = 1024  # ❌ Output 중간에 잘림
+
+# After: Complete response
+max_tokens = 3072  # ✅ Full CoT + final judgment
+```
+
+#### 2. Parser 개선 (역순 탐색)
+```python
+# Parse from END to get final structured output
+for line in reversed(lines):
+    if confidence == 0.5 and line.startswith("Confidence:"):
+        confidence = float(line.split("Confidence:", 1)[1].strip().split()[0])
+    if label == "GOOD" and line.startswith("Label:"):
+        label_text = line.split("Label:", 1)[1].strip().upper()
+        if "BAD" in label_text:
+            label = "BAD"
+    if reasoning == "" and line.startswith("Reasoning:"):
+        reasoning = line.split("Reasoning:", 1)[1].strip()
+        break  # Found all, done
+```
+
+#### 3. Reasoning Truncation (200자)
+```python
+if len(reasoning) > 200:
+    reasoning = reasoning[:200] + "..."
+```
+- 데이터 크기 절약
+- 핵심 판단 근거만 저장
+
+---
+
+## Step 4: Consensus Filtering & Merging
+
+### 개요
+- RPE label과 Judge label을 비교
+- **일치하는 step만 training data로 사용** (high-quality)
+- Judge reasoning도 함께 저장
+
+### Consensus 규칙
+```python
+if rpe_label == "good" and judge_label == "good":
+    final_label = 1  # GOOD
+    agree = True
+elif rpe_label == "bad" and judge_label == "bad":
+    final_label = 0  # BAD
+    agree = True
+else:
+    final_label = None  # Filtered (disagreement)
+    agree = False
+```
+
+### 실행 (간단 버전)
+```python
+python /tmp/merge_with_reasoning.py
+```
+
+### 최종 Training 데이터 형식
+```json
+{
+  "question_id": "5ab42ebd5542992339550047",
+  "question": "Who hosted both Miss USA 1968 and The Price Is Right?",
+  "gold_answer": "Bob Barker",
+  "predicted_answer": "Bob Barker",
+  "is_correct": true,
+  "num_steps_original": 3,
+  "num_steps_filtered": 3,
+  "steps": [
+    {
+      "step_num": 1,
+      "thought": "To answer this question, I need to recall who hosted Miss USA 1968 and The Price Is Right during the same period.",
+      "action": "Reason",
+      "content": "To answer this question, I need to recall who hosted Miss USA 1968 and The Price Is Right during the same period.",
+      "num_passages": 0,
+      "mc_before": 0.164,
+      "mc_after": 0.305,
+      "rpe": 1.75,
+      "label": "good",
+      "label_consensus": {
+        "rpe_label": "good",
+        "judge_label": "good",
+        "judge_reasoning": "The step correctly identifies the need to connect the host of both Miss USA 1968 and *The Price Is Right*, aligning with the question's requirements. While it does not yet retrieve specific informatio...",
+        "judge_confidence": 0.95,
+        "agree": true,
+        "final_label": 1
+      }
+    },
+    {
+      "step_num": 2,
+      "thought": "Based on the retrieved information, Bob Barker hosted Miss USA 1968. I need to check if Bob Barker also hosted The Price Is Right during the same period.",
+      "action": "Search",
+      "observation": "1. Miss USA 1968 was the 17th Miss USA pageant...",
+      "num_passages": 5,
+      "mc_before": 0.305,
+      "mc_after": 0.828,
+      "rpe": 2.632,
+      "label": "good",
+      "label_consensus": {
+        "rpe_label": "good",
+        "judge_label": "good",
+        "judge_reasoning": "The step correctly identifies Bob Barker as the host of Miss USA 1968 based on the provided information. The next logical action is to verify if he also hosted *The Price Is Right* during the same per...",
+        "judge_confidence": 1.0,
+        "agree": true,
+        "final_label": 1
+      }
+    },
+    {
+      "step_num": 3,
+      "thought": "Based on the information provided, Bob Barker hosted The Price Is Right from 1959 to 1969, which includes the period of Miss USA 1968.",
+      "action": "Finish",
+      "content": "Bob Barker",
+      "num_passages": 0,
+      "mc_before": 0.828,
+      "mc_after": 1.0,
+      "rpe": 1.193,
+      "label": "good",
+      "label_consensus": {
+        "rpe_label": "good",
+        "judge_label": "good",
+        "judge_reasoning": "The step correctly identifies that Bob Barker hosted *The Price Is Right* from 1959 to 1969, which includes 1968. Since the question asks for someone who hosted both *Miss USA 1968* and *The Price Is ...",
+        "judge_confidence": 1.0,
+        "agree": true,
+        "final_label": 1
+      }
+    }
+  ]
+}
+```
+
+### 출력 파일
+1. **All data** (`*_merged_all.jsonl`): 모든 step (disagreement 포함, consensus 정보 있음)
+2. **Filtered** (`*_merged_filtered.jsonl`): Consensus만 (training용)
+
+**파일 위치**: `outputs/test_consensus_5q_merged_*.jsonl`
+
+---
+
+## 사용 방법
+
+### 전체 파이프라인 실행
 
 ```bash
-# DPR Wikipedia (21M passages) 다운로드 및 BGE-M3 임베딩 생성
-python scripts/setup_dpr_wikipedia.py
-# 예상 시간: ~6-8시간 (GPU 사양에 따라)
+# 1. Trajectory 생성 (RPE 자동 계산됨)
+python scripts/batch_test_hybrid.py \
+  --dataset hotpotqa \
+  --split train \
+  --question-level medium \
+  --num-questions 1000 \
+  --use-reranker \
+  --output-dir outputs/hotpotqa_medium_1k
+
+# 2. Judge labeling
+# Edit scripts/judge_label_qwq.py to set input/output paths
+python scripts/judge_label_qwq.py
+
+# 3. Merge with consensus
+python scripts/merge_consensus.py \
+  --trajectories outputs/hotpotqa_medium_1k/results_*.jsonl \
+  --judge-labels outputs/judge_labels.jsonl \
+  --output-all outputs/merged_all.jsonl \
+  --output-filtered outputs/merged_filtered.jsonl
 ```
 
-생성되는 파일:
-- `~/.cache/huggingface/datasets/facebook___wiki_dpr/psgs_w100.nq.no_index/0.0.0/*/` - DPR corpus
-- `data/embeddings/dpr_wikipedia_bge_m3.pkl` - BGE-M3 임베딩 (~60-80GB)
-
-### 2. Trajectory 생성
+### 테스트 (5 questions)
 
 ```bash
-python scripts/batch_test_adaptive.py \
-    --start-idx 1 \
-    --num-questions 10 \
-    --split train \
-    --corpus-type dpr \
-    --output-dir outputs/batch_train_test \
-    --num-rollouts 8
+# 이미 생성된 테스트 데이터 사용
+INPUT=/root/.local/PRMRAG/outputs/test_consensus_5q.jsonl
+JUDGE=/root/.local/PRMRAG/outputs/test_consensus_5q_judge_labels.jsonl
+
+# Merge
+python /tmp/merge_with_reasoning.py
 ```
 
-### 3. 결과 확인
+---
 
-생성된 파일:
-- `outputs/batch_train_test/trajectories.jsonl` - 전체 trajectories
-- `outputs/batch_train_test/summary.json` - 통계 요약
+## 결과 통계 (Test 5 Questions)
 
-## 설정
+### Consensus Statistics
+```
+Total steps:              14
+  Both Good (label=1):    10 (71.4%)
+  Both Bad  (label=0):     2 (14.3%)
+  Disagreement (filtered): 2 (14.3%)
 
-`configs/adaptive_generation.yaml`:
-
-```yaml
-adaptive:
-  # MC estimation
-  num_rollouts: 8
-  use_dynamic_k: true  # Step 1 이후 dynamic K 사용
-
-  # RPE thresholds
-  rpe_threshold: 0.8  # RPE >= 0.8 → 'good', < 0.8 → 'bad'
-
-  # Generation limits
-  max_steps: 15
-  num_trajectories_per_question: 1
-
-  # RAG
-  num_rag_queries: 3
-  top_k_passages: 5
-
-  # Retriever
-  corpus_type: "dpr"  # "dpr" or "hotpotqa"
-  retriever_model: "BAAI/bge-m3"
-
-# Policy model (vLLM)
-policy_model:
-  model_name: "Qwen/Qwen2.5-7B-Instruct"
-  tensor_parallel_size: 1
-  gpu_memory_utilization: 0.8
-  max_tokens: 200
-  temperature: 0.8
-  top_p: 0.95
-  seed: 42
+Agreement Rate: 85.7%
 ```
 
-### 주요 파라미터
-
-- **rpe_threshold**: Step label 결정
-  - 0.8 → RPE >= 0.8이면 'good', 아니면 'bad'
-  - RPE = MC_after / MC_before
-
-- **num_rollouts**: MC 추정 정확도
-  - 많을수록 정확하지만 느림
-  - 8이 기본값 (vLLM batch generation으로 빠름)
-
-- **use_dynamic_k**: Dynamic K 사용 여부
-  - true → Step 1 이후 K 자동 조정
-  - false → 고정 num_rollouts 사용
-
-## 구현 상세
-
-### 파일 구조
-
+### Disagreement 분석
 ```
-src/prmrag/
-├── retrieval/
-│   ├── bge_retriever.py       # BGERetriever (dense retrieval)
-│   ├── bm25_retriever.py      # BM25Retriever (sparse)
-│   └── hybrid_retriever.py    # HybridRetriever (BM25+BGE)
-├── generation/
-│   ├── adaptive_generator.py  # AdaptiveTrajectoryGenerator
-│   └── step_forcing.py        # StepParser, ForcedStep
-├── models/
-│   └── policy_model_vllm.py   # PolicyModelVLLM (vLLM wrapper)
-├── labeling/
-│   ├── judge_labeler.py       # JudgeLabeler (LLM-as-a-judge)
-│   └── rpe_labeler.py         # RPELabeler (RPE-based)
-└── utils/
-    └── answer_utils.py        # Answer extraction & matching
+Q3 Step 1: RPE=bad, Judge=GOOD
+  - Judge reasoning: "The step correctly identifies that the initial document
+    mentions El-P as the Definitive Jux label head (a record executive) but
+    dismisses him as a guest vocalist..."
 
-scripts/
-├── batch_test_adaptive.py     # Main batch testing script
-├── setup_dpr_wikipedia.py     # DPR corpus & embedding setup
-└── generate_adaptive_trajectories.py  # Single trajectory generation
-
-configs/
-└── adaptive_generation.yaml   # Configuration
+Q3 Step 2: RPE=good, Judge=BAD
+  - Judge reasoning: "The step incorrectly identifies Chris Hicks as the
+    guest executive without any evidence connecting him to the EP..."
 ```
 
-### 핵심 클래스
+→ Judge가 RPE보다 더 세밀하게 평가 (문서 내용 직접 확인)
 
-#### 1. `BGERetriever` (Dense Retrieval)
+---
+
+## 주요 파일 구조
+
+```
+/root/.local/PRMRAG/
+├── src/prmrag/
+│   ├── labeling/
+│   │   ├── judge_labeler.py      # QwQ-32B Judge 구현
+│   │   ├── consensus.py           # Consensus filtering 로직
+│   │   └── rpe_labeler.py         # RPE labeling 로직
+│   └── models/
+│       └── policy_model_vllm.py   # vLLM Policy model
+├── scripts/
+│   ├── batch_test_hybrid.py       # Trajectory 생성
+│   ├── judge_label_qwq.py         # Judge labeling 실행
+│   ├── consensus_filter.py        # 기존 consensus 스크립트
+│   └── merge_consensus.py         # Merge 스크립트 (TODO)
+└── outputs/
+    ├── test_consensus_5q.jsonl                    # Policy trajectories
+    ├── test_consensus_5q_judge_labels.jsonl       # Judge labels
+    ├── test_consensus_5q_merged_all.jsonl         # All (with consensus info)
+    └── test_consensus_5q_merged_filtered.jsonl    # Training data (consensus only)
+```
+
+---
+
+## 핵심 개념 정리
+
+### 1. RPE (Relative Probability Elevation)
+- **정의**: `mc_after / mc_before`
+- **의미**: 해당 step이 정답 확률을 얼마나 향상시켰는가
+- **장점**: Fast, 모델 자체 신뢰도 활용
+- **단점**: Calibration 문제, shallow reasoning
+
+### 2. Judge (QwQ-32B Oracle)
+- **정의**: 큰 reasoning model이 step 품질 직접 평가
+- **의미**: 검색된 문서가 질문에 도움이 되는가
+- **장점**: Deep reasoning, 실제 문서 내용 확인
+- **단점**: Slow, expensive, hallucination 가능
+
+### 3. Consensus Filtering
+- **정의**: RPE와 Judge가 **둘 다 동의하는 step만 사용**
+- **의미**: High-confidence labels only
+- **효과**:
+  - Label noise 제거
+  - Training data quality ↑
+  - Agreement rate: 85.7% (test)
+
+### 4. Oracle Input Format
+- **Past steps**: Thought + Action만
+  - Observation은 이미 다음 Thought에 반영됨
+  - 토큰 절약 (중복 제거)
+- **Current step**: Thought + Action + **Observation**
+  - 현재 검색 결과를 평가해야 하므로 필수
+  - 문서가 좋은지 나쁜지 판단
+
+---
+
+## 다음 단계 (Stage 2)
+
+Stage 1에서 생성한 고품질 label로 **PRM (Process Reward Model) 학습**:
+
+1. **Input**: Trajectory prefix (question + steps 1~t)
+2. **Output**: Step t의 품질 예측 (0 or 1)
+3. **Training**: Consensus label 사용
+4. **Objective**: Accurate step-level evaluation
+
+→ `README_STAGE2.md` 참고 (TODO)
+
+---
+
+## 트러블슈팅
+
+### Judge labeling 시 empty reasoning
+**증상**: `judge_reasoning` 필드가 빈 문자열
+**원인**:
+1. `max_tokens` 부족 (QwQ의 긴 CoT가 잘림)
+2. Parser가 중간 output 파싱 (최종 judgment 도달 못함)
+
+**해결**:
 ```python
-from prmrag.retrieval.bge_retriever import BGERetriever
+# max_tokens 증가
+max_tokens = 3072  # 1024 → 3072
 
-retriever = BGERetriever(
-    corpus_type="dpr",
-    model_name="BAAI/bge-m3",
-    embeddings_path="data/embeddings/dpr_wikipedia_bge_m3.pkl"
-)
-
-results = retriever.retrieve(query, top_k=5)
-# Returns: [{'doc_id', 'title', 'text', 'score'}, ...]
+# Parser 역순 탐색 (최종 output 우선)
+for line in reversed(lines):
+    if line.startswith("Reasoning:"):
+        reasoning = line.split("Reasoning:", 1)[1].strip()
 ```
 
-#### 2. `PolicyModelVLLM` (vLLM)
+### Consensus rate가 100%로 나옴
+**증상**: RPE vs Judge 비교 시 100% agreement
+**원인**: Judge labels 파일에 `rpe_label` 필드도 포함되어 있어, `load_labels()` 함수가 judge_label 대신 rpe_label을 가져옴
+
+**해결**:
 ```python
-from prmrag.models.policy_model_vllm import PolicyModelVLLM
-
-model = PolicyModelVLLM(
-    model_name="Qwen/Qwen2.5-7B-Instruct",
-    tensor_parallel_size=1,
-    gpu_memory_utilization=0.8,
-    temperature=0.8,
-    seed=42
-)
-
-# Batch generation (optimized)
-responses = model.batch_generate_with_chat_template(
-    user_messages=prompts,
-    max_tokens=200,
-    temperature=0.8,
-)
+# Judge labels 로드 시 judge_label만 명시적으로 추출
+judge_labels = {
+    step['step_num']: step['judge_label'].lower()
+    for step in data['steps']
+}
 ```
 
-#### 3. `AdaptiveTrajectoryGenerator`
-```python
-from prmrag.generation.adaptive_generator import AdaptiveTrajectoryGenerator
-
-generator = AdaptiveTrajectoryGenerator(
-    policy_model=model,
-    retriever=retriever,
-    config=config
-)
-
-trajectory = generator.generate_trajectory(
-    question="What is...?",
-    gold_answer="...",
-)
-```
-
-#### 4. `AdaptiveStep` 데이터 구조
-```python
-@dataclass
-class AdaptiveStep:
-    step_id: int
-    step_type: StepType  # COT or RAG
-    text: str  # "Step N: ..."
-    content: str  # Content without "Step N:" prefix
-    used_passages: List[Dict]
-    mc_before: float
-    mc_after: float
-    rpe: float
-    label: str  # 'good' or 'bad'
-
-    # ReAct structure
-    thought: Optional[str] = None
-    action: str = "Reason"  # "Search", "Reason", "Finish"
-    action_input: Optional[str] = None  # Sub-query for Search
-    observation: Optional[str] = None  # Retrieved info
-    sub_answer: Optional[str] = None  # Intermediate answer
-
-    metadata: Dict = field(default_factory=dict)
-```
-
-### System Instruction
-
-모든 프롬프트는 **system instruction**을 활용합니다:
-
-```python
-# policy_model_vllm.py:199-269
-system_prompt = """You are an expert question-answering agent...
-
-# AVAILABLE ACTIONS
-1. **Search** - Retrieve information
-   Format: Action: Search[query="sub-question"]
-
-2. **Finish** - Provide final answer
-   Format: Action: Finish[answer="direct answer"]
-
-# RESPONSE FORMAT
-Step N:
-Thought: [reasoning]
-Action: Search[query="..."] or Finish[answer="..."]
-Observation: [search results]
-Sub-answer: [intermediate answer]
-
-# IMPORTANT RULES
-- One step at a time
-- Only use Search or Finish
-- Extract sub-answers from observations ONLY
-- Concise final answers
-..."""
-```
-
-User prompts는 매우 간결:
-```python
-# CoT prompt
-f"Question: {question}\n\nGenerate Step 1."
-
-# RAG prompt
-f"Question: {question}\nRetrieved Documents:\n{passages}\n\nGenerate Step {N}."
-
-# Rollout prompt
-f"Question: {question}\nReasoning so far:\n{steps}\n\nContinue solving and provide your final answer."
-```
-
-## 실제 사용 시 주의사항
-
-### 1. GPU 메모리 관리
-
-vLLM 사용 시:
-```python
-# GPU 메모리 사용량 조절
-gpu_memory_utilization=0.8  # 기본값
-tensor_parallel_size=1      # Multi-GPU 시 조정
-```
-
-### 2. DPR Corpus 용량
-
-- 원본 데이터: ~13GB (21M passages)
-- BGE-M3 임베딩: ~60-80GB
-- 총 필요 디스크: ~100GB
-
-### 3. 대규모 처리
-
-Batch processing:
+### GPU OOM
+**증상**: QwQ-32B 로딩 시 메모리 부족
+**해결**:
 ```bash
-# 100개씩 처리
-for start in {1..1000..100}; do
-    python scripts/batch_test_adaptive.py \
-        --start-idx $start \
-        --num-questions 100 \
-        --output-dir outputs/batch_${start}
-done
+# 이전 프로세스 정리
+nvidia-smi  # PID 확인
+kill -9 <PID>
+
+# gpu_memory_utilization 조정
+gpu_memory_utilization = 0.95  # 0.8 → 0.95
 ```
 
-### 4. Answer Matching
+---
 
-```python
-from prmrag.utils.answer_utils import (
-    extract_answer_from_text,
-    normalize_answer,
-    check_answer_match
-)
+## 참고 문헌
 
-# Extract answer
-answer = extract_answer_from_text(model_output)
+- **VersaPRM**: [Large Language Monkeys: Scaling Inference Compute with Repeated Sampling](https://arxiv.org/abs/2407.21787)
+- **Math-Shepherd**: [Let's Verify Step by Step](https://arxiv.org/abs/2305.20050)
+- **QwQ-32B**: Qwen Reasoning Model
+- **RPE**: Relative Probability Elevation (custom metric)
 
-# Normalize & match
-predicted = normalize_answer(answer)
-gold = normalize_answer(gold_answer)
-is_correct = check_answer_match(predicted, gold, threshold=0.8)
-```
+---
 
-## 다음 단계
-
-Stage 1 완료 후:
-1. Generated trajectories → Stage 2 (Judge labeling)
-2. Consensus filtering
-3. PRM training
-
-## 디버깅
-
-문제가 발생하면:
-
-1. **MC 계산 확인**
-```python
-# adaptive_generator.py에 로깅 추가
-print(f"[MC DEBUG] MC={mc_value:.3f}, K={k}, successes={successes}/{k}")
-```
-
-2. **Threshold 조정**
-```yaml
-adaptive:
-  rpe_threshold: 0.7  # More lenient
-```
-
-3. **Step 제한**
-```yaml
-adaptive:
-  max_steps: 5  # Shorter trajectories
-```
-
-4. **파싱 확인**
-```python
-from prmrag.generation.step_forcing import StepParser
-
-parsed = StepParser.parse_react_components(step_content)
-print(f"Thought: {parsed['thought']}")
-print(f"Action: {parsed['action']}")
-print(f"Action Input: {parsed['action_input']}")
-```
-
-## 참고
-
-- vLLM: https://github.com/vllm-project/vllm
-- BGE-M3: https://huggingface.co/BAAI/bge-m3
-- DPR: https://github.com/facebookresearch/DPR
-- HotpotQA: https://hotpotqa.github.io/
+**문서 작성일**: 2025-12-18
+**테스트 데이터**: HotpotQA train (5 questions, medium difficulty)
+**Agreement Rate**: 85.7% (12/14 steps)

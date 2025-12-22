@@ -46,7 +46,7 @@ class JudgeLabeler(BaseLabeler):
 
         self.model_name = config.get("model_name", "Qwen/Qwen2.5-7B-Instruct")
         self.temperature = config.get("temperature", 0.3)
-        self.max_tokens = config.get("max_tokens", 512)
+        self.max_tokens = config.get("max_tokens", 2048)  # Increased for QwQ-32B long reasoning
         self.max_retries = config.get("max_retries", 3)
         self.retry_delay = config.get("retry_delay", 2.0)
         self.prompt_style = config.get("prompt_style", "versaprm")
@@ -199,41 +199,47 @@ class JudgeLabeler(BaseLabeler):
             for i, fact in enumerate(trajectory.supporting_facts, 1):
                 prompt_parts.append(f"{i}. {fact}")
 
-        # Add previous steps for context (without detailed passages)
+        # Add previous steps for context
+        # Strategy: Keep Thought+Action (reasoning chain), remove Observation (already reflected in Thought)
         if prefix_steps:
             prompt_parts.extend([
                 "",
-                "# Previous Steps",
+                "# Previous Steps (Context Only)",
             ])
             for i, prev_step in enumerate(prefix_steps, 1):
-                prompt_parts.append(f"Step {i}: {prev_step.action}")
-                # Only show if retrieved passages (summarize)
-                if prev_step.passages and prev_step.passages[0]:
-                    num_passages = len(prev_step.passages)
-                    prompt_parts.append(f"  → Retrieved {num_passages} passage(s)")
-                # Don't show detailed observation for previous steps
+                # prev_step.action contains "Thought: ...\nAction: ..."
+                prompt_parts.append(f"Step {i}:")
+                prompt_parts.append(f"{prev_step.action}")
+                # Note: Observation omitted - already reflected in next step's Thought
+                prompt_parts.append("")  # Blank line for readability
 
         # Add current step to evaluate
+        # This step's Observation is CRITICAL for evaluation
         prompt_parts.extend([
             "",
-            "# Step to Evaluate",
-            f"Action: {step.action}",
+            "# Current Step to Evaluate",
+            step.action,  # Contains "Thought: ...\nAction: ..."
         ])
 
-        if step.passages:
-            prompt_parts.append("\nRetrieved Passages:")
+        # Show retrieved passages (Observation) for current step only
+        if step.observation and step.observation.strip():
+            prompt_parts.append("\nObservation (Retrieved Information):")
+            prompt_parts.append(step.observation)
+        elif step.passages and step.passages[0]:
+            # Fallback: if observation is empty but passages exist
+            prompt_parts.append("\nObservation (Retrieved Information):")
             for i, passage in enumerate(step.passages, 1):
-                prompt_parts.append(f"{i}. {passage}")
+                if passage and passage.strip():
+                    prompt_parts.append(f"{i}. {passage}")
 
         prompt_parts.extend([
-            f"\nObservation: {step.observation}",
             "",
             "# Your Evaluation",
-            "Provide your evaluation in the following format:",
+            "Evaluate whether this step (Thought + Action + Observation) is helpful for answering correctly.",
             "",
-            "Reasoning: [Explain why this step is good or bad]",
+            "IMPORTANT: Output ONLY the following two lines. Do NOT include any other text or explanation.",
+            "Reasoning: [One sentence summary of your judgment, max 50 words]",
             "Label: [GOOD or BAD]",
-            "Confidence: [0.0 to 1.0]",
         ])
 
         return "\n".join(prompt_parts)
@@ -257,10 +263,9 @@ Observation: {step.observation}
 
 Is this step GOOD (helpful) or BAD (unhelpful) for answering the question?
 
-Response format:
-Reasoning: [your explanation]
+IMPORTANT: Output ONLY the following two lines:
+Reasoning: [One sentence, max 50 words]
 Label: [GOOD or BAD]
-Confidence: [0.0 to 1.0]
 """
         return prompt
 
@@ -285,8 +290,7 @@ Confidence: [0.0 to 1.0]
                     print(f"All retries failed: {e}")
                     # Return a default response on failure
                     return """Reasoning: Unable to evaluate due to model error.
-Label: GOOD
-Confidence: 0.5"""
+Label: GOOD"""
 
     def _call_llm(self, prompt: str) -> str:
         """Call LLM using vLLM backend.
@@ -310,9 +314,6 @@ Confidence: 0.5"""
             max_tokens=self.max_tokens,
             temperature=self.temperature,
         )
-
-        # DEBUG: Print raw response
-        print(f"[DEBUG] Raw Judge Response:\n{response}\n")
 
         return response
 
@@ -344,8 +345,11 @@ Confidence: 0.5"""
     def _parse_judge_response(self, response: str) -> tuple[str, str, float]:
         """Parse LLM judge response.
 
+        QwQ-32B generates long chain-of-thought reasoning before final judgment.
+        This parser extracts ONLY the final structured output (last occurrence).
+
         Args:
-            response: Raw LLM response
+            response: Raw LLM response (may contain long CoT)
 
         Returns:
             Tuple of (label, reasoning, confidence)
@@ -353,28 +357,45 @@ Confidence: 0.5"""
         # Default values
         label = "GOOD"
         reasoning = ""
-        confidence = 0.5
+        confidence = 1.0  # Fixed confidence since we removed it from prompt
 
-        # Parse response
+        # Strategy: Parse from END to get final structured output
+        # QwQ often outputs long reasoning, then "Reasoning: ... Label: ..." at end
         lines = response.strip().split("\n")
 
-        for line in lines:
+        # Reverse iterate to find LAST occurrence of each field
+        for line in reversed(lines):
             line = line.strip()
 
-            if line.startswith("Reasoning:"):
-                reasoning = line.split("Reasoning:", 1)[1].strip()
-            elif line.startswith("Label:"):
+            # Find last Label (should be near end)
+            if line.startswith("Label:"):
                 label_text = line.split("Label:", 1)[1].strip().upper()
                 if "BAD" in label_text:
                     label = "BAD"
-                elif "GOOD" in label_text:
+                else:
                     label = "GOOD"
-            elif line.startswith("Confidence:"):
-                try:
-                    conf_text = line.split("Confidence:", 1)[1].strip()
-                    confidence = float(conf_text)
-                except (ValueError, IndexError):
-                    confidence = 0.5
+
+            # Find last Reasoning (should be near end)
+            if reasoning == "" and line.startswith("Reasoning:"):
+                reasoning = line.split("Reasoning:", 1)[1].strip()
+                # If found both, we're done
+                break
+
+        # Smart truncate: keep full if short, otherwise truncate at sentence boundary
+        max_length = 200
+        if len(reasoning) > max_length:
+            # Try to find last sentence boundary before max_length
+            truncated = reasoning[:max_length]
+            # Look for sentence endings: ., !, ?
+            last_period = max(truncated.rfind('. '), truncated.rfind('.'))
+            last_exclaim = truncated.rfind('!')
+            last_question = truncated.rfind('?')
+            last_boundary = max(last_period, last_exclaim, last_question)
+
+            if last_boundary > max_length // 2:  # Only use if boundary is past halfway
+                reasoning = reasoning[:last_boundary + 1]
+            else:
+                reasoning = truncated + "..."
 
         return label, reasoning, confidence
 

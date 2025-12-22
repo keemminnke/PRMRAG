@@ -77,9 +77,9 @@ def main():
     # Initialize Judge labeler with QwQ-32B
     # QwQ-32B needs ~61GB for weights + ~30GB for KV cache
     config = {
-        'model_name': 'Qwen/QwQ-32B-Preview',
+        'model_name': 'Qwen/QwQ-32B',  # Use official release (not Preview)
         'temperature': 0.3,
-        'max_tokens': 1024,
+        'max_tokens': 3072,  # Increased to allow QwQ's long reasoning to complete
         'gpu_memory_utilization': 0.95,  # Use 95% of 96GB = 91.2GB
         'tensor_parallel_size': 1,
         'prompt_style': 'versaprm',
