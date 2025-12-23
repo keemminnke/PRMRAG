@@ -33,10 +33,17 @@ def load_trajectories(filepath: Path):
                 thought = step_data.get('thought', '')
                 action_name = step_data.get('action', 'Unknown')
 
-                if thought:
-                    full_action = f"Thought: {thought}\nAction: {action_name}"
+                # For Finish action, include the predicted answer so Judge can evaluate it
+                if action_name == 'Finish':
+                    predicted_ans = data.get('predicted_answer', 'Unknown')
+                    action_with_answer = f"{action_name}[answer=\"{predicted_ans}\"]"
                 else:
-                    full_action = f"Action: {action_name}"
+                    action_with_answer = action_name
+
+                if thought:
+                    full_action = f"Thought: {thought}\nAction: {action_with_answer}"
+                else:
+                    full_action = f"Action: {action_with_answer}"
 
                 step = TrajectoryStep(
                     step_id=step_data['step_num'] - 1,  # 0-indexed
@@ -61,7 +68,7 @@ def load_trajectories(filepath: Path):
 
 def main():
     input_file = Path('/root/.local/PRMRAG/outputs/test_consensus_5q.jsonl')
-    output_file = Path('/root/.local/PRMRAG/outputs/test_consensus_5q_judge_labels.jsonl')
+    output_file = Path('/root/.local/PRMRAG/outputs/test_judge_1q_new_prompt.json')
     
     print("=" * 70)
     print("JUDGE LABELING with QwQ-32B")
@@ -80,7 +87,7 @@ def main():
         'model_name': 'Qwen/QwQ-32B',  # Use official release (not Preview)
         'temperature': 0.3,
         'max_tokens': 3072,  # Increased to allow QwQ's long reasoning to complete
-        'gpu_memory_utilization': 0.95,  # Use 95% of 96GB = 91.2GB
+        'gpu_memory_utilization': 0.95,  # Increased to fit max_model_len=40960
         'tensor_parallel_size': 1,
         'prompt_style': 'versaprm',
         'use_gold_answer': True,
@@ -155,8 +162,7 @@ def main():
     
     # Save results
     with open(output_file, 'w') as f:
-        for result in results:
-            f.write(json.dumps(result) + '\n')
+        json.dump(results, f, indent=2)
     
     print("=" * 70)
     print("SUMMARY")

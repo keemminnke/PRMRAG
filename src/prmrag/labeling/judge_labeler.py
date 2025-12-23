@@ -74,6 +74,7 @@ class JudgeLabeler(BaseLabeler):
             'max_tokens': self.max_tokens,
             'gpu_memory_utilization': self.gpu_memory_utilization,
             'tensor_parallel_size': self.tensor_parallel_size,
+            'max_model_len': 40960,
         }
 
         print(f"Initializing Judge model with vLLM: {self.model_name}")
@@ -200,18 +201,21 @@ class JudgeLabeler(BaseLabeler):
                 prompt_parts.append(f"{i}. {fact}")
 
         # Add previous steps for context
-        # Strategy: Keep Thought+Action (reasoning chain), remove Observation (already reflected in Thought)
         if prefix_steps:
             prompt_parts.extend([
                 "",
-                "# Previous Steps (Context Only)",
+                "# Previous Steps (Context)",
             ])
             for i, prev_step in enumerate(prefix_steps, 1):
-                # prev_step.action contains "Thought: ...\nAction: ..."
                 prompt_parts.append(f"Step {i}:")
                 prompt_parts.append(f"{prev_step.action}")
-                # Note: Observation omitted - already reflected in next step's Thought
-                prompt_parts.append("")  # Blank line for readability
+                if prev_step.observation:
+                    # Keep more context for Judge to verify claims (500 → 3000 chars)
+                    obs_preview = prev_step.observation[:3000]
+                    if len(prev_step.observation) > 3000:
+                        obs_preview += "...[truncated]"
+                    prompt_parts.append(f"Observation: {obs_preview}")
+                prompt_parts.append("")
 
         # Add current step to evaluate
         # This step's Observation is CRITICAL for evaluation
@@ -234,12 +238,27 @@ class JudgeLabeler(BaseLabeler):
 
         prompt_parts.extend([
             "",
-            "# Your Evaluation",
-            "Evaluate whether this step (Thought + Action + Observation) is helpful for answering correctly.",
+            "# Your Evaluation Task",
+            "Please think step by step to evaluate this interaction.",
             "",
-            "IMPORTANT: Output ONLY the following two lines. Do NOT include any other text or explanation.",
-            "Reasoning: [One sentence summary of your judgment, max 50 words]",
-            "Label: [GOOD or BAD]",
+            "**CRITICAL RULE: Even if the final answer matches the Correct Answer, you MUST label the step as BAD if:**",
+            "- The Model claims facts (names, dates, numbers) that are NOT present in the Observation",
+            "- The Model makes inferences not supported by the retrieved information",
+            "- The Model hallucinates or fabricates information",
+            "",
+            "Evaluation Steps:",
+            "1. First, carefully read the 'Observation' and identify what factual information it actually contains.",
+            "2. Second, check if the Model's 'Thought' or 'Action' makes claims beyond what the Observation supports.",
+            "3. Third, verify if the step moves toward the Correct Answer using ONLY the information in Observation.",
+            "4. Finally, determine if the step is GOOD or BAD.",
+            "",
+            "Output Format:",
+            "Thinking Process:",
+            "[Write down your step-by-step analysis here. Be verbose and critical.]",
+            "",
+            "Final Verification:",
+            "Reasoning: [Summary of your judgment - explain if hallucination was detected]",
+            "Label: [GOOD or BAD]"
         ])
 
         return "\n".join(prompt_parts)
@@ -354,8 +373,10 @@ Label: GOOD"""
         Returns:
             Tuple of (label, reasoning, confidence)
         """
-        # Default values
-        label = "GOOD"
+        import re
+
+        # Default values - CRITICAL: BAD instead of GOOD to avoid false positives
+        label = "BAD"  # Conservative: parsing failure = don't trust the step
         reasoning = ""
         confidence = 1.0  # Fixed confidence since we removed it from prompt
 
@@ -363,23 +384,32 @@ Label: GOOD"""
         # QwQ often outputs long reasoning, then "Reasoning: ... Label: ..." at end
         lines = response.strip().split("\n")
 
+        # Regex patterns for flexible matching (handles **Label:**, Final Label:, etc.)
+        label_pattern = re.compile(r'(?:Final\s+)?Label:\s*\*?\*?([A-Z]+)\*?\*?', re.IGNORECASE)
+        reasoning_pattern = re.compile(r'Reasoning:\s*(.+)', re.IGNORECASE)
+
         # Reverse iterate to find LAST occurrence of each field
         for line in reversed(lines):
             line = line.strip()
 
-            # Find last Label (should be near end)
-            if line.startswith("Label:"):
-                label_text = line.split("Label:", 1)[1].strip().upper()
-                if "BAD" in label_text:
-                    label = "BAD"
-                else:
-                    label = "GOOD"
+            # Find last Label using regex
+            if not label or label == "BAD":  # Only override default if we find valid label
+                match = label_pattern.search(line)
+                if match:
+                    found_label = match.group(1).upper()
+                    if "GOOD" in found_label:
+                        label = "GOOD"
+                    elif "BAD" in found_label:
+                        label = "BAD"
 
-            # Find last Reasoning (should be near end)
-            if reasoning == "" and line.startswith("Reasoning:"):
-                reasoning = line.split("Reasoning:", 1)[1].strip()
-                # If found both, we're done
-                break
+            # Find last Reasoning using regex
+            if reasoning == "":
+                match = reasoning_pattern.search(line)
+                if match:
+                    reasoning = match.group(1).strip()
+                    # If found both, we're done
+                    if label in ["GOOD", "BAD"]:
+                        break
 
         # Smart truncate: keep full if short, otherwise truncate at sentence boundary
         max_length = 200
