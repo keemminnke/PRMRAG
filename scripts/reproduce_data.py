@@ -49,17 +49,15 @@ def download_kilt(data_dir: Path):
         print("Error: 'wget' not found. Please install wget or download manually.")
         sys.exit(1)
 
-def get_truncated_text(doc_text_list, max_paragraphs=10, max_chars=1000):
-    """Smart truncation: paragraph-based with character safety net."""
+def get_truncated_text(doc_text_list, max_chars=1200):
+    """Character-based truncation with truncation marker."""
     if not doc_text_list:
         return ""
-    # 1. Take first N paragraphs
-    selected_paragraphs = doc_text_list[:max_paragraphs]
-    # 2. Join them
-    joined_text = ' '.join(selected_paragraphs)
-    # 3. Safety net
+    # Join all paragraphs
+    joined_text = ' '.join(doc_text_list)
+    # Truncate if exceeds limit
     if len(joined_text) > max_chars:
-        joined_text = joined_text[:max_chars] + "..."
+        return joined_text[:max_chars] + " [TRUNCATED]"
     return joined_text
 
 def load_kilt_corpus(corpus_file: Path, limit: int = None) -> List[Dict[str, Any]]:
@@ -70,11 +68,11 @@ def load_kilt_corpus(corpus_file: Path, limit: int = None) -> List[Dict[str, Any
             if limit and i >= limit:
                 break
             doc = json.loads(line)
-            # KILT format: text is a list of paragraphs
+            # KILT format: text is a list of paragraphs or string
             if isinstance(doc['text'], list):
-                text = get_truncated_text(doc['text'], max_paragraphs=2, max_chars=1200)
+                text = ' '.join(doc['text'])
             else:
-                text = doc['text'][:1200] + ("..." if len(doc['text']) > 1200 else "")
+                text = doc['text']
             
             corpus.append({
                 'id': doc['_id'],
