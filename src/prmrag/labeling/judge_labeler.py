@@ -44,7 +44,7 @@ class JudgeLabeler(BaseLabeler):
         """
         super().__init__(config)
 
-        self.model_name = config.get("model_name", "Qwen/Qwen2.5-7B-Instruct")
+        self.model_name = config.get("model_name", "Qwen/QwQ-32B")
         self.temperature = config.get("temperature", 0.3)
         self.max_tokens = config.get("max_tokens", 2048)  # Increased for QwQ-32B long reasoning
         self.max_retries = config.get("max_retries", 3)
@@ -210,11 +210,8 @@ class JudgeLabeler(BaseLabeler):
                 prompt_parts.append(f"Step {i}:")
                 prompt_parts.append(f"{prev_step.action}")
                 if prev_step.observation:
-                    # Keep more context for Judge to verify claims (500 → 3000 chars)
-                    obs_preview = prev_step.observation[:3000]
-                    if len(prev_step.observation) > 3000:
-                        obs_preview += "...[truncated]"
-                    prompt_parts.append(f"Observation: {obs_preview}")
+                    # No truncation - Judge needs full context to detect hallucinations
+                    prompt_parts.append(f"Observation: {prev_step.observation}")
                 prompt_parts.append("")
 
         # Add current step to evaluate

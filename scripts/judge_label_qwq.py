@@ -94,15 +94,17 @@ def main():
         'use_supporting_facts': False,
     }
     
+    # Initialize model once for all questions
+    print("Initializing QwQ-32B (one-time)...")
+    judge_labeler = JudgeLabeler(config)
+    print("✓ Model loaded\n")
+
     # Label each trajectory
     results = []
     for i, (trajectory, original_data) in enumerate(trajectory_pairs, 1):
         print(f"[{i}/{len(trajectory_pairs)}] Labeling: {trajectory.question[:60]}...")
 
-        # Reinitialize model for each question (workaround for vLLM crash)
-        print(f"  Initializing QwQ-32B...")
         try:
-            judge_labeler = JudgeLabeler(config)
             judge_labels = []
 
             # Label each step
@@ -120,11 +122,6 @@ def main():
                         reasoning=f'Error: {str(e)}',
                         confidence=0.0,
                     ))
-
-            # Cleanup vLLM resources
-            del judge_labeler
-            import gc
-            gc.collect()
 
         except Exception as e:
             print(f"  FATAL ERROR: {e}")

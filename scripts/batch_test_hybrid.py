@@ -28,35 +28,25 @@ from prmrag.retrieval.bge_reranker import BGEReranker
 import re
 
 
-def get_truncated_text(doc_text_list, max_paragraphs=2, max_chars=1200):
-    """Smart truncation: paragraph-based with character safety net.
-
-    Wikipedia is top-heavy (most important info in first 1-2 paragraphs).
-    This prevents:
-    - Context overflow (20K+ chars → model slowdown)
-    - Lost-in-the-middle phenomenon
-    - Mid-sentence truncation artifacts
+def get_truncated_text(doc_text_list, max_chars=1200):
+    """Character-based truncation with truncation marker.
 
     Args:
         doc_text_list: List of paragraphs
-        max_paragraphs: Take first N paragraphs (default: 2)
-        max_chars: Safety limit even after paragraph selection (default: 1200)
+        max_chars: Character limit (default: 1200)
 
     Returns:
-        Truncated text string
+        Truncated text string with [TRUNCATED] marker if cut
     """
     if not doc_text_list:
         return ""
 
-    # 1. Take first N paragraphs (core information)
-    selected_paragraphs = doc_text_list[:max_paragraphs]
+    # Join all paragraphs
+    joined_text = ' '.join(doc_text_list)
 
-    # 2. Join them
-    joined_text = ' '.join(selected_paragraphs)
-
-    # 3. Safety net: character limit to prevent extreme cases
+    # Truncate if exceeds limit
     if len(joined_text) > max_chars:
-        joined_text = joined_text[:max_chars] + "..."
+        return joined_text[:max_chars] + " [TRUNCATED]"
 
     return joined_text
 
@@ -82,12 +72,12 @@ def load_kilt_corpus(corpus_file: Path, limit: int = None) -> List[Dict[str, Any
             doc = json.loads(line)
 
             # KILT format: text is a list of paragraphs
-            # Use smart truncation (first 2 paragraphs, max 1200 chars)
+            # Use smart truncation (first 10 paragraphs, max 1000 chars)
             if isinstance(doc['text'], list):
-                text = get_truncated_text(doc['text'], max_paragraphs=2, max_chars=1200)
+                text = get_truncated_text(doc['text'], max_paragraphs=10, max_chars=1000)
             else:
                 # Single string: still apply character limit
-                text = doc['text'][:1200] + ("..." if len(doc['text']) > 1200 else "")
+                text = doc['text'][:1000] + ("..." if len(doc['text']) > 1000 else "")
 
             corpus.append({
                 'id': doc['_id'],
