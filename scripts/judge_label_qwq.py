@@ -67,8 +67,8 @@ def load_trajectories(filepath: Path):
     return trajectories
 
 def main():
-    input_file = Path('/root/.local/PRMRAG/outputs/test_consensus_5q.jsonl')
-    output_file = Path('/root/.local/PRMRAG/outputs/test_judge_1q_new_prompt.json')
+    input_file = Path('/root/.local/PRMRAG/outputs/test_judge_5q_newdata.jsonl')
+    output_file = Path('/root/.local/PRMRAG/outputs/test_judge_5q_newdata_results.json')
     
     print("=" * 70)
     print("JUDGE LABELING with QwQ-32B")

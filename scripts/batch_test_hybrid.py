@@ -72,12 +72,12 @@ def load_kilt_corpus(corpus_file: Path, limit: int = None) -> List[Dict[str, Any
             doc = json.loads(line)
 
             # KILT format: text is a list of paragraphs
-            # Use smart truncation (first 10 paragraphs, max 1000 chars)
+            # Character-only truncation (1200 chars max)
             if isinstance(doc['text'], list):
-                text = get_truncated_text(doc['text'], max_paragraphs=10, max_chars=1000)
+                text = get_truncated_text(doc['text'], max_chars=1200)
             else:
                 # Single string: still apply character limit
-                text = doc['text'][:1000] + ("..." if len(doc['text']) > 1000 else "")
+                text = doc['text'][:1200] + (" [TRUNCATED]" if len(doc['text']) > 1200 else "")
 
             corpus.append({
                 'id': doc['_id'],
@@ -321,6 +321,10 @@ def format_trajectory_for_review(trajectory, question_data: Dict[str, Any]) -> D
             'action': getattr(step, 'action', 'Reason'),
         }
 
+        # Include metadata for debugging backtracking
+        if hasattr(step, 'metadata') and step.metadata:
+            step_info['metadata'] = step.metadata
+
         # Only include non-null optional fields
         if hasattr(step, 'action_input') and step.action_input is not None:
             step_info['action_input'] = step.action_input
@@ -383,7 +387,7 @@ def format_trajectory_for_review(trajectory, question_data: Dict[str, Any]) -> D
     num_cot_steps = sum(1 for s in steps_detail if s['action'] == 'Reason')
     num_rag_steps = sum(1 for s in steps_detail if s['action'] == 'Search')
 
-    return {
+    result = {
         'question_id': trajectory.trajectory_id,
         'question': trajectory.question,
         'gold_answer': trajectory.gold_answer,
@@ -397,6 +401,13 @@ def format_trajectory_for_review(trajectory, question_data: Dict[str, Any]) -> D
         'rag_interventions': rag_interventions,
         'format_compliance': format_compliance,
     }
+
+    # Include rejected_segments for DPO training if present
+    if hasattr(trajectory, 'rejected_segments') and trajectory.rejected_segments:
+        result['rejected_segments'] = trajectory.rejected_segments
+        result['num_backtracks'] = len(trajectory.rejected_segments)
+
+    return result
 
 
 def main():
