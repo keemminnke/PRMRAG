@@ -45,6 +45,7 @@ class PolicyModelVLLM:
         temperature: float = 0.8,
         top_p: float = 0.95,
         seed: int = 42,  # Random seed for reproducibility
+        max_model_len: int = None,  # Max model context length (default: use model's default)
         device: str = "cuda",  # Ignored, for compatibility with PolicyModel
         torch_dtype=None,  # Ignored, vLLM handles this automatically
     ):
@@ -58,6 +59,7 @@ class PolicyModelVLLM:
             temperature: Sampling temperature
             top_p: Nucleus sampling parameter
             seed: Random seed for reproducibility (default: 42)
+            max_model_len: Max model context length (default: None, use model's default)
             device: Ignored (for compatibility with PolicyModel)
             torch_dtype: Ignored (vLLM handles dtype automatically)
         """
@@ -82,15 +84,22 @@ class PolicyModelVLLM:
 
         # Initialize vLLM engine with enforce_eager=True to avoid compilation bugs
         # in development versions of vLLM
-        self.llm = LLM(
-            model=model_name,
-            tensor_parallel_size=tensor_parallel_size,
-            gpu_memory_utilization=gpu_memory_utilization,
-            trust_remote_code=True,
-            enforce_eager=True,  # Required for vLLM dev versions with GH200
-            disable_log_stats=True,  # Disable verbose logging
-            seed=seed,  # Set seed for vLLM sampling
-        )
+        vllm_kwargs = {
+            'model': model_name,
+            'tensor_parallel_size': tensor_parallel_size,
+            'gpu_memory_utilization': gpu_memory_utilization,
+            'trust_remote_code': True,
+            'enforce_eager': True,  # Required for vLLM dev versions with GH200
+            'disable_log_stats': True,  # Disable verbose logging
+            'seed': seed,  # Set seed for vLLM sampling
+        }
+
+        # Add max_model_len if specified
+        if max_model_len is not None:
+            vllm_kwargs['max_model_len'] = max_model_len
+            print(f"  Setting max_model_len={max_model_len}")
+
+        self.llm = LLM(**vllm_kwargs)
 
         self.model_name = model_name
         self.device = device
@@ -386,6 +395,7 @@ def load_policy_model(config: dict) -> PolicyModelVLLM:
             - max_tokens: Max tokens per generation (default: 200)
             - tensor_parallel_size: Number of GPUs (default: 1)
             - gpu_memory_utilization: GPU memory utilization (default: 0.7)
+            - max_model_len: Max model context length (default: None, use model's default)
             - seed: Random seed for reproducibility (default: 42)
 
     Returns:
@@ -399,5 +409,6 @@ def load_policy_model(config: dict) -> PolicyModelVLLM:
         temperature=config.get('temperature', 0.8),
         top_p=config.get('top_p', 0.95),
         seed=config.get('seed', 42),
+        max_model_len=config.get('max_model_len', None),
         device=config.get('device', 'cuda'),
     )

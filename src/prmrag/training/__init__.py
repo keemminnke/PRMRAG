@@ -4,6 +4,7 @@ This module provides:
 - Checkpoint-based training with scaling law experiments
 - Data sampling by difficulty (Hard/Med/Easy)
 - Incremental evaluation at each checkpoint
+- Critic model training for step-level evaluation
 """
 
 from .data_sampler import (
@@ -26,6 +27,12 @@ from .scaling_analysis import (
     plot_scaling_curve,
     plot_difficulty_breakdown,
 )
+from .critic_trainer import (
+    CriticTrainer,
+    CriticTrainingConfig,
+    CriticDataFormatter,
+    create_critic_trainer,
+)
 
 __all__ = [
     # Data sampling
@@ -39,6 +46,11 @@ __all__ = [
     "TrainingCheckpoint",
     "ScalingExperiment",
     "CheckpointStatus",
+    # Critic training
+    "CriticTrainer",
+    "CriticTrainingConfig",
+    "CriticDataFormatter",
+    "create_critic_trainer",
     # Analysis
     "ScalingAnalyzer",
     "ScalingCurve",

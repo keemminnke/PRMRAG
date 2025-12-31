@@ -312,7 +312,7 @@ def format_trajectory_for_review(trajectory, question_data: Dict[str, Any]) -> D
     for i, step in enumerate(trajectory.steps, 1):
         step_info = {
             'step_num': i,
-            'content': step.content,
+            # 'content': step.content,  # Removed: redundant (thought + action + observation)
             'mc_before': round(step.mc_before, 3),
             'mc_after': round(step.mc_after, 3),
             'rpe': round(step.rpe, 3),
@@ -346,10 +346,15 @@ def format_trajectory_for_review(trajectory, question_data: Dict[str, Any]) -> D
         if hasattr(step, 'retrieval_evidence') and step.retrieval_evidence:
             step_info['retrieval_evidence'] = step.retrieval_evidence.to_dict()
 
-        if step_info['action'] == 'Search':
+        # Check if step has passages (regardless of action type)
+        if hasattr(step, 'used_passages') and step.used_passages:
             step_info['num_passages'] = len(step.used_passages)
             step_info['passage_titles'] = [p.get('title', 'Unknown') for p in step.used_passages]
+        else:
+            step_info['num_passages'] = 0
 
+        # Validate format for Search steps
+        if step_info['action'] == 'Search':
             # Validate format
             validation = validate_rag_step_format(step.content, step.step_type.value)
             step_info['format_validation'] = validation
@@ -362,9 +367,6 @@ def format_trajectory_for_review(trajectory, question_data: Dict[str, Any]) -> D
                 format_compliance['rag_with_citations'] += 1
             if validation['has_search_tags'] and validation['has_citations']:
                 format_compliance['rag_fully_compliant'] += 1
-        else:
-            # CoT step: no retrieval
-            step_info['num_passages'] = 0
 
         steps_detail.append(step_info)
 
