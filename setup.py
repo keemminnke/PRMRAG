@@ -20,6 +20,12 @@ setup(
         "jsonlines>=4.0.0",
         "scikit-learn>=1.3.0",
         "scipy>=1.11.0",
+        "datasets>=2.14.0",
+        "peft>=0.5.0",
+        "trl>=0.7.0",
+        "rank-bm25>=0.2.2",
+        "wikipedia-api>=0.6.0",
+        "FlagEmbedding>=1.2.0",
     ],
     extras_require={
         "dev": [
