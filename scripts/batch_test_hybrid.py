@@ -633,7 +633,7 @@ def main():
         k_sparse=50,  # Fixed: BM25 retrieves top-50
         k_dense=50,   # Fixed: BGE retrieves top-50
         reranker=reranker,
-        rerank_top_n=args.rerank_top_n if args.use_reranker else 20,
+        rerank_top_n=args.rerank_top_n if args.use_reranker else 5,
     )
     print(f"✓ Hybrid retriever initialized!")
 

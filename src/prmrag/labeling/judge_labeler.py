@@ -1,5 +1,7 @@
 """LLM Judge labeler (VersaPRM style) using vLLM."""
 
+import json
+import re
 import time
 from typing import List, Dict, Any, Optional
 from tqdm import tqdm
@@ -56,6 +58,7 @@ class JudgeLabeler(BaseLabeler):
         # vLLM-specific settings
         self.gpu_memory_utilization = config.get("gpu_memory_utilization", 0.8)
         self.tensor_parallel_size = config.get("tensor_parallel_size", 1)
+        self.max_model_len = config.get("max_model_len", 32768)
 
         self.model_client = model_client
         self.processor = TrajectoryProcessor()
@@ -74,14 +77,14 @@ class JudgeLabeler(BaseLabeler):
             'max_tokens': self.max_tokens,
             'gpu_memory_utilization': self.gpu_memory_utilization,
             'tensor_parallel_size': self.tensor_parallel_size,
-            'max_model_len': 40960,
+            'max_model_len': self.max_model_len,
         }
 
         print(f"Initializing Judge model with vLLM: {self.model_name}")
         self.model_client = load_policy_model(model_config)
 
     def label_trajectory(self, trajectory: Trajectory) -> List[JudgeLabel]:
-        """Label a trajectory using LLM judge.
+        """Label a trajectory using LLM judge (batch mode - all steps at once).
 
         Args:
             trajectory: Trajectory to label
@@ -89,11 +92,14 @@ class JudgeLabeler(BaseLabeler):
         Returns:
             List of JudgeLabel objects, one per step
         """
-        labels = []
+        # Build prompt for whole trajectory
+        prompt = self._build_whole_trajectory_prompt(trajectory)
 
-        for step_idx in range(len(trajectory.steps)):
-            judge_label = self._judge_step(trajectory, step_idx)
-            labels.append(judge_label)
+        # Call LLM once for all steps
+        response = self._call_llm_with_retry(prompt)
+
+        # Parse JSON response to get labels for all steps
+        labels = self._parse_json_response(response, len(trajectory.steps))
 
         return labels
 
@@ -150,12 +156,153 @@ class JudgeLabeler(BaseLabeler):
         else:
             return self._build_default_prompt(trajectory, step_idx)
 
+    def _build_whole_trajectory_prompt(self, trajectory: Trajectory) -> str:
+        """Build prompt for evaluating all steps in one call.
+
+        VersaPRM의 평가 기준을 유지하면서 한 번의 호출로 모든 스텝을 평가.
+        """
+        # 1. 전체 Trajectory 구성
+        interaction_history = []
+        for i, step in enumerate(trajectory.steps, 1):
+            step_text = f"## Step {i}\n"
+            step_text += f"**Action:** {step.action}\n"
+            # [추가] Finish 스텝이면 모델의 최종 예측값 공개
+            if "Finish" in str(step.action) and trajectory.final_answer:
+                step_text += f"**Model's Final Prediction:** {trajectory.final_answer}\n"
+            if step.observation and step.observation.strip():
+                step_text += f"**Observation:** {step.observation}\n"
+            else:
+                step_text += "**Observation:** (No information retrieved)\n"
+            interaction_history.append(step_text)
+
+        history_str = "\n\n".join(interaction_history)
+
+        # 2. VersaPRM 프롬프트 (다중 스텝 평가)
+        prompt = f"""You are an expert evaluator for RAG (Retrieval-Augmented Generation) systems.
+
+# Task
+You will be given a full interaction trajectory consisting of multiple steps.
+Your task is to **evaluate EACH step independently** based on the criteria below and assign a label (GOOD or BAD).
+
+# Evaluation Criteria (VersaPRM Style)
+
+**A step is GOOD if:**
+- It retrieves relevant information that helps answer the question.
+- It makes correct logical inferences based ONLY on the Observation.
+
+**A step is BAD if:**
+- **Hallucination:** It claims facts (names, dates, numbers) NOT present in the Observation.
+- **Bad Search:** The search query is irrelevant, too vague, or repeats failed queries.
+- **Irrelevant:** The retrieved documents don't help answer the question.
+- **Wrong Logic:** It makes inferences not supported by the retrieved information.
+
+# Input Data
+
+## Question
+{trajectory.question}
+
+## Correct Answer (Ground Truth)
+{trajectory.gold_answer if self.use_gold_answer else "N/A"}
+
+## Full Trajectory
+{history_str}
+
+# Output Instructions
+1. Analyze the trajectory step by step.
+2. For each step, check specifically for hallucinations against the Observation.
+3. Output the result in a **JSON list** format.
+
+Example Output Format:
+```json
+[
+  {{"step": 1, "label": "GOOD", "reasoning": "The search query is specific and relevant."}},
+  {{"step": 2, "label": "BAD", "reasoning": "The model mentions 'Apple released output', but the Observation only talks about 'Microsoft'. This is a hallucination."}},
+  ...
+]
+```
+
+Evaluate all {len(trajectory.steps)} steps now."""
+
+        return prompt
+
+    def _parse_json_response(self, response: str, num_steps: int) -> List[JudgeLabel]:
+        """Parse JSON response from whole-trajectory evaluation.
+
+        Args:
+            response: Raw LLM response containing JSON
+            num_steps: Expected number of steps
+
+        Returns:
+            List of JudgeLabel objects
+        """
+        labels = []
+
+        # Extract JSON from response (handle ```json ... ``` blocks)
+        json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(1)
+        else:
+            # Try to find raw JSON array
+            json_match = re.search(r'\[\s*\{.*?\}\s*\]', response, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+            else:
+                json_str = None
+
+        parsed_results = []
+        if json_str:
+            try:
+                parsed_results = json.loads(json_str)
+            except json.JSONDecodeError:
+                # Try to fix common issues
+                try:
+                    # Remove trailing commas
+                    fixed = re.sub(r',\s*]', ']', json_str)
+                    fixed = re.sub(r',\s*}', '}', fixed)
+                    parsed_results = json.loads(fixed)
+                except json.JSONDecodeError:
+                    pass
+
+        # Build labels from parsed results
+        for step_idx in range(num_steps):
+            # Find matching result
+            result = None
+            for r in parsed_results:
+                if r.get('step') == step_idx + 1:
+                    result = r
+                    break
+
+            if result:
+                label = result.get('label', 'BAD').upper()
+                if 'GOOD' in label:
+                    label = 'GOOD'
+                else:
+                    label = 'BAD'
+                reasoning = result.get('reasoning', '')[:200]
+            else:
+                # Default if parsing failed
+                label = 'BAD'
+                reasoning = 'Failed to parse response'
+
+            labels.append(JudgeLabel(
+                step_id=step_idx,
+                label=label,
+                reasoning=reasoning,
+                confidence=1.0,
+                metadata={
+                    "model_name": self.model_name,
+                    "prompt_style": "whole_trajectory",
+                },
+            ))
+
+        return labels
+
     def _build_versaprm_prompt(
         self,
         trajectory: Trajectory,
         step_idx: int,
     ) -> str:
-        """Build VersaPRM-style judge prompt.
+        """Build VersaPRM-style judge prompt (single step, legacy).
 
         VersaPRM evaluates whether a step is helpful for reaching the correct answer.
         """
@@ -172,13 +319,11 @@ class JudgeLabeler(BaseLabeler):
             "A step is GOOD if:",
             "- It retrieves relevant information that helps answer the question",
             "- It makes correct logical inferences",
-            "- It moves toward the correct answer",
             "- The retrieved passages are relevant and useful",
             "",
             "A step is BAD if:",
             "- It retrieves irrelevant or misleading information",
             "- It makes incorrect logical inferences",
-            "- It leads away from the correct answer",
             "- The passages are off-topic or unhelpful",
             "",
             f"# Question\n{trajectory.question}",
@@ -219,8 +364,12 @@ class JudgeLabeler(BaseLabeler):
         prompt_parts.extend([
             "",
             "# Current Step to Evaluate",
-            step.action,  # Contains "Thought: ...\nAction: ..."
+            f"Action Segment: {step.action}",  # Contains "Thought: ...\nAction: ..."
         ])
+
+        # [추가] 마지막 스텝(Finish)이라면 모델이 낸 '최종 예측값'을 Judge에게 공개
+        if "Finish" in str(step.action) and trajectory.final_answer:
+            prompt_parts.append(f"Model's Final Prediction: {trajectory.final_answer}")
 
         # Show retrieved passages (Observation) for current step only
         if step.observation and step.observation.strip():
