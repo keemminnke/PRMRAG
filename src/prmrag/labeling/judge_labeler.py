@@ -103,59 +103,6 @@ class JudgeLabeler(BaseLabeler):
 
         return labels
 
-    def _judge_step(
-        self,
-        trajectory: Trajectory,
-        step_idx: int,
-    ) -> JudgeLabel:
-        """Judge a specific step using LLM.
-
-        Args:
-            trajectory: Trajectory containing the step
-            step_idx: Index of the step to evaluate
-
-        Returns:
-            JudgeLabel for this step
-        """
-        # Build prompt
-        prompt = self._build_judge_prompt(trajectory, step_idx)
-
-        # Call LLM with retry logic
-        response = self._call_llm_with_retry(prompt)
-
-        # Parse response
-        label, reasoning, confidence = self._parse_judge_response(response)
-
-        return JudgeLabel(
-            step_id=step_idx,
-            label=label,
-            reasoning=reasoning,
-            confidence=confidence,
-            metadata={
-                "model_name": self.model_name,
-                "prompt_style": self.prompt_style,
-            },
-        )
-
-    def _build_judge_prompt(
-        self,
-        trajectory: Trajectory,
-        step_idx: int,
-    ) -> str:
-        """Build judge prompt for a step.
-
-        Args:
-            trajectory: Trajectory containing the step
-            step_idx: Index of the step
-
-        Returns:
-            Formatted prompt string
-        """
-        if self.prompt_style == "versaprm":
-            return self._build_versaprm_prompt(trajectory, step_idx)
-        else:
-            return self._build_default_prompt(trajectory, step_idx)
-
     def _build_whole_trajectory_prompt(self, trajectory: Trajectory) -> str:
         """Build prompt for evaluating all steps in one call.
 
@@ -178,24 +125,49 @@ class JudgeLabeler(BaseLabeler):
         history_str = "\n\n".join(interaction_history)
 
         # 2. VersaPRM 프롬프트 (다중 스텝 평가)
-        prompt = f"""You are an expert evaluator for RAG (Retrieval-Augmented Generation) systems.
+        prompt = f"""You are a **Strict Process Supervisor** for an Active RAG (Retrieval-Augmented Generation) agent.
+                Your goal is NOT just to check if the answer is correct, but to judge whether the agent's **search strategy** and **reliance on evidence** are flawless.
+                You must penalize "lucky guesses" (correct answers without evidence) and reward "strategic resilience" (retrying after failure).
 
-# Task
-You will be given a full interaction trajectory consisting of multiple steps.
-Your task is to **evaluate EACH step independently** based on the criteria below and assign a label (GOOD or BAD).
+                # Task
+                You will be given a full interaction trajectory consisting of multiple steps.
+                Your task is to **evaluate EACH step independently** based on the criteria below and assign a label (GOOD or BAD).
 
-# Evaluation Criteria (VersaPRM Style)
-
-**A step is GOOD if:**
-- It retrieves relevant information that helps answer the question.
-- It makes correct logical inferences based ONLY on the Observation.
-
-**A step is BAD if:**
-- **Hallucination:** It claims facts (names, dates, numbers) NOT present in the Observation.
-- **Bad Search:** The search query is irrelevant, too vague, or repeats failed queries.
-- **Irrelevant:** The retrieved documents don't help answer the question.
-- **Wrong Logic:** It makes inferences not supported by the retrieved information.
-
+                "# Evaluation Criteria (Strict Process Supervision)",
+                "Evaluate whether the agent correctly identifies the need for external information.",
+                "",
+                "**Case 0: MISSING SEARCH (The 'Overconfidence' Error)**",
+                "If the Agent chooses to **Answer (Finish)** or **Reason** using internal knowledge WITHOUT any prior successful Search:",
+                "**BAD if:**",
+                "- **Unsubstantiated Claim:** The question asks for specific factual details (e.g., obscure names, dates, statistics, recent events) that require verification, but the Agent skips 'Search' and relies on internal memory.",
+                "- **Hallucination Risk:** The Agent generates specific entities or facts that are not common knowledge, without any retrieved Observation to back them up.",
+                "**GOOD if:**",
+                "- **Common Knowledge:** The question is trivial or general knowledge (e.g., 'What is 2+2?', 'Who is the president of USA? - if widely known') where search is genuinely unnecessary.",
+                "**Case 1: Action is SEARCH**",
+                "GOOD if:",
+                "- **Query Quality:** The query is specific, relevant, and logically derived.",
+                "- **Remediation:** If previous search failed, the agent tries a DIFFERENT strategy/keyword.",
+                "BAD if:",
+                "- **Looping:** Repeats the exact same failed query.",
+                "- **Vague:** Query is too generic to be useful.",
+                "",
+                "**Case 2: Action is FINISH / REASON (The 'Answering' Phase)**",
+                "GOOD if:",
+                "- **Evidence-Based:** The answer is strictly derived from the provided Observation.",
+                "- **Sufficiency:** The retrieved information is actually sufficient to answer the question.",
+                "BAD if:",
+                "- **Parametric Shortcut (CRITICAL):** The Observation is EMPTY or IRRELEVANT, but the agent **answers anyway using internal knowledge** instead of searching. (Even if the answer is factually correct, this is BAD in RAG context).",
+                "- **Hallucination:** Claims facts not found in the Observation.",
+                "",
+                "**Case 3: Handling Retrieval Failures**",
+                "If the previous Observation was IRRELEVANT or EMPTY:",
+                "GOOD if:",
+                "- **Recognition:** The agent admits 'I did not find the information'.",
+                "- **Retry:** The agent immediately performs a **Search** action.",
+                "BAD if:",
+                "- **Ignoring Failure:** The agent ignores the bad result and proceeds to answer.",
+                "- **Lazy Finish:** The agent decides to 'Finish' without trying to search again, relying on guess work.",
+                "",
 # Input Data
 
 ## Question
