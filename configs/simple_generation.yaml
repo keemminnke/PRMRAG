@@ -1,0 +1,27 @@
+# Simple trajectory generation config (no RPE/MC rollouts)
+# Much faster than adaptive generation
+
+model:
+  model_name: "Qwen/Qwen2.5-7B-Instruct"
+  gpu_memory_utilization: 0.8
+  tensor_parallel_size: 1
+  max_model_len: 16384
+
+retriever:
+  type: "hybrid"
+  bm25:
+    index_path: "data/hotpotqa/bm25_index"
+    corpus_path: "data/hotpotqa/corpus.jsonl"
+  bge:
+    model_name: "BAAI/bge-base-en-v1.5"
+    index_path: "data/hotpotqa/bge_index"
+    corpus_path: "data/hotpotqa/corpus.jsonl"
+  alpha: 0.5  # Weight for BM25 vs BGE
+
+generation:
+  max_steps: 10
+  top_k_passages: 5
+  temperature: 0.7
+
+data:
+  questions_file: "data/hotpotqa/hotpot_train_v1.1.json"

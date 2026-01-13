@@ -2,6 +2,7 @@
 
 from .adaptive_generator import (
     AdaptiveTrajectoryGenerator,
+    SimpleTrajectoryGenerator,
     AdaptiveTrajectory,
     AdaptiveStep,
     StepType,
@@ -17,6 +18,7 @@ from .step_forcing import (
 
 __all__ = [
     "AdaptiveTrajectoryGenerator",
+    "SimpleTrajectoryGenerator",
     "AdaptiveTrajectory",
     "AdaptiveStep",
     "StepType",

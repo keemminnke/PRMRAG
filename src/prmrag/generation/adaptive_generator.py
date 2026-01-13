@@ -535,3 +535,342 @@ class AdaptiveTrajectoryGenerator:
                     all_trajectories.append(trajectory)
 
         return all_trajectories
+
+
+class SimpleTrajectoryGenerator:
+    """Simple trajectory generator without MC rollouts.
+
+    This generator relies on the model's explicit action (Search/Finish)
+    instead of using MC-based RPE for decision making.
+
+    Benefits:
+    - Much faster (no rollouts needed)
+    - Can be batch processed
+    - Labels come from Judge model instead of RPE
+
+    Flow:
+    1. Generate step with model
+    2. Parse action from output (Search/Finish)
+    3. If Search: retrieve docs, add observation, continue
+    4. If Finish: extract answer, stop
+    """
+
+    def __init__(
+        self,
+        policy_model,
+        retriever,
+        config: Dict[str, Any],
+    ):
+        """Initialize simple trajectory generator.
+
+        Args:
+            policy_model: Model for generation
+            retriever: Retriever for RAG
+            config: Configuration dict with:
+                - max_steps: Maximum steps per trajectory
+                - top_k_passages: Number of passages to retrieve
+                - temperature: Sampling temperature
+        """
+        self.policy_model = policy_model
+        self.retriever = retriever
+
+        self.max_steps = config.get('max_steps', 10)
+        self.top_k_passages = config.get('top_k_passages', 5)
+        self.temperature = config.get('temperature', 0.7)
+
+        self.step_forcing_prompt = StepForcingPrompt()
+        self.step_parser = StepParser()
+
+    def generate_trajectory(
+        self,
+        question: str,
+        gold_answer: Optional[str] = None,
+        supporting_facts: Optional[List[str]] = None,
+        trajectory_id: Optional[str] = None,
+    ) -> Optional[AdaptiveTrajectory]:
+        """Generate a trajectory using action-based flow.
+
+        Args:
+            question: The question to answer
+            gold_answer: Gold answer (for evaluation only)
+            supporting_facts: Supporting facts (optional)
+            trajectory_id: Unique ID for trajectory
+
+        Returns:
+            AdaptiveTrajectory or None if generation failed
+        """
+        import re
+
+        trajectory_id = trajectory_id or f"traj_{hash(question)}"
+
+        steps = []
+        context = ""  # Accumulated retrieved passages
+        forced_steps = []  # Track ForcedStep objects for continuation prompt
+
+        for step_num in range(1, self.max_steps + 1):
+            # Build prompt
+            if step_num == 1:
+                prompt = self._build_initial_prompt(question)
+            else:
+                prompt = self._build_continuation_prompt(question, forced_steps, context)
+
+            # Generate step
+            response = self.policy_model.generate_with_chat_template(
+                user_message=prompt,
+                max_tokens=800,
+                temperature=self.temperature,
+                top_p=0.95,
+                stop_sequences=["\nStep"],
+            )
+
+            # Parse response
+            step_content = self._parse_step_response(response, step_num)
+            step_text = f"Step {step_num}: {step_content}"
+
+            # Track for continuation
+            forced_steps.append(ForcedStep(step_number=step_num, content=step_content))
+
+            # Detect action
+            action_type, action_input = self._parse_action(step_content)
+
+            if action_type == "finish":
+                # Final answer step
+                step = AdaptiveStep(
+                    step_id=step_num,
+                    step_type=StepType.ANSWER,
+                    text=step_text,
+                    content=step_content,
+                    used_passages=[],
+                    mc_before=0.0,  # Placeholder - Judge will provide labels
+                    mc_after=0.0,
+                    rpe=0.0,
+                    metadata={'action': 'finish'},
+                )
+                steps.append(step)
+                break
+
+            elif action_type == "search":
+                # RAG step - retrieve and continue
+                query = action_input or question
+                passages = self.retriever.retrieve(query, top_k=self.top_k_passages)
+
+                # Format observation
+                observation = self._format_observation(passages)
+                full_content = f"{step_content}\n\nObservation:\n{observation}"
+
+                step = AdaptiveStep(
+                    step_id=step_num,
+                    step_type=StepType.RAG,
+                    text=f"Step {step_num}: {full_content}",
+                    content=full_content,
+                    used_passages=passages,
+                    mc_before=0.0,
+                    mc_after=0.0,
+                    rpe=0.0,
+                    metadata={'action': 'search', 'query': query},
+                )
+                steps.append(step)
+
+                # Update context for next step
+                context = observation
+                # Update forced step with observation
+                forced_steps[-1] = ForcedStep(step_number=step_num, content=full_content)
+
+            else:
+                # Pure reasoning step (no action detected)
+                step = AdaptiveStep(
+                    step_id=step_num,
+                    step_type=StepType.COT,
+                    text=step_text,
+                    content=step_content,
+                    used_passages=[],
+                    mc_before=0.0,
+                    mc_after=0.0,
+                    rpe=0.0,
+                    metadata={'action': 'reason'},
+                )
+                steps.append(step)
+
+        # Extract final answer
+        final_answer = self._extract_final_answer(steps)
+        is_correct = self._check_answer(final_answer, gold_answer) if gold_answer else None
+
+        return AdaptiveTrajectory(
+            trajectory_id=trajectory_id,
+            question=question,
+            steps=steps,
+            final_answer=final_answer,
+            gold_answer=gold_answer,
+            supporting_facts=supporting_facts,
+            is_correct=is_correct,
+            metadata={
+                'num_steps': len(steps),
+                'generator': 'simple',
+            },
+        )
+
+    def _build_initial_prompt(self, question: str) -> str:
+        """Build prompt for first step."""
+        return f"""You are a reasoning agent that can search for information when needed.
+
+Question: {question}
+
+Instructions:
+- Think step by step
+- If you need more information, use: Action: Search[query="your search query"]
+- When you have the final answer, use: Action: Finish[answer="your answer"]
+
+Generate Step 1."""
+
+    def _build_continuation_prompt(
+        self,
+        question: str,
+        previous_steps: List[ForcedStep],
+        context: str = ""
+    ) -> str:
+        """Build prompt for continuation."""
+        steps_text = "\n".join(str(step) for step in previous_steps)
+        next_step_num = len(previous_steps) + 1
+
+        prompt = f"""You are a reasoning agent that can search for information when needed.
+
+Question: {question}
+
+{steps_text}
+
+Instructions:
+- Think step by step
+- If you need more information, use: Action: Search[query="your search query"]
+- When you have the final answer, use: Action: Finish[answer="your answer"]
+
+Continue with Step {next_step_num}."""
+
+        return prompt
+
+    def _parse_step_response(self, response: str, step_num: int) -> str:
+        """Parse step content from response."""
+        import re
+
+        # Remove any future steps
+        next_step_match = re.search(r'\n+Step\s+\d+:', response)
+        if next_step_match:
+            response = response[:next_step_match.start()].strip()
+
+        # Remove "Step N:" prefix if present
+        step_prefix = re.match(rf'^Step\s+{step_num}:\s*', response)
+        if step_prefix:
+            response = response[step_prefix.end():]
+
+        return response.strip()
+
+    def _parse_action(self, content: str) -> Tuple[Optional[str], Optional[str]]:
+        """Parse action from step content.
+
+        Returns:
+            Tuple of (action_type, action_input)
+            action_type: 'search', 'finish', or None
+        """
+        import re
+
+        # Check for Finish action
+        finish_match = re.search(
+            r'Action:\s*Finish\[answer=["\']?(.+?)["\']?\]',
+            content,
+            re.IGNORECASE | re.DOTALL
+        )
+        if finish_match:
+            return ('finish', finish_match.group(1).strip())
+
+        # Check for Search action
+        search_match = re.search(
+            r'Action:\s*Search\[query=["\']?(.+?)["\']?\]',
+            content,
+            re.IGNORECASE | re.DOTALL
+        )
+        if search_match:
+            return ('search', search_match.group(1).strip())
+
+        # Check for simple finish markers
+        if any(marker in content.lower() for marker in ['final answer:', 'the answer is', 'therefore, the answer']):
+            return ('finish', None)
+
+        return (None, None)
+
+    def _format_observation(self, passages: List[Dict[str, Any]]) -> str:
+        """Format retrieved passages as observation."""
+        obs_parts = []
+        for i, p in enumerate(passages, 1):
+            title = p.get('title', 'Unknown')
+            text = p.get('text', p.get('content', ''))[:500]
+            obs_parts.append(f"[{i}] {title}: {text}")
+        return "\n".join(obs_parts)
+
+    def _extract_final_answer(self, steps: List[AdaptiveStep]) -> str:
+        """Extract final answer from trajectory."""
+        import re
+
+        if not steps:
+            return ""
+
+        # Check last step for Finish action
+        last_content = steps[-1].content
+
+        # Try Finish[answer="..."] pattern
+        finish_match = re.search(
+            r'Finish\[answer=["\']?(.+?)["\']?\]',
+            last_content,
+            re.IGNORECASE | re.DOTALL
+        )
+        if finish_match:
+            return finish_match.group(1).strip()
+
+        # Try "Final Answer:" pattern
+        final_match = re.search(r'final\s+answer:\s*(.+)', last_content, re.IGNORECASE)
+        if final_match:
+            return final_match.group(1).strip().split('\n')[0]
+
+        # Try "the answer is" pattern
+        answer_match = re.search(r'the\s+answer\s+is\s*:?\s*(.+)', last_content, re.IGNORECASE)
+        if answer_match:
+            return answer_match.group(1).strip().split('\n')[0]
+
+        return ""
+
+    def _check_answer(self, predicted: str, gold: str) -> bool:
+        """Check if predicted answer matches gold."""
+        if not predicted or not gold:
+            return False
+        pred_norm = predicted.strip().lower()
+        gold_norm = gold.strip().lower()
+        return pred_norm == gold_norm or gold_norm in pred_norm or pred_norm in gold_norm
+
+    def generate_batch(
+        self,
+        questions: List[Dict[str, Any]],
+        show_progress: bool = True,
+    ) -> List[AdaptiveTrajectory]:
+        """Generate trajectories for multiple questions.
+
+        Args:
+            questions: List of question dicts
+            show_progress: Show progress bar
+
+        Returns:
+            List of generated trajectories
+        """
+        all_trajectories = []
+
+        iterator = tqdm(questions, desc="Generating trajectories") if show_progress else questions
+
+        for q_data in iterator:
+            trajectory = self.generate_trajectory(
+                question=q_data['question'],
+                gold_answer=q_data.get('gold_answer', q_data.get('answer')),
+                supporting_facts=q_data.get('supporting_facts'),
+                trajectory_id=q_data.get('_id', q_data.get('id', str(hash(q_data['question'])))),
+            )
+
+            if trajectory is not None:
+                all_trajectories.append(trajectory)
+
+        return all_trajectories
