@@ -201,6 +201,40 @@ class AdaptiveTrajectory:
         return result
 
 
+@dataclass
+class TrajectoryState:
+    """State for a single trajectory during batch generation.
+
+    This class tracks the progress of one trajectory during parallel batch generation,
+    allowing multiple trajectories to be processed synchronously step-by-step.
+    """
+    trajectory_id: str
+    question: str
+    gold_answer: Optional[str]
+    supporting_facts: Optional[List[str]]
+
+    # Current generation state
+    state: Dict[str, Any]  # Contains: question, reasoning_history, forced_steps, passages, current_passages
+    steps: List[AdaptiveStep] = field(default_factory=list)
+    rejected_segments: List[Dict[str, Any]] = field(default_factory=list)
+
+    # MC tracking
+    mc_prev: float = 0.0  # MC value from previous step
+    mc_question: float = 0.0  # Baseline MC on question alone
+    current_k: int = 8  # Dynamic K for this trajectory (updated after Step 1)
+
+    # Failure tracking (GenPRM-style)
+    failed_after_rag: bool = False
+
+    # Termination
+    is_finished: bool = False
+    finish_reason: Optional[str] = None  # "answer_found", "max_steps", "failed"
+
+    def current_step_num(self) -> int:
+        """Get the next step number to generate."""
+        return len(self.steps) + 1
+
+
 class AdaptiveTrajectoryGenerator:
     """Generator for adaptive MC-CoT + RAG trajectories.
 
@@ -1356,4 +1390,859 @@ class AdaptiveTrajectoryGenerator:
                     all_trajectories.append(trajectory)
 
         return all_trajectories
-    
+
+    def _monte_carlo_estimate_batch(
+        self,
+        traj_states: List[TrajectoryState],
+    ) -> List[float]:
+        """Batch MC estimation for multiple trajectories (vLLM optimized).
+
+        Performs MC rollouts for all trajectories at once:
+        - N trajectories × K rollouts = N*K prompts processed in one batch
+        - Each trajectory can have different K (dynamic K based on difficulty)
+        - Example: 16 trajectories with varying K (32~128) = ~1024 prompts in single vLLM call
+
+        Args:
+            traj_states: List of trajectory states to estimate (each has its own current_k)
+
+        Returns:
+            List of MC values (one per trajectory)
+        """
+        if not traj_states:
+            return []
+
+        if self.policy_model is None:
+            # Placeholder: random estimates
+            return [np.random.uniform(0.3, 0.9) for _ in traj_states]
+
+        # Build all rollout prompts: N trajectories × K_i rollouts (K_i varies per trajectory)
+        all_prompts = []
+        trajectory_indices = []  # Track which trajectory each prompt belongs to
+        trajectory_ks = []  # Track K for each trajectory
+
+        for traj_idx, traj_state in enumerate(traj_states):
+            # Use trajectory-specific K (set after Step 1 based on difficulty)
+            k = traj_state.current_k
+            trajectory_ks.append(k)
+
+            # Build K rollout prompts for this trajectory
+            rollout_prompt = self._build_rollout_prompt(traj_state.state)
+
+            # Format with rollout-specific system prompt
+            if hasattr(self.policy_model, 'format_rollout_prompt'):
+                formatted_prompt = self.policy_model.format_rollout_prompt(rollout_prompt)
+            else:
+                formatted_prompt = rollout_prompt
+
+            # Add K copies (same prompt, different sampling)
+            for _ in range(k):
+                all_prompts.append(formatted_prompt)
+                trajectory_indices.append(traj_idx)
+
+        # Batch generate all rollouts at once (total prompts = sum of all K_i)
+        k_min, k_max, k_avg = min(trajectory_ks), max(trajectory_ks), sum(trajectory_ks) / len(trajectory_ks)
+        print(f"  [Batch MC] Generating {len(all_prompts)} rollouts ({len(traj_states)} trajectories, K range: {k_min}-{k_max}, avg: {k_avg:.1f})")
+
+        if hasattr(self.policy_model, 'batch_generate'):
+            responses = self.policy_model.batch_generate(
+                prompts=all_prompts,
+                max_tokens=1200,
+                temperature=self.temperature,
+                top_p=0.95,
+            )
+        else:
+            # Fallback for HuggingFace Transformers (sequential)
+            responses = []
+            for prompt in all_prompts:
+                response = self.policy_model.generate(
+                    prompt=prompt,
+                    max_tokens=1200,
+                    temperature=self.temperature,
+                    top_p=0.95,
+                )
+                responses.append(response)
+
+        # Process responses: group by trajectory and calculate MC
+        mc_values = []
+        for traj_idx, traj_state in enumerate(traj_states):
+            # Get all responses for this trajectory
+            traj_responses = [
+                responses[i] for i, idx in enumerate(trajectory_indices)
+                if idx == traj_idx
+            ]
+
+            # Calculate MC for this trajectory using its specific K
+            k_traj = trajectory_ks[traj_idx]
+            successes = 0
+            for response in traj_responses:
+                final_answer = self._extract_answer(response)
+                if traj_state.gold_answer and self._check_answer(final_answer, traj_state.gold_answer):
+                    successes += 1
+
+            mc_value = successes / k_traj
+            mc_values.append(mc_value)
+
+        return mc_values
+
+
+    def _generate_cot_steps_batch(
+        self,
+        traj_states: List[TrajectoryState],
+    ) -> List[str]:
+        """Generate CoT steps for multiple trajectories at once (vLLM optimized).
+
+        Args:
+            traj_states: List of trajectory states
+
+        Returns:
+            List of step contents (without "Step N:" prefix)
+        """
+        if not traj_states:
+            return []
+
+        if self.policy_model is None:
+            # Placeholder for testing
+            return [f"[CoT step {ts.current_step_num()}]" for ts in traj_states]
+
+        # Build prompts for each trajectory
+        prompts = []
+        for traj_state in traj_states:
+            step_num = traj_state.current_step_num()
+            state = traj_state.state
+            forced_steps = state.get('forced_steps', [])
+
+            if step_num == 1:
+                prompt = self.step_forcing_prompt.build_initial_prompt(
+                    question=state['question'],
+                    context=""
+                )
+            else:
+                prompt = self.step_forcing_prompt.build_continuation_prompt(
+                    question=state['question'],
+                    previous_steps=forced_steps,
+                    context=""
+                )
+            prompts.append(prompt)
+
+        # Batch generate with chat template
+        if hasattr(self.policy_model, 'batch_generate_with_chat_template'):
+            # Use batch generation with chat template (Qwen format)
+            responses = self.policy_model.batch_generate_with_chat_template(
+                user_messages=prompts,
+                max_tokens=800,
+                temperature=self.temperature,
+                top_p=0.95,
+                stop_sequences=["\nStep"],
+            )
+        else:
+            # Fallback: format and batch generate manually
+            formatted_prompts = []
+            for prompt in prompts:
+                if hasattr(self.policy_model, 'format_prompt_for_qwen'):
+                    formatted_prompts.append(self.policy_model.format_prompt_for_qwen(prompt))
+                else:
+                    formatted_prompts.append(prompt)
+
+            if hasattr(self.policy_model, 'batch_generate'):
+                responses = self.policy_model.batch_generate(
+                    prompts=formatted_prompts,
+                    max_tokens=800,
+                    temperature=self.temperature,
+                    top_p=0.95,
+                    stop_sequences=["\nStep"],
+                )
+            else:
+                # Sequential fallback
+                responses = []
+                for prompt in formatted_prompts:
+                    resp = self.policy_model.generate(
+                        prompt=prompt,
+                        max_tokens=800,
+                        temperature=self.temperature,
+                        top_p=0.95,
+                        stop_sequences=["\nStep"],
+                    )
+                    responses.append(resp)
+
+        # Parse responses to extract step contents
+        step_contents = []
+        for idx, (response, traj_state) in enumerate(zip(responses, traj_states)):
+            step_num = traj_state.current_step_num()
+
+            # Remove any future steps
+            import re
+            next_step_match = re.search(r'\n+Step\s+\d+:', response)
+            if next_step_match:
+                response = response[:next_step_match.start()].strip()
+
+            # Parse to get content without "Step N:" prefix
+            content = self.step_parser.parse_single_step_response(response, step_num)
+            step_contents.append(content)
+
+        return step_contents
+
+    def _generate_rag_queries_batch(
+        self,
+        traj_states: List[TrajectoryState],
+    ) -> List[str]:
+        """Generate RAG queries for multiple trajectories at once.
+
+        Args:
+            traj_states: List of trajectory states
+
+        Returns:
+            List of search queries
+        """
+        if not traj_states:
+            return []
+
+        if self.policy_model is None:
+            # Fallback: use questions as-is
+            return [ts.state['question'] for ts in traj_states]
+
+        # Build prompts for query generation
+        prompts = []
+        for traj_state in traj_states:
+            state = traj_state.state
+            prompt_lines = []
+
+            if state.get('reasoning_history'):
+                # Follow-up question
+                prompt_lines.extend([
+                    "You are searching for information to answer a question step by step.",
+                    "",
+                    f"## Main Question",
+                    state['question'],
+                    "",
+                    f"## Previous Reasoning Steps",
+                ])
+                for step in state['reasoning_history']:
+                    prompt_lines.append(step)
+                prompt_lines.extend([
+                    "",
+                    "## Task",
+                    "Based on the reasoning so far, generate a simple follow-up search query to find the information needed to continue.",
+                    "- Ask a SIMPLE question that a search engine can understand",
+                    "- You may rephrase or decompose the main question if previous steps were not helpful",
+                    "- Use 3-8 keywords maximum",
+                    "- Do NOT write complex questions",
+                    "",
+                    "Respond with ONLY the search query. Do not explain yourself.",
+                    "",
+                    "Search query:"
+                ])
+            else:
+                # First step - decompose the main question
+                prompt_lines.extend([
+                    "You are searching for information to answer a question step by step.",
+                    "",
+                    f"## Main Question",
+                    state['question'],
+                    "",
+                    "## Task",
+                    "Generate a simple search query to find information that will help answer this question.",
+                    "- Break down the question if it requires multiple pieces of information",
+                    "- Ask a SIMPLE question that a search engine can understand",
+                    "- Use 3-8 keywords maximum",
+                    "",
+                    "Respond with ONLY the search query. Do not explain yourself.",
+                    "",
+                    "Search query:"
+                ])
+
+            prompts.append("\n".join(prompt_lines))
+
+        # Batch generate queries
+        if hasattr(self.policy_model, 'batch_generate_with_chat_template'):
+            responses = self.policy_model.batch_generate_with_chat_template(
+                user_messages=prompts,
+                max_tokens=100,
+                temperature=0.7,
+            )
+        else:
+            # Fallback: format and batch generate manually
+            formatted_prompts = []
+            for prompt in prompts:
+                if hasattr(self.policy_model, 'format_prompt_for_qwen'):
+                    formatted_prompts.append(self.policy_model.format_prompt_for_qwen(prompt))
+                else:
+                    formatted_prompts.append(prompt)
+
+            if hasattr(self.policy_model, 'batch_generate'):
+                responses = self.policy_model.batch_generate(
+                    prompts=formatted_prompts,
+                    max_tokens=100,
+                    temperature=0.7,
+                )
+            else:
+                # Sequential fallback
+                responses = []
+                for prompt in formatted_prompts:
+                    resp = self.policy_model.generate(
+                        prompt=prompt,
+                        max_tokens=100,
+                        temperature=0.7,
+                    )
+                    responses.append(resp)
+
+        # Extract queries from responses
+        queries = []
+        for response, traj_state in zip(responses, traj_states):
+            query = response.strip().split('\n')[0].strip()
+            # Remove common prefixes like "1.", "-", "*"
+            import re
+            query = re.sub(r'^\s*(?:\d+\.|[-*])\s*', '', query)
+            queries.append(query if query else traj_state.state['question'])
+
+        return queries
+
+    def _generate_rag_steps_batch(
+        self,
+        traj_states: List[TrajectoryState],
+        queries: List[str],
+        passages_list: List[List[Dict[str, Any]]],
+    ) -> List[str]:
+        """Generate RAG steps for multiple trajectories at once.
+
+        Args:
+            traj_states: List of trajectory states
+            queries: List of search queries (one per trajectory)
+            passages_list: List of passage lists (one list per trajectory)
+
+        Returns:
+            List of RAG step contents (without "Step N:" prefix)
+        """
+        if not traj_states:
+            return []
+
+        if self.policy_model is None:
+            # Placeholder
+            return [f"[RAG step {ts.current_step_num()}]" for ts in traj_states]
+
+        # Build prompts for each trajectory
+        prompts = []
+        for traj_state, query, passages in zip(traj_states, queries, passages_list):
+            step_num = traj_state.current_step_num()
+            state = traj_state.state
+            forced_steps = state.get('forced_steps', [])
+
+            # Format passages
+            passage_text = self._format_passages(passages)
+
+            if step_num == 1:
+                # Initial step with passages
+                prompt_lines = [
+                    f"Question: {state['question']}",
+                    "",
+                    f"Retrieved Documents:",
+                    passage_text,
+                    "",
+                    f"Your search query was: {query}",
+                    "",
+                    f"Generate Step {step_num}.",
+                    "",
+                    "IMPORTANT: Read the Retrieved Documents and decide your next action:",
+                    "- If you have enough information to answer: Action: Finish[answer=\"entity name only\"]",
+                    "- If you need more information: Action: Search[query=\"specific question\"]",
+                    "",
+                    "Format (Observation will be added automatically with document chunks):",
+                    "- Thought: [analyze the retrieved information with citations [1], [2]...]",
+                    "- Action: Finish[answer=\"...\"] OR Search[query=\"...\"]",
+                    "",
+                    "CRITICAL: Output ONLY the entity name in the answer. No sentences, no explanations.",
+                ]
+            else:
+                # Continuation step with passages
+                steps_text = "\n".join(str(step) for step in forced_steps)
+
+                # Add previous documents titles for context
+                previous_passages = state.get('passages', [])
+                previous_docs_section = []
+                if previous_passages:
+                    previous_docs_section.append("## Previous Documents (for reference)")
+                    for i, p in enumerate(previous_passages, 1):
+                        previous_docs_section.append(f"[{i}] {p.get('title', 'Document')}")
+                    previous_docs_section.append("")
+
+                prompt_lines = [
+                    f"## Question",
+                    state['question'],
+                    "",
+                    f"## Previous Reasoning Steps",
+                    steps_text,
+                    "",
+                ]
+
+                # Add previous docs titles if any
+                if previous_docs_section:
+                    prompt_lines.extend(previous_docs_section)
+
+                prompt_lines.extend([
+                    f"Retrieved Documents (Current):",
+                    passage_text,
+                    "",
+                    f"Your search query was: {query}",
+                    "",
+                    f"Continue with Step {step_num}.",
+                    "",
+                    "IMPORTANT: Read the Retrieved Documents and decide your next action:",
+                    "- If you have enough information to answer: Action: Finish[answer=\"entity name only\"]",
+                    "- If you need more information: Action: Search[query=\"specific question\"]",
+                    "",
+                    "Format (Observation will be added automatically with document chunks):",
+                    "- Thought: [analyze the retrieved information with citations [1], [2]...]",
+                    "- Action: Finish[answer=\"...\"] OR Search[query=\"...\"]",
+                    "",
+                    "CRITICAL: Output ONLY the entity name in the answer. No sentences, no explanations.",
+                ])
+
+            prompts.append("\n".join(prompt_lines))
+
+        # Batch generate with chat template (allow observation for RAG)
+        if hasattr(self.policy_model, 'batch_generate_with_chat_template'):
+            responses = self.policy_model.batch_generate_with_chat_template(
+                user_messages=prompts,
+                max_tokens=800,
+                temperature=self.temperature,
+                top_p=0.95,
+                stop_sequences=["\nStep"],
+            )
+        else:
+            # Fallback: format and batch generate manually
+            formatted_prompts = []
+            for prompt in prompts:
+                if hasattr(self.policy_model, 'format_prompt_for_qwen'):
+                    formatted_prompts.append(self.policy_model.format_prompt_for_qwen(prompt))
+                else:
+                    formatted_prompts.append(prompt)
+
+            if hasattr(self.policy_model, 'batch_generate'):
+                responses = self.policy_model.batch_generate(
+                    prompts=formatted_prompts,
+                    max_tokens=800,
+                    temperature=self.temperature,
+                    top_p=0.95,
+                    stop_sequences=["\nStep"],
+                )
+            else:
+                # Sequential fallback
+                responses = []
+                for prompt in formatted_prompts:
+                    resp = self.policy_model.generate(
+                        prompt=prompt,
+                        max_tokens=800,
+                        temperature=self.temperature,
+                        top_p=0.95,
+                        stop_sequences=["\nStep"],
+                    )
+                    responses.append(resp)
+
+        # Parse responses and add Observations
+        step_contents = []
+        for response, traj_state, query, passages in zip(responses, traj_states, queries, passages_list):
+            step_num = traj_state.current_step_num()
+
+            # Remove any future steps
+            import re
+            next_step_match = re.search(r'\n+Step\s+\d+:', response)
+            if next_step_match:
+                response = response[:next_step_match.start()].strip()
+
+            # Parse to get content without "Step N:" prefix
+            parsed_content = self.step_parser.parse_single_step_response(response, step_num)
+
+            # Add Observation section with actual retrieved document chunks
+            passage_text = self._format_passages(passages)
+            observation_text = f"\nObservation:\n{passage_text}"
+
+            # Insert Observation after Action line
+            lines = parsed_content.split('\n')
+            result_lines = []
+            action_found = False
+
+            for line in lines:
+                result_lines.append(line)
+                # Insert Observation after Action line
+                if not action_found and line.strip().startswith('Action:'):
+                    action_found = True
+                    result_lines.append(observation_text)
+
+            # If no Action found, append at end (fallback)
+            if not action_found:
+                result_lines.append(observation_text)
+
+            final_content = '\n'.join(result_lines)
+            step_contents.append(final_content)
+
+        return step_contents
+
+    def generate_batch_parallel(
+        self,
+        questions: List[Dict[str, Any]],
+        num_trajectories_per_question: int = 1,
+        show_progress: bool = True,
+    ) -> List[AdaptiveTrajectory]:
+        """Generate trajectories in parallel (reinforcement learning style).
+
+        All trajectories are processed synchronously step-by-step:
+        - Step 1: Generate all trajectories' Step 1 in one batch
+        - MC estimation: All trajectories × K rollouts in one batch
+        - Step 2: Generate all remaining trajectories' Step 2 in one batch
+        - ... until all trajectories finish or reach max_steps
+
+        This maximizes vLLM batch efficiency (e.g., 16 traj × 8 rollouts = 128 prompts at once).
+
+        Args:
+            questions: List of question dicts
+            num_trajectories_per_question: Number of trajectories per question
+            show_progress: Show progress bar
+
+        Returns:
+            List of generated trajectories
+        """
+        # Initialize all trajectory states
+        traj_states: List[TrajectoryState] = []
+        for q_data in questions:
+            for n in range(num_trajectories_per_question):
+                trajectory_id = f"{q_data.get('id', 'q')}_{n}"
+                initial_state = {
+                    'question': q_data['question'],
+                    'reasoning_history': [],
+                    'forced_steps': [],
+                    'passages': [],
+                    'current_passages': [],
+                }
+                traj_state = TrajectoryState(
+                    trajectory_id=trajectory_id,
+                    question=q_data['question'],
+                    gold_answer=q_data.get('gold_answer'),
+                    supporting_facts=q_data.get('supporting_facts'),
+                    state=initial_state,
+                    current_k=self.num_rollouts,  # Initialize with default K
+                )
+                traj_states.append(traj_state)
+
+        print(f"\n[Batch Parallel] Starting generation for {len(traj_states)} trajectories")
+        print(f"  Questions: {len(questions)}, Trajectories per question: {num_trajectories_per_question}")
+
+        # Calculate baseline MC (question only) for all trajectories - BATCH
+        print(f"\n[Pre-Step1] Calculating baseline MC for all {len(traj_states)} trajectories...")
+        mc_questions = self._monte_carlo_estimate_batch(traj_states)
+        for traj_state, mc_q in zip(traj_states, mc_questions):
+            traj_state.mc_question = mc_q
+            traj_state.mc_prev = mc_q
+            print(f"  [{traj_state.trajectory_id}] MC(question) = {mc_q:.3f}")
+
+        # Main generation loop - process all trajectories step by step
+        for step_num in range(1, self.max_steps + 1):
+            print(f"\n{'='*80}")
+            print(f"STEP {step_num} - Processing batch")
+            print(f"{'='*80}")
+
+            # Filter active trajectories (not finished)
+            active_states = [ts for ts in traj_states if not ts.is_finished]
+            if not active_states:
+                print(f"  All trajectories finished. Stopping.")
+                break
+
+            print(f"  Active trajectories: {len(active_states)}/{len(traj_states)}")
+
+            # Update dynamic K based on question difficulty (only on step 1)
+            if step_num == 1 and self.use_dynamic_k:
+                for ts in active_states:
+                    if ts.mc_question < 0.1:
+                        difficulty = "hard"
+                        k = self.k_hard
+                    elif ts.mc_question < 0.9:
+                        difficulty = "medium"
+                        k = self.k_medium
+                    else:
+                        difficulty = "easy"
+                        k = self.k_easy
+                    print(f"  [{ts.trajectory_id}] MC(q)={ts.mc_question:.3f} → {difficulty} → K={k}")
+                # Set global K (simplified - use average or max)
+                self.current_k = max(self.k_hard if any(ts.mc_question < 0.1 for ts in active_states) else self.k_medium,
+                                    self.k_easy)
+
+            # (A) Generate CoT steps for all active trajectories - BATCH
+            print(f"  Generating CoT steps (batch size: {len(active_states)})...")
+            cot_contents = self._generate_cot_steps_batch(active_states)
+
+            # Create temporary states with CoT steps
+            cot_states_temp = []
+            for ts, cot_content in zip(active_states, cot_contents):
+                cot_text = f"Step {step_num}: {cot_content}"
+                temp_state = self._apply_cot_step(ts.state, cot_text, step_num)
+                cot_states_temp.append(temp_state)
+
+            # (B) Calculate MC for all CoT steps - BATCH
+            print(f"  Calculating MC for CoT steps (batch)...")
+            # Create temporary TrajectoryState objects for MC estimation
+            temp_traj_states = []
+            for ts, temp_state in zip(active_states, cot_states_temp):
+                temp_ts = TrajectoryState(
+                    trajectory_id=ts.trajectory_id,
+                    question=ts.question,
+                    gold_answer=ts.gold_answer,
+                    supporting_facts=ts.supporting_facts,
+                    state=temp_state,
+                )
+                # Skip MC if already failed
+                if ts.failed_after_rag:
+                    temp_ts.mc_prev = 0.0
+                temp_traj_states.append(temp_ts)
+
+            # Batch MC estimation (only for non-failed trajectories)
+            non_failed_indices = [i for i, ts in enumerate(active_states) if not ts.failed_after_rag]
+            failed_indices = [i for i, ts in enumerate(active_states) if ts.failed_after_rag]
+
+            mc_cot_values = [0.0] * len(active_states)
+            if non_failed_indices:
+                non_failed_temp = [temp_traj_states[i] for i in non_failed_indices]
+                non_failed_mc = self._monte_carlo_estimate_batch(non_failed_temp)
+                for idx, mc_val in zip(non_failed_indices, non_failed_mc):
+                    mc_cot_values[idx] = mc_val
+
+            # (C) Process each trajectory based on intent and RPE
+            # We need to handle different routing for each trajectory
+            # Collect trajectories that need RAG
+            rag_needed_indices = []
+            rag_needed_states = []
+            rag_provided_queries = []
+
+            for idx, (ts, cot_content, mc_cot) in enumerate(zip(active_states, cot_contents, mc_cot_values)):
+                print(f"\n  [{ts.trajectory_id}] Step {step_num}:")
+                print(f"    CoT MC = {mc_cot:.3f}, MC_prev = {ts.mc_prev:.3f}")
+
+                # Check intent
+                has_finish_intent = "Action: Finish" in cot_content or "Action:Finish" in cot_content
+                has_search_intent = "Action: Search" in cot_content or "Action:Search" in cot_content
+
+                # PATH 0: VOLUNTARY FINISH
+                if has_finish_intent:
+                    print(f"    → Finish intent detected, terminating")
+                    cot_text = f"Step {step_num}: {cot_content}"
+                    rpe = mc_cot / (ts.mc_prev + 0.01)
+                    step = AdaptiveStep(
+                        step_id=len(ts.steps),
+                        step_type=StepType.COT,
+                        text=cot_text,
+                        content=cot_content,
+                        used_passages=[],
+                        mc_before=ts.mc_prev,
+                        mc_after=mc_cot,
+                        rpe=rpe,
+                        label='good',
+                        thought=cot_content,
+                        action="Finish",
+                        action_input=None,
+                        observation=None,
+                        sub_answer=None,
+                        metadata={'voluntary_finish': True},
+                    )
+                    ts.steps.append(step)
+                    ts.state = cot_states_temp[idx]
+                    ts.is_finished = True
+                    ts.finish_reason = "voluntary_finish"
+                    continue
+
+                # PATH A: VOLUNTARY SEARCH
+                if has_search_intent:
+                    print(f"    → Search intent detected (voluntary)")
+                    # Extract query
+                    import re
+                    query_match = re.search(r'Search\s*\[\s*(?:query\s*=\s*)?["\']?(.+?)["\']?\s*\]', cot_content, re.IGNORECASE)
+                    model_query = query_match.group(1).strip() if query_match else None
+                    rag_needed_indices.append(idx)
+                    rag_needed_states.append(ts)
+                    rag_provided_queries.append(model_query)
+                    continue
+
+                # PATH B: VOLUNTARY REASONING - Verify with MC
+                print(f"    → Reason intent (voluntary) - checking RPE")
+                rpe_cot = mc_cot / (ts.mc_prev + 0.01)
+                print(f"    RPE = {rpe_cot:.3f}")
+
+                if ts.failed_after_rag or rpe_cot > 0.79:
+                    # Accept CoT step
+                    label = 'good' if rpe_cot > 0.79 else 'bad'
+                    print(f"    → Accept CoT (label={label})")
+                    cot_text = f"Step {step_num}: {cot_content}"
+                    has_answer = self._has_answer(cot_content)
+                    intermediate_ans = extract_intermediate_answer(cot_content)
+
+                    step = AdaptiveStep(
+                        step_id=len(ts.steps),
+                        step_type=StepType.COT,
+                        text=cot_text,
+                        content=cot_content,
+                        used_passages=[],
+                        mc_before=ts.mc_prev if not ts.failed_after_rag else 0.0,
+                        mc_after=mc_cot,
+                        rpe=rpe_cot,
+                        label=label,
+                        thought=cot_content,
+                        action="Reason",
+                        action_input=None,
+                        observation=intermediate_ans,
+                        sub_answer=None,
+                        metadata={'accepted': 'cot' if not ts.failed_after_rag else 'cot_after_failure', 'threshold': 0.8},
+                    )
+                    ts.steps.append(step)
+                    ts.state = cot_states_temp[idx]
+                    ts.mc_prev = mc_cot
+
+                    if has_answer:
+                        print(f"    → Final answer found, terminating")
+                        ts.is_finished = True
+                        ts.finish_reason = "answer_found"
+                else:
+                    # RPE < 0.8: BACKTRACK and force RAG
+                    print(f"    → RPE < 0.8, BACKTRACKING and forcing RAG")
+                    # Save rejected segment
+                    rejected_segment = {
+                        'step_num': step_num,
+                        'content': cot_content,
+                        'text': f"Step {step_num}: {cot_content}",
+                        'mc_before': ts.mc_prev,
+                        'mc_after': mc_cot,
+                        'rpe': rpe_cot,
+                        'reason': 'low_rpe',
+                        'context': ts.state.get('reasoning_history', [])[-3:],
+                    }
+                    ts.rejected_segments.append(rejected_segment)
+                    # Force RAG
+                    rag_needed_indices.append(idx)
+                    rag_needed_states.append(ts)
+                    rag_provided_queries.append(None)  # Generate new query
+
+            # (D) Process RAG for all trajectories that need it - BATCH
+            if rag_needed_states:
+                print(f"\n  Processing RAG for {len(rag_needed_states)} trajectories (batch)...")
+
+                # Generate queries (batch) - only for those without provided query
+                queries_to_generate = []
+                query_indices = []
+                for i, query in enumerate(rag_provided_queries):
+                    if query is None:
+                        queries_to_generate.append(rag_needed_states[i])
+                        query_indices.append(i)
+
+                if queries_to_generate:
+                    print(f"    Generating {len(queries_to_generate)} RAG queries (batch)...")
+                    generated_queries = self._generate_rag_queries_batch(queries_to_generate)
+                    for qi, gen_q in zip(query_indices, generated_queries):
+                        rag_provided_queries[qi] = gen_q
+
+                final_queries = rag_provided_queries
+
+                # Retrieve passages (sequential for now - retriever may not support batch)
+                print(f"    Retrieving passages for {len(final_queries)} queries...")
+                passages_list = []
+                for query in final_queries:
+                    passages = self.retriever.retrieve(query, top_k=self.top_k_passages)
+                    passages_list.append(passages)
+
+                # Generate RAG steps (batch)
+                print(f"    Generating RAG steps (batch)...")
+                rag_contents = self._generate_rag_steps_batch(rag_needed_states, final_queries, passages_list)
+
+                # Apply RAG steps and calculate MC
+                rag_temp_states = []
+                rag_temp_traj_states = []
+                for ts, query, passages, rag_content in zip(rag_needed_states, final_queries, passages_list, rag_contents):
+                    temp_rag_state = self._apply_rag_step(ts.state, query, passages, step_num, rag_content)
+                    rag_temp_states.append(temp_rag_state)
+                    temp_ts = TrajectoryState(
+                        trajectory_id=ts.trajectory_id,
+                        question=ts.question,
+                        gold_answer=ts.gold_answer,
+                        supporting_facts=ts.supporting_facts,
+                        state=temp_rag_state,
+                    )
+                    rag_temp_traj_states.append(temp_ts)
+
+                # Calculate MC for RAG steps (batch)
+                print(f"    Calculating MC for RAG steps (batch)...")
+                mc_rag_values = self._monte_carlo_estimate_batch(rag_temp_traj_states)
+
+                # Apply RAG results
+                for ts, query, passages, rag_content, temp_rag_state, mc_rag in zip(
+                    rag_needed_states, final_queries, passages_list, rag_contents, rag_temp_states, mc_rag_values
+                ):
+                    rpe_rag = mc_rag / (ts.mc_prev + 0.01)
+                    label = 'good' if rpe_rag > 0.79 else 'bad'
+
+                    parsed_fields = parse_rag_content(rag_content)
+                    has_answer = self._has_answer(rag_content)
+                    parsed_action = parsed_fields.get('action') or "Search"
+
+                    rag_text = f"Step {step_num}: {rag_content}"
+                    step = AdaptiveStep(
+                        step_id=len(ts.steps),
+                        step_type=StepType.RAG,
+                        text=rag_text,
+                        content=rag_content,
+                        used_passages=passages,
+                        mc_before=ts.mc_prev,
+                        mc_after=mc_rag,
+                        rpe=rpe_rag,
+                        label=label,
+                        thought=parsed_fields.get('thought'),
+                        action=parsed_action,
+                        action_input=parsed_fields.get('action_input'),
+                        observation=parsed_fields.get('observation'),
+                        sub_answer=parsed_fields.get('sub_answer'),
+                        metadata={'voluntary_search': query in rag_provided_queries},
+                    )
+                    ts.steps.append(step)
+                    ts.state = temp_rag_state
+                    ts.mc_prev = mc_rag
+
+                    # Check for failure (GenPRM-style)
+                    if mc_rag < 0.01:
+                        ts.failed_after_rag = True
+                        print(f"  [{ts.trajectory_id}] RAG failed (MC < 0.01), future steps will have MC=0")
+
+                    # Check for termination
+                    if has_answer:
+                        print(f"  [{ts.trajectory_id}] Final answer found, terminating")
+                        ts.is_finished = True
+                        ts.finish_reason = "answer_found"
+
+        # Mark remaining active trajectories as finished (max_steps reached)
+        for ts in traj_states:
+            if not ts.is_finished:
+                ts.is_finished = True
+                ts.finish_reason = "max_steps"
+
+        # Convert to AdaptiveTrajectory objects
+        print(f"\n[Batch Parallel] Finalizing {len(traj_states)} trajectories...")
+        trajectories = []
+        for ts in traj_states:
+            final_answer = self._extract_final_answer(ts.steps)
+            is_correct = self._check_answer(final_answer, ts.gold_answer) if ts.gold_answer else None
+
+            trajectory = AdaptiveTrajectory(
+                trajectory_id=ts.trajectory_id,
+                question=ts.question,
+                steps=ts.steps,
+                final_answer=final_answer,
+                gold_answer=ts.gold_answer,
+                supporting_facts=ts.supporting_facts,
+                is_correct=is_correct,
+                metadata={
+                    'num_steps': len(ts.steps),
+                    'has_rag': any(s.step_type == StepType.RAG for s in ts.steps),
+                    'num_backtracks': len(ts.rejected_segments),
+                    'finish_reason': ts.finish_reason,
+                },
+                rejected_segments=ts.rejected_segments,
+            )
+            trajectories.append(trajectory)
+
+        print(f"\n[Batch Parallel] Generation complete!")
+        print(f"  Total trajectories: {len(trajectories)}")
+        print(f"  Correct: {sum(1 for t in trajectories if t.is_correct)}/{len([t for t in trajectories if t.gold_answer])}")
+
+        return trajectories
