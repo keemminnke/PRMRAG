@@ -7,15 +7,15 @@
 
 ## 1. Executive Summary
 
-RPE(Relative Progress Estimation)와 Judge 라벨링 방식을 비교 분석한 결과, **Judge 라벨이 RPE보다 더 신뢰할 수 있는 Process Supervision을 제공**한다는 것을 발견했습니다.
+RPE(Relative Progress Estimation)와 Judge 라벨링 방식을 비교 분석한 결과, **Consensus Filtering (RPE & Judge 둘 다 GOOD)이 가장 높은 정확도**를 보여줍니다.
 
 | 방식 | Perfect Match 개수 | 정답률 |
 |------|-------------------|--------|
-| **Judge만 (All GOOD)** | 250 | **86.2%** |
-| RPE만 (All ≥ 0.8) | 453 | 78.9% |
-| Consensus (RPE == Judge) | 224 | - |
+| **Consensus (RPE & Judge 둘다 GOOD)** | 242 | **93.0%** |
+| Judge만 (All GOOD) | 290 | 89.3% |
+| RPE만 (All ≥ 0.8) | 574 | 79.6% |
 
-**핵심 발견**: Judge 라벨만 사용할 경우 더 높은 품질의 학습 데이터를 얻을 수 있습니다.
+**핵심 발견**: Consensus Filtering이 가장 높은 품질(93.0%)을 제공하지만 데이터 양이 적음. 품질-양 트레이드오프 고려 필요.
 
 ---
 
@@ -59,9 +59,9 @@ RPE(Relative Progress Estimation)와 Judge 라벨링 방식을 비교 분석한 
 ├─────────────────────┬──────────┬──────────┬─────────────────┤
 │ 필터링 방식         │ 총 개수  │ 정답 개수 │ 정답률          │
 ├─────────────────────┼──────────┼──────────┼─────────────────┤
-│ Judge만 (All GOOD)  │ 290      │ 250      │ 86.2%           │
-│ RPE만 (All ≥ 0.8)   │ 574      │ 453      │ 78.9%           │
-│ Consensus           │ 224      │ 224      │ (intersection)  │
+│ Consensus (둘다GOOD)│ 242      │ 225      │ 93.0% ⭐        │
+│ Judge만 (All GOOD)  │ 290      │ 259      │ 89.3%           │
+│ RPE만 (All ≥ 0.8)   │ 574      │ 457      │ 79.6%           │
 └─────────────────────┴──────────┴──────────┴─────────────────┘
 ```
 
@@ -193,35 +193,37 @@ Step 3-4:
 
 ### 6.1 학습 데이터 구성
 
-**Option A: Judge Only (권장)**
-- 250개 trajectories (All GOOD + Correct)
-- 정답률 86.2%
-- 장점: 높은 품질, hallucination 필터링
-- 단점: 데이터 양 적음
+**Option A: Consensus Filtering (권장 - 최고 품질)**
+- 242개 trajectories (RPE & Judge 둘 다 GOOD)
+- 정답률 **93.0%**
+- 장점: 가장 높은 품질, hallucination + 운 좋은 정답 둘 다 필터링
+- 단점: 데이터 양 가장 적음
 
-**Option B: RPE Only**
-- 453개 trajectories
-- 정답률 78.9%
+**Option B: Judge Only (품질-양 균형)**
+- 290개 trajectories (All GOOD)
+- 정답률 89.3%
+- 장점: 적당한 품질, hallucination 필터링
+- 단점: 일부 운 좋은 정답 포함 가능
+
+**Option C: RPE Only (양 우선)**
+- 574개 trajectories
+- 정답률 79.6%
 - 장점: 데이터 양 많음
-- 단점: hallucination 포함 가능
-
-**Option C: Hybrid**
-- Judge로 필터링 + RPE로 보조
-- 또는 Judge confidence가 낮은 경우만 RPE 참조
+- 단점: hallucination, 잘못된 추론 포함
 
 ### 6.2 시스템 개선
 
-1. **RPE 제거 고려**:
-   - 계산 비용 절감 (롤아웃 불필요)
-   - Judge만으로 충분한 품질 확보 가능
+1. **Consensus Filtering 활용**:
+   - RPE와 Judge를 함께 사용하여 최고 품질(93.0%) 달성
+   - RPE는 계산 비용이 있지만, 품질 향상에 기여
 
-2. **Judge 프롬프트 강화**:
-   - 문서 인용 필수화
-   - Confidence score 활용
+2. **속도 vs 품질 트레이드오프**:
+   - 빠른 생성 필요 시: RPE 제거, Judge Only (89.3%)
+   - 최고 품질 필요 시: Consensus Filtering 유지 (93.0%)
 
 3. **데이터 증강**:
-   - Judge All GOOD 기준으로 더 많은 데이터 생성
-   - 다양한 질문 유형 커버
+   - Consensus 기준으로 더 많은 데이터 생성
+   - 다양한 질문 유형 커버하여 242개 → 더 많이 확보
 
 ---
 
@@ -229,10 +231,17 @@ Step 3-4:
 
 RPE와 Judge 라벨링 방식을 비교한 결과:
 
-1. **Judge가 더 신뢰할 수 있음**: 86.2% vs 78.9% 정답률
-2. **RPE의 근본적 한계**: Outcome만 보고 Process 오류 감지 불가
-3. **Hallucination 문제**: RPE는 운 좋게 맞춘 경우 필터링 불가
-4. **실용적 권장**: RPE 제거하고 Judge만 사용 → 속도 향상 + 품질 유지
+1. **Consensus Filtering이 최고 품질**: 93.0% (RPE & Judge 둘 다 GOOD)
+2. **RPE와 Judge의 상호보완 효과**:
+   - RPE: Outcome 기반 → 결과적으로 맞는지 확인
+   - Judge: Process 기반 → 추론 과정이 올바른지 확인
+   - 둘 다 GOOD이면 "올바른 과정으로 올바른 결과" 도달
+3. **단독 사용 시 한계**:
+   - RPE만: 79.6% (hallucination 필터링 불가)
+   - Judge만: 89.3% (운 좋은 정답 일부 포함)
+4. **실용적 권장**:
+   - 최고 품질 필요 시 → Consensus Filtering (93.0%)
+   - 데이터 양 필요 시 → Judge Only (89.3%) 또는 RPE Only (79.6%)
 
 ---
 

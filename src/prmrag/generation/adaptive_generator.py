@@ -849,7 +849,10 @@ Continue with Step {next_step_num}."""
         questions: List[Dict[str, Any]],
         show_progress: bool = True,
     ) -> List[AdaptiveTrajectory]:
-        """Generate trajectories for multiple questions.
+        """Generate trajectories for multiple questions using vLLM batch processing.
+
+        This method processes multiple trajectories in parallel by batching
+        the same step across all active trajectories, maximizing vLLM efficiency.
 
         Args:
             questions: List of question dicts
@@ -858,19 +861,157 @@ Continue with Step {next_step_num}."""
         Returns:
             List of generated trajectories
         """
-        all_trajectories = []
+        import re
 
-        iterator = tqdm(questions, desc="Generating trajectories") if show_progress else questions
+        # Initialize trajectory states
+        states = []
+        for q_data in questions:
+            states.append({
+                'question': q_data['question'],
+                'gold_answer': q_data.get('gold_answer', q_data.get('answer')),
+                'supporting_facts': q_data.get('supporting_facts'),
+                'trajectory_id': q_data.get('_id', q_data.get('id', str(hash(q_data['question'])))),
+                'steps': [],
+                'forced_steps': [],
+                'context': '',
+                'finished': False,
+                'current_step': 1,
+            })
 
-        for q_data in iterator:
-            trajectory = self.generate_trajectory(
-                question=q_data['question'],
-                gold_answer=q_data.get('gold_answer', q_data.get('answer')),
-                supporting_facts=q_data.get('supporting_facts'),
-                trajectory_id=q_data.get('_id', q_data.get('id', str(hash(q_data['question'])))),
+        # Process steps in batches
+        for step_num in range(1, self.max_steps + 1):
+            # Get active (unfinished) trajectories
+            active_indices = [i for i, s in enumerate(states) if not s['finished']]
+
+            if not active_indices:
+                break
+
+            if show_progress:
+                print(f"  Step {step_num}: {len(active_indices)} active trajectories")
+
+            # Build prompts for all active trajectories
+            user_messages = []
+            for idx in active_indices:
+                state = states[idx]
+                if step_num == 1:
+                    user_msg = self._build_initial_prompt(state['question'])
+                else:
+                    user_msg = self._build_continuation_prompt(
+                        state['question'],
+                        state['forced_steps'],
+                        state['context']
+                    )
+                user_messages.append(user_msg)
+
+            # Format with chat template and batch generate with vLLM
+            formatted_prompts = [
+                self.policy_model.format_prompt_for_qwen(msg) for msg in user_messages
+            ]
+            stop_sequences = ["\nStep", "\nObservation:", "Observation:"]
+            responses = self.policy_model.batch_generate(
+                prompts=formatted_prompts,
+                max_tokens=800,
+                temperature=self.temperature,
+                top_p=0.95,
+                stop_sequences=stop_sequences,
             )
 
-            if trajectory is not None:
-                all_trajectories.append(trajectory)
+            # Process responses
+            for i, idx in enumerate(active_indices):
+                state = states[idx]
+                response = responses[i]
+
+                # Parse response
+                step_content = self._parse_step_response(response, step_num)
+                step_text = f"Step {step_num}: {step_content}"
+
+                # Track for continuation
+                state['forced_steps'].append(ForcedStep(step_number=step_num, content=step_content))
+
+                # Detect action
+                action_type, action_input = self._parse_action(step_content)
+
+                if action_type == "finish":
+                    # Final answer step
+                    step = AdaptiveStep(
+                        step_id=step_num,
+                        step_type=StepType.ANSWER,
+                        text=step_text,
+                        content=step_content,
+                        used_passages=[],
+                        mc_before=0.0,
+                        mc_after=0.0,
+                        rpe=0.0,
+                        metadata={'action': 'finish'},
+                    )
+                    state['steps'].append(step)
+                    state['finished'] = True
+
+                elif action_type == "search":
+                    # RAG step - retrieve and continue
+                    query = action_input or state['question']
+                    passages = self.retriever.retrieve(query, top_k=self.top_k_passages)
+
+                    # Format observation
+                    observation = self._format_observation(passages)
+                    full_content = f"{step_content}\n\nObservation:\n{observation}"
+
+                    step = AdaptiveStep(
+                        step_id=step_num,
+                        step_type=StepType.RAG,
+                        text=f"Step {step_num}: {full_content}",
+                        content=full_content,
+                        used_passages=passages,
+                        mc_before=0.0,
+                        mc_after=0.0,
+                        rpe=0.0,
+                        metadata={'action': 'search', 'query': query},
+                    )
+                    state['steps'].append(step)
+
+                    # Update context for next step
+                    state['context'] = observation
+                    state['forced_steps'][-1] = ForcedStep(step_number=step_num, content=full_content)
+
+                else:
+                    # Pure reasoning step
+                    step = AdaptiveStep(
+                        step_id=step_num,
+                        step_type=StepType.COT,
+                        text=step_text,
+                        content=step_content,
+                        used_passages=[],
+                        mc_before=0.0,
+                        mc_after=0.0,
+                        rpe=0.0,
+                        metadata={'action': 'reason'},
+                    )
+                    state['steps'].append(step)
+
+                state['current_step'] = step_num + 1
+
+        # Build final trajectories
+        all_trajectories = []
+        for state in states:
+            if not state['steps']:
+                continue
+
+            final_answer = self._extract_final_answer(state['steps'])
+            is_correct = self._check_answer(final_answer, state['gold_answer']) if state['gold_answer'] else None
+
+            trajectory = AdaptiveTrajectory(
+                trajectory_id=state['trajectory_id'],
+                question=state['question'],
+                steps=state['steps'],
+                final_answer=final_answer,
+                gold_answer=state['gold_answer'],
+                supporting_facts=state['supporting_facts'],
+                is_correct=is_correct,
+                metadata={
+                    'num_steps': len(state['steps']),
+                    'generator': 'simple_batch',
+                },
+            )
+            all_trajectories.append(trajectory)
 
         return all_trajectories

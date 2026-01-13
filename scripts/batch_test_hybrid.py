@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from prmrag.models import load_policy_model
 from prmrag.utils import load_config
-from prmrag.generation.adaptive_generator import AdaptiveTrajectoryGenerator
+from prmrag.generation.adaptive_generator import SimpleTrajectoryGenerator
 from prmrag.retrieval.bge_retriever import BGERetriever
 from prmrag.retrieval.bm25_retriever import BM25Retriever
 from prmrag.retrieval.hybrid_retriever import HybridRetriever
@@ -251,18 +251,20 @@ def update_summary_stats(summary_stats: Dict[str, Any], result: Dict[str, Any]) 
         summary_stats['format_compliance']['rag_with_citations'] += fc.get('rag_with_citations', 0)
         summary_stats['format_compliance']['rag_fully_compliant'] += fc.get('rag_fully_compliant', 0)
 
+        # Only update MC-related stats if available (SimpleTrajectoryGenerator doesn't compute these)
         for intervention in result.get('rag_interventions', []):
             summary_stats['rag_effectiveness']['total_rag_steps'] += 1
-            mc_imp = intervention.get('mc_improvement', 0.0)
-            summary_stats['rag_effectiveness']['total_mc_improvement'] += mc_imp
+            if 'mc_improvement' in intervention:
+                mc_imp = intervention.get('mc_improvement', 0.0)
+                summary_stats['rag_effectiveness']['total_mc_improvement'] += mc_imp
 
-            if mc_imp > 0:
-                summary_stats['rag_effectiveness']['rag_improved_mc'] += 1
-            elif mc_imp < 0:
-                summary_stats['rag_effectiveness']['rag_degraded_mc'] += 1
+                if mc_imp > 0:
+                    summary_stats['rag_effectiveness']['rag_improved_mc'] += 1
+                elif mc_imp < 0:
+                    summary_stats['rag_effectiveness']['rag_degraded_mc'] += 1
 
-            if intervention.get('rpe', 0.0) >= 0.8:
-                summary_stats['rag_effectiveness']['rpe_above_threshold'] += 1
+                if intervention.get('rpe', 0.0) >= 0.8:
+                    summary_stats['rag_effectiveness']['rpe_above_threshold'] += 1
     else:
         summary_stats['without_rag'] += 1
         if result.get('is_correct'):
@@ -299,7 +301,11 @@ def validate_rag_step_format(step_content: str, step_type: str) -> Dict[str, Any
 
 
 def format_trajectory_for_review(trajectory, question_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Format trajectory for human review, highlighting RAG steps."""
+    """Format trajectory for human review, highlighting RAG steps.
+
+    Note: SimpleTrajectoryGenerator doesn't compute MC stats, so mc_before/mc_after/rpe
+    will be 0.0 placeholders. Labels are assigned by Judge model separately.
+    """
 
     steps_detail = []
     format_compliance = {
@@ -312,14 +318,18 @@ def format_trajectory_for_review(trajectory, question_data: Dict[str, Any]) -> D
     for i, step in enumerate(trajectory.steps, 1):
         step_info = {
             'step_num': i,
-            # 'content': step.content,  # Removed: redundant (thought + action + observation)
-            'mc_before': round(step.mc_before, 3),
-            'mc_after': round(step.mc_after, 3),
-            'rpe': round(step.rpe, 3),
-            'label': step.label,
+            'step_type': step.step_type.value if hasattr(step.step_type, 'value') else str(step.step_type),
+            'content': step.content,
             'thought': getattr(step, 'thought', None),
-            'action': getattr(step, 'action', 'Reason'),
+            'action': getattr(step, 'action', step.metadata.get('action', 'Reason') if step.metadata else 'Reason'),
         }
+
+        # Only include MC stats if they are non-zero (i.e., from AdaptiveTrajectoryGenerator)
+        if step.mc_before != 0.0 or step.mc_after != 0.0 or step.rpe != 0.0:
+            step_info['mc_before'] = round(step.mc_before, 3)
+            step_info['mc_after'] = round(step.mc_after, 3)
+            step_info['rpe'] = round(step.rpe, 3)
+            step_info['label'] = step.label
 
         # Include metadata for debugging backtracking
         if hasattr(step, 'metadata') and step.metadata:
@@ -353,10 +363,11 @@ def format_trajectory_for_review(trajectory, question_data: Dict[str, Any]) -> D
         else:
             step_info['num_passages'] = 0
 
-        # Validate format for Search steps
-        if step_info['action'] == 'Search':
+        # Validate format for Search steps (case-insensitive)
+        if step_info['action'].lower() == 'search':
             # Validate format
-            validation = validate_rag_step_format(step.content, step.step_type.value)
+            step_type_val = step.step_type.value if hasattr(step.step_type, 'value') else str(step.step_type)
+            validation = validate_rag_step_format(step.content, step_type_val)
             step_info['format_validation'] = validation
 
             # Update compliance stats
@@ -373,21 +384,24 @@ def format_trajectory_for_review(trajectory, question_data: Dict[str, Any]) -> D
     # Find RAG intervention points
     rag_interventions = []
     for i, step in enumerate(steps_detail):
-        if step['action'] == 'Search':
-            before_mc = step['mc_before']
-            after_mc = step['mc_after']
-            improvement = after_mc - before_mc
-
-            rag_interventions.append({
+        if step['action'] == 'search' or step['action'] == 'Search':
+            intervention = {
                 'step_num': step['step_num'],
-                'mc_improvement': round(improvement, 3),
-                'rpe': step['rpe'],
-                'label': step['label'],
                 'passage_titles': step.get('passage_titles', []),
-            })
+            }
+            # Only include MC stats if available
+            if 'mc_before' in step and 'mc_after' in step:
+                before_mc = step['mc_before']
+                after_mc = step['mc_after']
+                improvement = after_mc - before_mc
+                intervention['mc_improvement'] = round(improvement, 3)
+                intervention['rpe'] = step.get('rpe', 0.0)
+                intervention['label'] = step.get('label', None)
+            rag_interventions.append(intervention)
 
-    num_cot_steps = sum(1 for s in steps_detail if s['action'] == 'Reason')
-    num_rag_steps = sum(1 for s in steps_detail if s['action'] == 'Search')
+    # Count steps by action type (case-insensitive)
+    num_cot_steps = sum(1 for s in steps_detail if s['action'].lower() == 'reason')
+    num_rag_steps = sum(1 for s in steps_detail if s['action'].lower() == 'search')
 
     result = {
         'question_id': trajectory.trajectory_id,
@@ -454,11 +468,12 @@ def main():
         choices=["train", "validation", "test"],
         help="Dataset split to use (default: train)",
     )
+    # NOTE: --num-rollouts removed - SimpleTrajectoryGenerator doesn't use MC rollouts
     parser.add_argument(
-        "--num-rollouts",
+        "--batch-size",
         type=int,
-        default=8,
-        help="Number of MC rollouts (default: 8)",
+        default=16,
+        help="Number of trajectories to process in parallel with vLLM batching (default: 16)",
     )
     parser.add_argument(
         "--output-dir",
@@ -538,7 +553,8 @@ def main():
     print(f"  - Data split: {args.split}")
     print(f"  - Number of questions: {args.num_questions}")
     print(f"  - Starting index: {args.start_idx}")
-    print(f"  - MC rollouts: {args.num_rollouts}")
+    print(f"  - Generator: SimpleTrajectoryGenerator (no MC rollouts)")
+    print(f"  - Batch size: {args.batch_size} (vLLM parallel processing)")
     print(f"  - Corpus: KILT Wikipedia (5.9M)")
     print(f"  - Fusion method: {args.fusion_method}")
     print(f"  - BM25 top-K: 50 (fixed)")
@@ -637,17 +653,16 @@ def main():
     )
     print(f"✓ Hybrid retriever initialized!")
 
-    # Initialize adaptive generator
-    print(f"\n[5] Initializing adaptive generator...")
-    gen_config = config.get('adaptive', {})
-    gen_config['num_rollouts'] = args.num_rollouts
+    # Initialize simple generator (no MC rollouts)
+    print(f"\n[5] Initializing simple trajectory generator...")
+    gen_config = config.get('generation', config.get('adaptive', {}))
 
-    generator = AdaptiveTrajectoryGenerator(
+    generator = SimpleTrajectoryGenerator(
         policy_model=policy_model,
         retriever=hybrid_retriever,
         config=gen_config,
     )
-    print("✓ Generator initialized")
+    print("✓ Generator initialized (SimpleTrajectoryGenerator - no MC rollouts)")
 
     # Process questions
     print(f"\n{'=' * 70}")
@@ -666,108 +681,112 @@ def main():
                 summary_stats['failed'] += 1
         processed_question_ids = load_processed_question_ids(results_file, failures_file)
 
-    remaining = sum(1 for q in questions if q.get('_id') not in processed_question_ids)
+    # Filter out already processed questions
+    remaining_questions = [q for q in questions if q.get('_id') not in processed_question_ids]
     if processed_question_ids:
-        print(f"\n✓ Resume mode: {len(processed_question_ids)} already processed; {remaining} remaining in this selection")
+        print(f"\n✓ Resume mode: {len(processed_question_ids)} already processed; {len(remaining_questions)} remaining")
 
     # Open JSONL files for incremental writing
     results_fp = open(results_file, 'a' if args.resume else 'w', encoding='utf-8')
     failures_fp = open(failures_file, 'a' if args.resume else 'w', encoding='utf-8')
 
-    for i, q in enumerate(questions, 1):
-        question_id = q.get('_id')
-        question = q['question']
-        gold_answer = q['answer']
+    # Process in batches for vLLM efficiency
+    batch_size = args.batch_size
+    total_batches = (len(remaining_questions) + batch_size - 1) // batch_size
 
-        if question_id in processed_question_ids:
-            print(f"[{i}/{len(questions)}] Skipping {question_id} (already saved)")
-            continue
+    for batch_idx in range(total_batches):
+        batch_start = batch_idx * batch_size
+        batch_end = min(batch_start + batch_size, len(remaining_questions))
+        batch_questions = remaining_questions[batch_start:batch_end]
 
-        print(f"[{i}/{len(questions)}] Processing {question_id}...")
-        print(f"  Q: {question[:80]}..." if len(question) > 80 else f"  Q: {question}")
+        print(f"\n[Batch {batch_idx + 1}/{total_batches}] Processing {len(batch_questions)} questions...")
 
         try:
-            # Generate trajectory
-            trajectory = generator.generate_trajectory(
-                question=question,
-                gold_answer=gold_answer,
-                trajectory_id=question_id,
+            # Batch generate trajectories with vLLM
+            trajectories = generator.generate_batch(
+                questions=batch_questions,
+                show_progress=True,
             )
 
-            if trajectory is None:
-                print(f"  ❌ Generation failed (all steps rejected)")
-                summary_stats['failed'] += 1
-                failure_rec = {
-                    'question_id': question_id,
-                    'question': question,
-                    'gold_answer': gold_answer,
-                    'failure_type': 'generation_failed',
-                    'error': 'all_steps_rejected',
-                    'dataset_idx': q.get('__dataset_idx'),
-                    'filtered_idx': q.get('__filtered_idx'),
-                    'question_level': q.get('level'),
-                }
-                failures_fp.write(json.dumps(failure_rec, ensure_ascii=False) + '\n')
-                failures_fp.flush()
+            # Create a map from trajectory_id to trajectory
+            traj_map = {t.trajectory_id: t for t in trajectories}
+
+            # Process results for each question in batch
+            for q in batch_questions:
+                question_id = q.get('_id')
+                trajectory = traj_map.get(question_id)
+
+                if trajectory is None:
+                    print(f"  ❌ {question_id}: Generation failed")
+                    summary_stats['failed'] += 1
+                    failure_rec = {
+                        'question_id': question_id,
+                        'question': q['question'],
+                        'gold_answer': q['answer'],
+                        'failure_type': 'generation_failed',
+                        'error': 'no_trajectory_generated',
+                        'dataset_idx': q.get('__dataset_idx'),
+                        'filtered_idx': q.get('__filtered_idx'),
+                        'question_level': q.get('level'),
+                    }
+                    failures_fp.write(json.dumps(failure_rec, ensure_ascii=False) + '\n')
+                    failures_fp.flush()
+                    if args.fsync:
+                        os.fsync(failures_fp.fileno())
+                    processed_question_ids.add(question_id)
+                    continue
+
+                # Format result
+                result = format_trajectory_for_review(trajectory, q)
+
+                # Add selection metadata
+                result['dataset_idx'] = q.get('__dataset_idx')
+                result['filtered_idx'] = q.get('__filtered_idx')
+                result['question_level'] = q.get('level')
+                result['run_id'] = run_id
+
+                # Write to file
+                results_fp.write(json.dumps(result, ensure_ascii=False) + '\n')
+                results_fp.flush()
                 if args.fsync:
-                    os.fsync(failures_fp.fileno())
+                    os.fsync(results_fp.fileno())
+
                 processed_question_ids.add(question_id)
-                continue
+                update_summary_stats(summary_stats, result)
 
-            # Format result
-            result = format_trajectory_for_review(trajectory, q)
-
-            # Add selection metadata (helps deterministic continuation)
-            result['dataset_idx'] = q.get('__dataset_idx')
-            result['filtered_idx'] = q.get('__filtered_idx')
-            result['question_level'] = q.get('level')
-            result['run_id'] = run_id
-
-            # Write to file immediately (incremental save)
-            results_fp.write(json.dumps(result, ensure_ascii=False) + '\n')
-            results_fp.flush()
-            if args.fsync:
-                os.fsync(results_fp.fileno())
-
-            processed_question_ids.add(question_id)
-            update_summary_stats(summary_stats, result)
-
-            # Print summary
-            status = "✅" if result['is_correct'] else "❌"
-            rag_info = f"({result['num_rag_steps']} RAG steps)" if result['has_rag'] else "(CoT only)"
-
-            if result['has_rag']:
-                fc = result['format_compliance']
-                compliance_rate = fc['rag_fully_compliant'] / max(fc['total_rag_steps'], 1) * 100
-                rag_info += f" [Format: {fc['rag_fully_compliant']}/{fc['total_rag_steps']} ({compliance_rate:.0f}%)]"
-
-            print(f"  {status} {result['num_steps']} steps {rag_info}")
-
-            # Print progress every 100 questions
-            if i % 100 == 0:
-                print(f"\n✓ Progress: {i}/{len(questions)} questions completed ({summary_stats['correct']}/{summary_stats['total']} correct, {summary_stats['correct']/max(summary_stats['total'],1)*100:.1f}%)\n")
+                # Print summary
+                status = "✅" if result['is_correct'] else "❌"
+                rag_info = f"({result['num_rag_steps']} RAG)" if result['has_rag'] else "(CoT)"
+                print(f"  {status} {question_id}: {result['num_steps']} steps {rag_info}")
 
         except Exception as e:
-            print(f"  ❌ Error: {e}")
+            print(f"  ❌ Batch error: {e}")
             import traceback
             traceback.print_exc()
-            summary_stats['failed'] += 1
-            failure_rec = {
-                'question_id': question_id,
-                'question': question,
-                'gold_answer': gold_answer,
-                'failure_type': 'exception',
-                'error': str(e),
-                'dataset_idx': q.get('__dataset_idx'),
-                'filtered_idx': q.get('__filtered_idx'),
-                'question_level': q.get('level'),
-            }
-            failures_fp.write(json.dumps(failure_rec, ensure_ascii=False) + '\n')
+            # Record failures for all questions in batch
+            for q in batch_questions:
+                if q.get('_id') not in processed_question_ids:
+                    summary_stats['failed'] += 1
+                    failure_rec = {
+                        'question_id': q.get('_id'),
+                        'question': q['question'],
+                        'gold_answer': q['answer'],
+                        'failure_type': 'batch_exception',
+                        'error': str(e),
+                        'dataset_idx': q.get('__dataset_idx'),
+                        'filtered_idx': q.get('__filtered_idx'),
+                        'question_level': q.get('level'),
+                    }
+                    failures_fp.write(json.dumps(failure_rec, ensure_ascii=False) + '\n')
+                    processed_question_ids.add(q.get('_id'))
             failures_fp.flush()
             if args.fsync:
                 os.fsync(failures_fp.fileno())
-            processed_question_ids.add(question_id)
             continue
+
+        # Print batch progress
+        total_processed = len(processed_question_ids)
+        print(f"\n✓ Batch {batch_idx + 1} complete: {summary_stats['correct']}/{summary_stats['total']} correct ({summary_stats['correct']/max(summary_stats['total'],1)*100:.1f}%)")
 
     # Close results file
     results_fp.close()
@@ -818,11 +837,13 @@ def main():
         print(f"  ✓ With citations [N]: {fc['rag_with_citations']}/{total_rag} ({fc['rag_with_citations']/total_rag*100:.1f}%)")
         print(f"  ✓ Fully compliant (both): {fc['rag_fully_compliant']}/{total_rag} ({fc['rag_fully_compliant']/total_rag*100:.1f}%)")
 
-    # RAG effectiveness report
-    if summary_stats['rag_effectiveness']['total_rag_steps'] > 0:
-        print(f"\n--- RAG Effectiveness Analysis ---")
-        eff = summary_stats['rag_effectiveness']
-        total_rag = eff['total_rag_steps']
+    # RAG effectiveness report (only shown if MC stats were computed)
+    eff = summary_stats['rag_effectiveness']
+    total_rag = eff['total_rag_steps']
+    has_mc_stats = (eff['rag_improved_mc'] + eff['rag_degraded_mc']) > 0
+
+    if total_rag > 0 and has_mc_stats:
+        print(f"\n--- RAG Effectiveness Analysis (MC-based) ---")
         avg_improvement = eff['total_mc_improvement'] / total_rag
 
         print(f"\nTotal RAG interventions: {total_rag}")
@@ -836,6 +857,10 @@ def main():
             print(f"\n✅ RAG is effective: {eff['rag_improved_mc']} improvements vs {eff['rag_degraded_mc']} degradations")
         else:
             print(f"\n⚠️  Warning: RAG may not be effective: {eff['rag_improved_mc']} improvements vs {eff['rag_degraded_mc']} degradations")
+    elif total_rag > 0:
+        print(f"\n--- RAG Usage ---")
+        print(f"Total RAG interventions: {total_rag}")
+        print(f"(MC stats not available - using SimpleTrajectoryGenerator)")
 
     print(f"\n{'=' * 70}")
 
