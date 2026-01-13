@@ -1949,20 +1949,29 @@ class AdaptiveTrajectoryGenerator:
 
             # Update dynamic K based on question difficulty (only on step 1)
             if step_num == 1 and self.use_dynamic_k:
+                print(f"  [Dynamic K] Updating K for each trajectory based on MC(question)...")
                 for ts in active_states:
                     if ts.mc_question < 0.1:
                         difficulty = "hard"
-                        k = self.k_hard
+                        ts.current_k = self.k_hard
                     elif ts.mc_question < 0.9:
                         difficulty = "medium"
-                        k = self.k_medium
+                        ts.current_k = self.k_medium
                     else:
                         difficulty = "easy"
-                        k = self.k_easy
-                    print(f"  [{ts.trajectory_id}] MC(q)={ts.mc_question:.3f} → {difficulty} → K={k}")
-                # Set global K (simplified - use average or max)
-                self.current_k = max(self.k_hard if any(ts.mc_question < 0.1 for ts in active_states) else self.k_medium,
-                                    self.k_easy)
+                        ts.current_k = self.k_easy
+                    print(f"    [{ts.trajectory_id}] MC(q)={ts.mc_question:.3f} → {difficulty} → K={ts.current_k}")
+
+                # Also update for finished trajectories (for consistency)
+                for ts in traj_states:
+                    if ts.is_finished:
+                        continue
+                    if ts.mc_question < 0.1:
+                        ts.current_k = self.k_hard
+                    elif ts.mc_question < 0.9:
+                        ts.current_k = self.k_medium
+                    else:
+                        ts.current_k = self.k_easy
 
             # (A) Generate CoT steps for all active trajectories - BATCH
             print(f"  Generating CoT steps (batch size: {len(active_states)})...")
