@@ -20,11 +20,17 @@ from typing import List, Dict, Any
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from prmrag.generation import AdaptiveTrajectoryGenerator
-from prmrag.retrieval import BM25Retriever, WikipediaRetriever, load_hotpotqa_corpus, create_retriever
+from prmrag.retrieval import (
+    BGERetriever,
+    BM25Retriever,
+    WikipediaRetriever,
+    load_hotpotqa_corpus,
+    create_retriever,
+)
 from prmrag.utils import setup_logger, load_config
 
 
-def load_hotpotqa_questions(file_path: Path, limit: int = None) -> List[Dict[str, Any]]:
+def load_hotpotqa_questions(file_path: Path, limit: int = None, offset: int = 0) -> List[Dict[str, Any]]:
     """Load HotpotQA questions.
 
     Expected format:
@@ -40,17 +46,19 @@ def load_hotpotqa_questions(file_path: Path, limit: int = None) -> List[Dict[str
 
     with jsonlines.open(file_path) as reader:
         for i, obj in enumerate(reader):
-            if limit and i >= limit:
+            # Skip offset questions
+            if i < offset:
+                continue
+
+            # Stop if limit reached (relative to offset)
+            if limit and len(questions) >= limit:
                 break
 
             questions.append({
                 'id': obj.get('_id', f"q_{i}"),
                 'question': obj['question'],
                 'gold_answer': obj.get('answer', ''),
-                'supporting_facts': [
-                    f"{title}: {text}"
-                    for title, sent_id in obj.get('supporting_facts', [])
-                ],
+                'supporting_facts': obj.get('supporting_facts', []),
                 'context': obj.get('context', []),
             })
 
@@ -70,7 +78,7 @@ def main():
     parser.add_argument(
         "--questions",
         type=Path,
-        required=True,
+        required=False,
         help="Path to HotpotQA questions (JSONL)",
     )
     parser.add_argument(
@@ -88,7 +96,7 @@ def main():
     parser.add_argument(
         "--output",
         type=Path,
-        required=True,
+        required=False,
         help="Path to output trajectories",
     )
     parser.add_argument(
@@ -96,6 +104,12 @@ def main():
         type=int,
         default=None,
         help="Limit number of questions (for testing)",
+    )
+    parser.add_argument(
+        "--offset",
+        type=int,
+        default=0,
+        help="Skip first N questions (for batch processing)",
     )
     parser.add_argument(
         "--num-trajectories",
@@ -110,6 +124,14 @@ def main():
     print(f"Loading configuration from {args.config}")
     config = load_config(args.config)
 
+    # Fill defaults from config if args missing
+    if args.questions is None:
+        args.questions = Path(config['data'].get('hotpotqa_path'))
+    if args.corpus is None and config['retrieval']['method'] in {"bm25", "bge-m3"}:
+        args.corpus = Path(config['data'].get('corpus_path'))
+    if args.output is None:
+        args.output = Path(config['data'].get('output_path'))
+
     # Setup logging
     log_file = Path(config['logging']['log_dir']) / "generate_trajectories.log"
     logger = setup_logger("prmrag", level=config['logging']['level'], log_file=log_file)
@@ -123,7 +145,7 @@ def main():
 
     # Load questions
     logger.info(f"\n[1/4] Loading HotpotQA questions...")
-    questions = load_hotpotqa_questions(args.questions, limit=args.limit)
+    questions = load_hotpotqa_questions(args.questions, limit=args.limit, offset=args.offset)
     logger.info(f"Loaded {len(questions)} questions")
 
     # Load corpus and build retriever
@@ -143,6 +165,25 @@ def main():
         retriever = BM25Retriever(corpus)
         logger.info("BM25 index ready!")
 
+    elif retrieval_method == "bge-m3":
+        if not args.corpus:
+            raise ValueError("--corpus is required for BGE-M3 retrieval")
+
+        logger.info(f"Loading corpus from {args.corpus}")
+        corpus = load_hotpotqa_corpus(args.corpus)
+        logger.info(f"Loaded {len(corpus)} documents")
+
+        bge_cfg = config['retrieval'].get('bge_m3', {})
+        embedding_cache = bge_cfg.get('embedding_cache', "data/embeddings/beir_hotpotqa_bge_m3.npy")
+        retriever = BGERetriever(
+            corpus=corpus,
+            model_name=bge_cfg.get('model_name', 'BAAI/bge-m3'),
+            batch_size=bge_cfg.get('batch_size', 32),
+            max_length=bge_cfg.get('max_length', 512),
+            embedding_cache_path=embedding_cache,
+        )
+        logger.info("BGE-M3 retriever ready!")
+
     elif retrieval_method == "wikipedia":
         logger.info("Initializing Wikipedia retriever...")
         wiki_config = config['retrieval'].get('wikipedia', {})
@@ -161,15 +202,16 @@ def main():
     logger.info(f"\n[3/4] Initializing adaptive trajectory generator...")
     logger.info(f"  Policy model: {config['policy_model']['model_name']}")
     logger.info(f"  MC rollouts: {config['adaptive']['num_rollouts']}")
-    logger.info(f"  Delta (CoT threshold): {config['adaptive']['delta']}")
-    logger.info(f"  Epsilon (RAG threshold): {config['adaptive']['epsilon']}")
 
-    # Note: In production, load actual model here
-    # from transformers import AutoModelForCausalLM
-    # policy_model = AutoModelForCausalLM.from_pretrained(...)
+
+    # Load policy model
+    from prmrag.models import load_policy_model
+    logger.info("Loading policy model...")
+    policy_model = load_policy_model(config['policy_model'])
+    logger.info("Policy model loaded!")
 
     generator = AdaptiveTrajectoryGenerator(
-        policy_model=None,  # Placeholder
+        policy_model=policy_model,
         retriever=retriever,
         config=config['adaptive'],
     )
@@ -195,9 +237,16 @@ def main():
 
     logger.info(f"\nStatistics:")
     logger.info(f"  Total steps: {total_steps}")
-    logger.info(f"  CoT steps: {cot_steps} ({cot_steps/total_steps*100:.1f}%)")
-    logger.info(f"  RAG steps: {rag_steps} ({rag_steps/total_steps*100:.1f}%)")
-    logger.info(f"  Correct answers: {correct}/{len(trajectories)} ({correct/len(trajectories)*100:.1f}%)")
+    if total_steps > 0:
+        logger.info(f"  CoT steps: {cot_steps} ({cot_steps/total_steps*100:.1f}%)")
+        logger.info(f"  RAG steps: {rag_steps} ({rag_steps/total_steps*100:.1f}%)")
+    else:
+        logger.info(f"  CoT steps: {cot_steps}")
+        logger.info(f"  RAG steps: {rag_steps}")
+    if len(trajectories) > 0:
+        logger.info(f"  Correct answers: {correct}/{len(trajectories)} ({correct/len(trajectories)*100:.1f}%)")
+    else:
+        logger.info(f"  Correct answers: 0/0")
 
     # Save trajectories
     logger.info(f"\nSaving trajectories to {args.output}")

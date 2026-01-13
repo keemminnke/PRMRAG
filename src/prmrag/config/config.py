@@ -19,10 +19,10 @@ class DataConfig:
 @dataclass
 class RPEConfig:
     """RPE labeler configuration."""
-    model_name: str = "meta-llama/Llama-2-7b-hf"
+    model_name: str = "Qwen/Qwen2.5-7B-Instruct"
     model_path: Optional[str] = None
     device: str = "cuda"
-    num_rollouts: int = 5
+    num_rollouts: int = 4
     max_rollout_steps: int = 20
     temperature: float = 0.8
     top_p: float = 0.95
@@ -34,7 +34,7 @@ class RPEConfig:
 @dataclass
 class JudgeConfig:
     """Judge labeler configuration."""
-    model_name: str = "meta-llama/Llama-2-70b-hf"
+    model_name: str = "Qwen/QwQ-32B"
     model_path: Optional[str] = None
     device: str = "cuda"
     temperature: float = 0.3

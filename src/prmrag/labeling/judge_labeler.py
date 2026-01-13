@@ -1,5 +1,7 @@
-"""LLM Judge labeler (VersaPRM style)."""
+"""LLM Judge labeler (VersaPRM style) using vLLM."""
 
+import json
+import re
 import time
 from typing import List, Dict, Any, Optional
 from tqdm import tqdm
@@ -17,6 +19,8 @@ class JudgeLabeler(BaseLabeler):
     - Provides gold answer and supporting facts as context
     - Evaluates each step's contribution to reaching correct answer
     - Returns GOOD/BAD label with reasoning
+
+    Now uses vLLM backend for fast inference.
     """
 
     def __init__(
@@ -36,24 +40,51 @@ class JudgeLabeler(BaseLabeler):
                 - prompt_style: Prompt template style
                 - use_gold_answer: Whether to provide gold answer
                 - use_supporting_facts: Whether to provide supporting facts
-            model_client: Pre-configured model client (optional)
+                - gpu_memory_utilization: GPU memory utilization for vLLM (default: 0.7)
+                - tensor_parallel_size: Number of GPUs for vLLM (default: 1)
+            model_client: Pre-configured model client (optional, uses vLLM PolicyModel if None)
         """
         super().__init__(config)
 
-        self.model_name = config.get("model_name", "gpt-4")
+        self.model_name = config.get("model_name", "Qwen/QwQ-32B")
         self.temperature = config.get("temperature", 0.3)
-        self.max_tokens = config.get("max_tokens", 512)
+        self.max_tokens = config.get("max_tokens", 2048)  # Increased for QwQ-32B long reasoning
         self.max_retries = config.get("max_retries", 3)
         self.retry_delay = config.get("retry_delay", 2.0)
         self.prompt_style = config.get("prompt_style", "versaprm")
         self.use_gold_answer = config.get("use_gold_answer", True)
         self.use_supporting_facts = config.get("use_supporting_facts", True)
 
+        # vLLM-specific settings
+        self.gpu_memory_utilization = config.get("gpu_memory_utilization", 0.8)
+        self.tensor_parallel_size = config.get("tensor_parallel_size", 1)
+        self.max_model_len = config.get("max_model_len", 32768)
+
         self.model_client = model_client
         self.processor = TrajectoryProcessor()
 
+        # Initialize vLLM model if no client provided
+        if self.model_client is None:
+            self._initialize_vllm_model()
+
+    def _initialize_vllm_model(self):
+        """Initialize vLLM model for judge labeling."""
+        from ..models import load_policy_model
+
+        model_config = {
+            'model_name': self.model_name,
+            'temperature': self.temperature,
+            'max_tokens': self.max_tokens,
+            'gpu_memory_utilization': self.gpu_memory_utilization,
+            'tensor_parallel_size': self.tensor_parallel_size,
+            'max_model_len': self.max_model_len,
+        }
+
+        print(f"Initializing Judge model with vLLM: {self.model_name}")
+        self.model_client = load_policy_model(model_config)
+
     def label_trajectory(self, trajectory: Trajectory) -> List[JudgeLabel]:
-        """Label a trajectory using LLM judge.
+        """Label a trajectory using LLM judge (batch mode - all steps at once).
 
         Args:
             trajectory: Trajectory to label
@@ -61,11 +92,14 @@ class JudgeLabeler(BaseLabeler):
         Returns:
             List of JudgeLabel objects, one per step
         """
-        labels = []
+        # Build prompt for whole trajectory
+        prompt = self._build_whole_trajectory_prompt(trajectory)
 
-        for step_idx in range(len(trajectory.steps)):
-            judge_label = self._judge_step(trajectory, step_idx)
-            labels.append(judge_label)
+        # Call LLM once for all steps
+        response = self._call_llm_with_retry(prompt)
+
+        # Parse JSON response to get labels for all steps
+        labels = self._parse_json_response(response, len(trajectory.steps))
 
         return labels
 
@@ -122,12 +156,153 @@ class JudgeLabeler(BaseLabeler):
         else:
             return self._build_default_prompt(trajectory, step_idx)
 
+    def _build_whole_trajectory_prompt(self, trajectory: Trajectory) -> str:
+        """Build prompt for evaluating all steps in one call.
+
+        VersaPRM의 평가 기준을 유지하면서 한 번의 호출로 모든 스텝을 평가.
+        """
+        # 1. 전체 Trajectory 구성
+        interaction_history = []
+        for i, step in enumerate(trajectory.steps, 1):
+            step_text = f"## Step {i}\n"
+            step_text += f"**Action:** {step.action}\n"
+            # [추가] Finish 스텝이면 모델의 최종 예측값 공개
+            if "Finish" in str(step.action) and trajectory.final_answer:
+                step_text += f"**Model's Final Prediction:** {trajectory.final_answer}\n"
+            if step.observation and step.observation.strip():
+                step_text += f"**Observation:** {step.observation}\n"
+            else:
+                step_text += "**Observation:** (No information retrieved)\n"
+            interaction_history.append(step_text)
+
+        history_str = "\n\n".join(interaction_history)
+
+        # 2. VersaPRM 프롬프트 (다중 스텝 평가)
+        prompt = f"""You are an expert evaluator for RAG (Retrieval-Augmented Generation) systems.
+
+# Task
+You will be given a full interaction trajectory consisting of multiple steps.
+Your task is to **evaluate EACH step independently** based on the criteria below and assign a label (GOOD or BAD).
+
+# Evaluation Criteria (VersaPRM Style)
+
+**A step is GOOD if:**
+- It retrieves relevant information that helps answer the question.
+- It makes correct logical inferences based ONLY on the Observation.
+
+**A step is BAD if:**
+- **Hallucination:** It claims facts (names, dates, numbers) NOT present in the Observation.
+- **Bad Search:** The search query is irrelevant, too vague, or repeats failed queries.
+- **Irrelevant:** The retrieved documents don't help answer the question.
+- **Wrong Logic:** It makes inferences not supported by the retrieved information.
+
+# Input Data
+
+## Question
+{trajectory.question}
+
+## Correct Answer (Ground Truth)
+{trajectory.gold_answer if self.use_gold_answer else "N/A"}
+
+## Full Trajectory
+{history_str}
+
+# Output Instructions
+1. Analyze the trajectory step by step.
+2. For each step, check specifically for hallucinations against the Observation.
+3. Output the result in a **JSON list** format.
+
+Example Output Format:
+```json
+[
+  {{"step": 1, "label": "GOOD", "reasoning": "The search query is specific and relevant."}},
+  {{"step": 2, "label": "BAD", "reasoning": "The model mentions 'Apple released output', but the Observation only talks about 'Microsoft'. This is a hallucination."}},
+  ...
+]
+```
+
+Evaluate all {len(trajectory.steps)} steps now."""
+
+        return prompt
+
+    def _parse_json_response(self, response: str, num_steps: int) -> List[JudgeLabel]:
+        """Parse JSON response from whole-trajectory evaluation.
+
+        Args:
+            response: Raw LLM response containing JSON
+            num_steps: Expected number of steps
+
+        Returns:
+            List of JudgeLabel objects
+        """
+        labels = []
+
+        # Extract JSON from response (handle ```json ... ``` blocks)
+        json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(1)
+        else:
+            # Try to find raw JSON array
+            json_match = re.search(r'\[\s*\{.*?\}\s*\]', response, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+            else:
+                json_str = None
+
+        parsed_results = []
+        if json_str:
+            try:
+                parsed_results = json.loads(json_str)
+            except json.JSONDecodeError:
+                # Try to fix common issues
+                try:
+                    # Remove trailing commas
+                    fixed = re.sub(r',\s*]', ']', json_str)
+                    fixed = re.sub(r',\s*}', '}', fixed)
+                    parsed_results = json.loads(fixed)
+                except json.JSONDecodeError:
+                    pass
+
+        # Build labels from parsed results
+        for step_idx in range(num_steps):
+            # Find matching result
+            result = None
+            for r in parsed_results:
+                if r.get('step') == step_idx + 1:
+                    result = r
+                    break
+
+            if result:
+                label = result.get('label', 'BAD').upper()
+                if 'GOOD' in label:
+                    label = 'GOOD'
+                else:
+                    label = 'BAD'
+                reasoning = result.get('reasoning', '')[:200]
+            else:
+                # Default if parsing failed
+                label = 'BAD'
+                reasoning = 'Failed to parse response'
+
+            labels.append(JudgeLabel(
+                step_id=step_idx,
+                label=label,
+                reasoning=reasoning,
+                confidence=1.0,
+                metadata={
+                    "model_name": self.model_name,
+                    "prompt_style": "whole_trajectory",
+                },
+            ))
+
+        return labels
+
     def _build_versaprm_prompt(
         self,
         trajectory: Trajectory,
         step_idx: int,
     ) -> str:
-        """Build VersaPRM-style judge prompt.
+        """Build VersaPRM-style judge prompt (single step, legacy).
 
         VersaPRM evaluates whether a step is helpful for reaching the correct answer.
         """
@@ -144,13 +319,11 @@ class JudgeLabeler(BaseLabeler):
             "A step is GOOD if:",
             "- It retrieves relevant information that helps answer the question",
             "- It makes correct logical inferences",
-            "- It moves toward the correct answer",
             "- The retrieved passages are relevant and useful",
             "",
             "A step is BAD if:",
             "- It retrieves irrelevant or misleading information",
             "- It makes incorrect logical inferences",
-            "- It leads away from the correct answer",
             "- The passages are off-topic or unhelpful",
             "",
             f"# Question\n{trajectory.question}",
@@ -176,33 +349,74 @@ class JudgeLabeler(BaseLabeler):
         if prefix_steps:
             prompt_parts.extend([
                 "",
-                "# Previous Steps",
+                "# Previous Steps (Context)",
             ])
             for i, prev_step in enumerate(prefix_steps, 1):
-                prompt_parts.append(f"Step {i}: {prev_step.action}")
-                prompt_parts.append(f"Result: {prev_step.observation[:200]}...")
+                prompt_parts.append(f"Step {i}:")
+                prompt_parts.append(f"{prev_step.action}")
+                if prev_step.observation:
+                    # No truncation - Judge needs full context to detect hallucinations
+                    prompt_parts.append(f"Observation: {prev_step.observation}")
+                prompt_parts.append("")
 
         # Add current step to evaluate
+        # This step's Observation is CRITICAL for evaluation
         prompt_parts.extend([
             "",
-            "# Step to Evaluate",
-            f"Action: {step.action}",
+            "# Current Step to Evaluate",
+            f"Action Segment: {step.action}",  # Contains "Thought: ...\nAction: ..."
         ])
 
-        if step.passages:
-            prompt_parts.append("\nRetrieved Passages:")
+        # [추가] 마지막 스텝(Finish)이라면 모델이 낸 '최종 예측값'을 Judge에게 공개
+        if "Finish" in str(step.action) and trajectory.final_answer:
+            prompt_parts.append(f"Model's Final Prediction: {trajectory.final_answer}")
+
+        # Show retrieved passages (Observation) for current step only
+        if step.observation and step.observation.strip():
+            prompt_parts.append("\nObservation (Retrieved Information):")
+            prompt_parts.append(step.observation)
+        elif step.passages and step.passages[0]:
+            # Fallback: if observation is empty but passages exist
+            prompt_parts.append("\nObservation (Retrieved Information):")
             for i, passage in enumerate(step.passages, 1):
-                prompt_parts.append(f"{i}. {passage}")
+                if passage and passage.strip():
+                    prompt_parts.append(f"{i}. {passage}")
 
         prompt_parts.extend([
-            f"\nObservation: {step.observation}",
             "",
-            "# Your Evaluation",
-            "Provide your evaluation in the following format:",
+            "# Your Evaluation Task",
+            "Please think step by step to evaluate this interaction.",
             "",
-            "Reasoning: [Explain why this step is good or bad]",
-            "Label: [GOOD or BAD]",
-            "Confidence: [0.0 to 1.0]",
+            "**CRITICAL RULE: Even if the final answer matches the Correct Answer, you MUST label the step as BAD if:**",
+            "- The Model claims facts (names, dates, numbers) that are NOT present in the Observation",
+            "- The Model makes inferences not supported by the retrieved information",
+            "- The Model hallucinates or fabricates information",
+            "- The search query is irrelevant, too vague, or poorly formulated (for Search steps)",
+            "- The retrieved documents don't help answer the question (for Search steps)",
+            "",
+            "Evaluation Steps:",
+            "1. **For Search steps**: Evaluate the search query quality",
+            "   - Is the query relevant to answering the original question?",
+            "   - Is the query specific enough (not too vague)?",
+            "   - Does the query consider previous steps' context?",
+            "   - Did the search retrieve helpful information?",
+            "",
+            "2. **For all steps**: Check grounding in retrieved information",
+            "   - Carefully read the 'Observation' and identify what factual information it actually contains",
+            "   - Check if the Model's 'Thought' or 'Action' makes claims beyond what the Observation supports",
+            "",
+            "3. **Verify progress toward answer**",
+            "   - Does the step move toward the Correct Answer using ONLY the information in Observation?",
+            "",
+            "4. **Final determination**: GOOD or BAD",
+            "",
+            "Output Format:",
+            "Thinking Process:",
+            "[Write down your step-by-step analysis here. Be verbose and critical.]",
+            "",
+            "Final Verification:",
+            "Reasoning: [Summary of your judgment - explain if hallucination was detected]",
+            "Label: [GOOD or BAD]"
         ])
 
         return "\n".join(prompt_parts)
@@ -226,10 +440,9 @@ Observation: {step.observation}
 
 Is this step GOOD (helpful) or BAD (unhelpful) for answering the question?
 
-Response format:
-Reasoning: [your explanation]
+IMPORTANT: Output ONLY the following two lines:
+Reasoning: [One sentence, max 50 words]
 Label: [GOOD or BAD]
-Confidence: [0.0 to 1.0]
 """
         return prompt
 
@@ -242,24 +455,22 @@ Confidence: [0.0 to 1.0]
         Returns:
             LLM response text
         """
-        if self.model_client is None:
-            # Placeholder response
-            return """Reasoning: This step retrieves relevant information about the topic.
-Label: GOOD
-Confidence: 0.85"""
-
         for attempt in range(self.max_retries):
             try:
                 response = self._call_llm(prompt)
                 return response
             except Exception as e:
                 if attempt < self.max_retries - 1:
+                    print(f"Retry {attempt + 1}/{self.max_retries} after error: {e}")
                     time.sleep(self.retry_delay)
                 else:
-                    raise e
+                    print(f"All retries failed: {e}")
+                    # Return a default response on failure
+                    return """Reasoning: Unable to evaluate due to model error.
+Label: GOOD"""
 
     def _call_llm(self, prompt: str) -> str:
-        """Call LLM (to be implemented with actual model client).
+        """Call LLM using vLLM backend.
 
         Args:
             prompt: Input prompt
@@ -267,73 +478,112 @@ Confidence: 0.85"""
         Returns:
             LLM response
         """
-        # Placeholder - implement with actual model client
-        # Examples:
-        #
-        # For OpenAI:
-        # response = self.model_client.chat.completions.create(
-        #     model=self.model_name,
-        #     messages=[{"role": "user", "content": prompt}],
-        #     temperature=self.temperature,
-        #     max_tokens=self.max_tokens,
-        # )
-        # return response.choices[0].message.content
-        #
-        # For Anthropic:
-        # response = self.model_client.messages.create(
-        #     model=self.model_name,
-        #     messages=[{"role": "user", "content": prompt}],
-        #     temperature=self.temperature,
-        #     max_tokens=self.max_tokens,
-        # )
-        # return response.content[0].text
-        #
-        # For local models (vLLM, etc.):
-        # outputs = self.model_client.generate(
-        #     prompts=[prompt],
-        #     sampling_params=SamplingParams(
-        #         temperature=self.temperature,
-        #         max_tokens=self.max_tokens,
-        #     ),
-        # )
-        # return outputs[0].outputs[0].text
+        if self.model_client is None:
+            raise RuntimeError("Model client not initialized")
 
-        raise NotImplementedError("Model client not configured")
+        # Format Judge prompt with chat template
+        # QwQ-32B is a chat model and needs proper formatting
+        formatted_prompt = self._format_judge_prompt_for_chat(prompt)
+
+        # Use raw generate() with formatted chat template
+        response = self.model_client.generate(
+            prompt=formatted_prompt,
+            max_tokens=self.max_tokens,
+            temperature=self.temperature,
+        )
+
+        return response
+
+    def _format_judge_prompt_for_chat(self, user_message: str) -> str:
+        """Format Judge prompt for chat model (e.g., QwQ-32B).
+
+        Args:
+            user_message: VersaPRM-style judge prompt
+
+        Returns:
+            Formatted prompt with chat template
+        """
+        if hasattr(self.model_client, 'tokenizer') and hasattr(self.model_client.tokenizer, 'apply_chat_template'):
+            messages = [
+                {"role": "user", "content": user_message}
+            ]
+            return self.model_client.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+        else:
+            # Fallback to manual Qwen format
+            return f"""<|im_start|>user
+{user_message}<|im_end|>
+<|im_start|>assistant
+"""
 
     def _parse_judge_response(self, response: str) -> tuple[str, str, float]:
         """Parse LLM judge response.
 
+        QwQ-32B generates long chain-of-thought reasoning before final judgment.
+        This parser extracts ONLY the final structured output (last occurrence).
+
         Args:
-            response: Raw LLM response
+            response: Raw LLM response (may contain long CoT)
 
         Returns:
             Tuple of (label, reasoning, confidence)
         """
-        # Default values
-        label = "GOOD"
-        reasoning = ""
-        confidence = 0.5
+        import re
 
-        # Parse response
+        # Default values - CRITICAL: BAD instead of GOOD to avoid false positives
+        label = "BAD"  # Conservative: parsing failure = don't trust the step
+        reasoning = ""
+        confidence = 1.0  # Fixed confidence since we removed it from prompt
+
+        # Strategy: Parse from END to get final structured output
+        # QwQ often outputs long reasoning, then "Reasoning: ... Label: ..." at end
         lines = response.strip().split("\n")
 
-        for line in lines:
+        # Regex patterns for flexible matching (handles **Label:**, Final Label:, etc.)
+        label_pattern = re.compile(r'(?:Final\s+)?Label:\s*\*?\*?([A-Z]+)\*?\*?', re.IGNORECASE)
+        reasoning_pattern = re.compile(r'Reasoning:\s*(.+)', re.IGNORECASE)
+
+        # Reverse iterate to find LAST occurrence of each field
+        for line in reversed(lines):
             line = line.strip()
 
-            if line.startswith("Reasoning:"):
-                reasoning = line.split("Reasoning:", 1)[1].strip()
-            elif line.startswith("Label:"):
-                label_text = line.split("Label:", 1)[1].strip().upper()
-                if "BAD" in label_text:
-                    label = "BAD"
-                elif "GOOD" in label_text:
-                    label = "GOOD"
-            elif line.startswith("Confidence:"):
-                try:
-                    conf_text = line.split("Confidence:", 1)[1].strip()
-                    confidence = float(conf_text)
-                except (ValueError, IndexError):
-                    confidence = 0.5
+            # Find last Label using regex
+            if not label or label == "BAD":  # Only override default if we find valid label
+                match = label_pattern.search(line)
+                if match:
+                    found_label = match.group(1).upper()
+                    if "GOOD" in found_label:
+                        label = "GOOD"
+                    elif "BAD" in found_label:
+                        label = "BAD"
+
+            # Find last Reasoning using regex
+            if reasoning == "":
+                match = reasoning_pattern.search(line)
+                if match:
+                    reasoning = match.group(1).strip()
+                    # If found both, we're done
+                    if label in ["GOOD", "BAD"]:
+                        break
+
+        # Smart truncate: keep full if short, otherwise truncate at sentence boundary
+        max_length = 200
+        if len(reasoning) > max_length:
+            # Try to find last sentence boundary before max_length
+            truncated = reasoning[:max_length]
+            # Look for sentence endings: ., !, ?
+            last_period = max(truncated.rfind('. '), truncated.rfind('.'))
+            last_exclaim = truncated.rfind('!')
+            last_question = truncated.rfind('?')
+            last_boundary = max(last_period, last_exclaim, last_question)
+
+            if last_boundary > max_length // 2:  # Only use if boundary is past halfway
+                reasoning = reasoning[:last_boundary + 1]
+            else:
+                reasoning = truncated + "..."
 
         return label, reasoning, confidence
 
@@ -362,38 +612,13 @@ Confidence: 0.85"""
         return labels
 
 
-def create_judge_client(config: Dict[str, Any]):
-    """Create model client for judge labeling.
+def create_judge_labeler(config: Dict[str, Any]) -> JudgeLabeler:
+    """Create JudgeLabeler with vLLM backend.
 
     Args:
         config: Configuration with model settings
 
     Returns:
-        Model client instance
+        JudgeLabeler instance with vLLM model
     """
-    model_name = config.get("model_name", "")
-
-    # OpenAI models
-    if "gpt" in model_name.lower():
-        try:
-            import openai
-            client = openai.OpenAI()
-            return client
-        except ImportError:
-            print("OpenAI package not installed. Install with: pip install openai")
-            return None
-
-    # Anthropic models
-    elif "claude" in model_name.lower():
-        try:
-            import anthropic
-            client = anthropic.Anthropic()
-            return client
-        except ImportError:
-            print("Anthropic package not installed. Install with: pip install anthropic")
-            return None
-
-    # Local models (vLLM, transformers, etc.)
-    else:
-        print(f"[Placeholder] Would create client for: {model_name}")
-        return None
+    return JudgeLabeler(config)

@@ -110,7 +110,7 @@ def main():
         logger.info("\n[2/4] Running RPE labeling (MC-based, small model)")
         logger.info(f"  Model: {config.rpe.model_name}")
         logger.info(f"  Rollouts: {config.rpe.num_rollouts}")
-        logger.info(f"  Thresholds: GOOD={config.rpe.threshold_good}, BAD={config.rpe.threshold_bad}")
+        logger.info(f"  Threshold: GOOD if RPE >= {config.rpe.threshold}, BAD otherwise")
 
         rpe_labeler = RPELabeler(config.rpe.__dict__)
         rpe_labels_batch = rpe_labeler.label_batch(trajectories, show_progress=True)
