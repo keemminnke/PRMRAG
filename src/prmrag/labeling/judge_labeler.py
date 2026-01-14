@@ -104,29 +104,59 @@ class JudgeLabeler(BaseLabeler):
         return labels
 
     def _parse_step_sections(self, step) -> dict:
-        """Parse step content into Thought, Action, Observation sections."""
+        """Parse step content into Thought, Action, Observation sections.
+
+        Handles new format:
+        **Thought:** [reasoning]
+        **Action:** Reason[content="..."] / Search[query="..."] / Finish[answer="..."]
+        **Observation:** [retrieved passages]
+        """
         # Get full content from either 'content' or 'action' field
         full_content = getattr(step, 'content', None) or getattr(step, 'action', '') or ''
 
-        # Parse Action from content
-        action_match = re.search(
-            r'Action:\s*(Search\[.*?\]|Finish\[.*?\]|Reason)',
+        # Try to extract **Thought:** section
+        thought_match = re.search(
+            r'\*?\*?Thought:\*?\*?\s*(.+?)(?=\*?\*?Action:|$)',
             full_content,
             re.IGNORECASE | re.DOTALL
         )
 
-        if action_match:
-            action = action_match.group(0)
+        # Parse Action from content (handles all three action types with brackets)
+        action_match = re.search(
+            r'Action:\s*(Search\[.*?\]|Finish\[.*?\]|Reason\[.*?\]|Reason)',
+            full_content,
+            re.IGNORECASE | re.DOTALL
+        )
+
+        if thought_match:
+            thought = thought_match.group(1).strip()
+        elif action_match:
             # Everything before Action is Thought
             thought = full_content[:action_match.start()].strip()
+            # Remove **Thought:** prefix if present
+            thought = re.sub(r'^\*?\*?Thought:\*?\*?\s*', '', thought, flags=re.IGNORECASE)
+        else:
+            thought = full_content.strip()
+
+        if action_match:
+            action = action_match.group(0).strip()
         else:
             action = getattr(step, 'action_type', 'Unknown')
             if hasattr(action, 'value'):
                 action = action.value
-            thought = full_content.strip()
 
-        # Get observation
+        # Get observation - either from attribute or from content
         observation = getattr(step, 'observation', '') or ''
+
+        # Also try to extract observation from content if not in attribute
+        if not observation:
+            obs_match = re.search(
+                r'\*?\*?Observation:\*?\*?\s*(.+?)$',
+                full_content,
+                re.IGNORECASE | re.DOTALL
+            )
+            if obs_match:
+                observation = obs_match.group(1).strip()
 
         return {
             'thought': thought,

@@ -301,7 +301,7 @@ Continue with Step {next_step_num}."""
 
         Returns:
             Tuple of (action_type, action_input)
-            action_type: 'search', 'finish', or None
+            action_type: 'search', 'finish', 'reason', or None
         """
         import re
 
@@ -322,6 +322,15 @@ Continue with Step {next_step_num}."""
         )
         if search_match:
             return ('search', search_match.group(1).strip())
+
+        # Check for Reason action
+        reason_match = re.search(
+            r'Action:\s*Reason\[content=["\']?(.+?)["\']?\]',
+            content,
+            re.IGNORECASE | re.DOTALL
+        )
+        if reason_match:
+            return ('reason', reason_match.group(1).strip())
 
         # Check for simple finish markers
         if any(marker in content.lower() for marker in ['final answer:', 'the answer is', 'therefore, the answer']):
