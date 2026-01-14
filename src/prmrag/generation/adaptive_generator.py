@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Tuple
 from enum import Enum
 import numpy as np
+import re
 from tqdm import tqdm
 
 from ..data.schemas import ActionType
@@ -439,22 +440,166 @@ class AdaptiveTrajectoryGenerator:
         state: Dict[str, Any],
         gold_answer: Optional[str],
     ) -> float:
-        """Estimate success probability via MC rollouts."""
+        """Estimate success probability via parallel MC rollouts with RAG capability.
+
+        All K rollouts are processed in parallel. When Search actions are detected,
+        retrieval is performed and generation continues in parallel batches.
+        """
         if self.policy_model is None:
-            # Placeholder: random estimate
             return np.random.uniform(0.3, 0.9)
 
+        k = self.num_rollouts
+        max_rollout_steps = 5
+
+        # Initialize K rollout states (copies of current state)
+        rollout_states = []
+        for _ in range(k):
+            rollout_states.append({
+                'question': state['question'],
+                'reasoning_history': list(state.get('reasoning_history', [])),
+                'passages': list(state.get('passages', [])),
+                'current_passages': list(state.get('current_passages', [])),
+                'finished': False,
+                'final_answer': '',
+            })
+
+        # Iterative parallel generation with RAG
+        for step in range(max_rollout_steps):
+            # Get active (not finished) rollouts
+            active_indices = [i for i, rs in enumerate(rollout_states) if not rs['finished']]
+            if not active_indices:
+                break
+
+            # Build prompts for active rollouts
+            prompts = []
+            for idx in active_indices:
+                prompt = self._build_rollout_prompt(rollout_states[idx])
+                formatted = self.policy_model.format_prompt_for_qwen(prompt)
+                prompts.append(formatted)
+
+            # Batch generate for all active rollouts
+            if hasattr(self.policy_model, 'batch_generate'):
+                responses = self.policy_model.batch_generate(
+                    prompts=prompts,
+                    max_tokens=800,
+                    temperature=self.temperature,
+                    top_p=0.95,
+                )
+            else:
+                responses = [self.policy_model.generate(p, max_tokens=800) for p in prompts]
+
+            # Process responses and identify Search actions
+            search_queries = []  # (idx, query, response)
+            for pos, (idx, response) in enumerate(zip(active_indices, responses)):
+                rs = rollout_states[idx]
+
+                # Check for Finish action
+                if self._has_answer(response):
+                    rs['finished'] = True
+                    rs['final_answer'] = self._extract_answer(response)
+                    continue
+
+                # Check for Search action
+                query = self._extract_search_query(response)
+                if query:
+                    search_queries.append((idx, query, response))
+                else:
+                    # Pure reasoning - add to history
+                    rs['reasoning_history'].append(response)
+                    rs['current_passages'] = []
+
+            # Batch retrieve for all Search actions
+            if search_queries and self.retriever is not None:
+                queries = [q[1] for q in search_queries]
+
+                # Batch retrieval (if supported) or sequential
+                if hasattr(self.retriever, 'batch_retrieve'):
+                    all_passages = self.retriever.batch_retrieve(queries, top_k=5)
+                else:
+                    all_passages = [self.retriever.retrieve(q, top_k=5) for q in queries]
+
+                # Update rollout states with observations
+                for (idx, query, response), passages in zip(search_queries, all_passages):
+                    rs = rollout_states[idx]
+                    passage_text = self._format_passages(passages)
+                    step_text = f"{response}\nObservation:\n{passage_text}"
+                    rs['reasoning_history'].append(step_text)
+                    rs['passages'].extend(passages)
+                    rs['current_passages'] = passages
+
+        # Calculate MC from final answers
         successes = 0
-        for _ in range(self.num_rollouts):
-            final_answer = self._rollout(state)
-            if gold_answer and self._check_answer(final_answer, gold_answer):
+        rollout_answers = []
+        for rs in rollout_states:
+            answer = rs['final_answer'] or self._extract_answer(rs['reasoning_history'][-1] if rs['reasoning_history'] else '')
+            rollout_answers.append(answer[:50] if answer else '')
+            if gold_answer and self._check_answer(answer, gold_answer):
                 successes += 1
 
-        return successes / self.num_rollouts
+        mc_value = successes / k
+
+        if mc_value == 0.0:
+            print(f"    [MC DEBUG] MC=0.0! K={k}, Gold: {gold_answer[:50] if gold_answer else 'None'}")
+            print(f"    [MC DEBUG] Sample rollouts: {rollout_answers[:2]}")
+
+        return mc_value
+
+    def _build_rollout_prompt(self, state: Dict[str, Any]) -> str:
+        """Build rollout prompt from state."""
+        lines = [f"Question: {state['question']}\n"]
+
+        # Add previous documents titles for reference
+        all_passages = state.get('passages', [])
+        current_passages = state.get('current_passages', [])
+
+        if all_passages and len(all_passages) > len(current_passages):
+            lines.append("Previous Documents (for reference):")
+            num_previous = len(all_passages) - len(current_passages)
+            for i, passage in enumerate(all_passages[:num_previous], 1):
+                lines.append(f"[{i}] {passage.get('title', 'Document')}")
+            lines.append("")
+
+        # Current step's retrieved passages (full content)
+        if current_passages:
+            lines.append("Retrieved Information (Current):")
+            for i, passage in enumerate(current_passages, 1):
+                title = passage.get('title', 'Document')
+                content = passage.get('text', '')
+                lines.append(f"[{i}] {title}: {content}")
+            lines.append("")
+
+        # Add existing reasoning history
+        if state.get('reasoning_history'):
+            lines.append("Reasoning so far:")
+            for step_text in state['reasoning_history']:
+                lines.append(step_text)
+            lines.append("")
+            lines.append("Continue solving to reach the final answer.")
+        else:
+            lines.append("Solve this question and provide the final answer.")
+
+        return "\n".join(lines)
+
+    def _extract_search_query(self, text: str) -> Optional[str]:
+        """Extract search query from model response."""
+        patterns = [
+            r'Action:\s*Search\s*\[\s*query\s*=\s*["\'](.+?)["\']\s*\]',
+            r'Action:\s*Search\s*\[\s*["\'](.+?)["\']\s*\]',
+            r'Action:\s*Search\s*\[\s*(.+?)\s*\]',
+            r'Search\s*\[\s*query\s*=\s*["\'](.+?)["\']\s*\]',
+            r'Search\s*\[\s*["\'](.+?)["\']\s*\]',
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+            if match:
+                query = match.group(1).strip().strip('"\'')
+                if query:
+                    return query
+        return None
 
     def _rollout(self, state: Dict[str, Any]) -> str:
-        """Perform one rollout from current state."""
-        # Placeholder
+        """Perform one rollout from current state (legacy, use _monte_carlo_estimate instead)."""
         return "rollout_answer"
 
     def _check_answer(self, predicted: str, gold: str) -> bool:
@@ -710,15 +855,8 @@ class SimpleTrajectoryGenerator:
         )
 
     def _build_initial_prompt(self, question: str) -> str:
-        """Build prompt for first step."""
-        return f"""You are a reasoning agent that can search for information when needed.
-
-Question: {question}
-
-Instructions:
-- Think step by step
-- If you need more information, use: Action: Search[query="your search query"]
-- When you have the final answer, use: Action: Finish[answer="your answer"]
+        """Build prompt for first step (instruction은 system prompt에서 처리)."""
+        return f"""Question: {question}
 
 Generate Step 1."""
 
@@ -728,20 +866,13 @@ Generate Step 1."""
         previous_steps: List[ForcedStep],
         context: str = ""
     ) -> str:
-        """Build prompt for continuation."""
+        """Build prompt for continuation (instruction은 system prompt에서 처리)."""
         steps_text = "\n".join(str(step) for step in previous_steps)
         next_step_num = len(previous_steps) + 1
 
-        prompt = f"""You are a reasoning agent that can search for information when needed.
-
-Question: {question}
+        prompt = f"""Question: {question}
 
 {steps_text}
-
-Instructions:
-- Think step by step
-- If you need more information, use: Action: Search[query="your search query"]
-- When you have the final answer, use: Action: Finish[answer="your answer"]
 
 Continue with Step {next_step_num}."""
 
@@ -916,20 +1047,48 @@ Continue with Step {next_step_num}."""
                 stop_sequences=stop_sequences,
             )
 
-            # Process responses
+            # Phase 1: Parse all responses and identify actions
+            parsed_results = []  # (idx, step_content, action_type, action_input)
+            search_actions = []  # (result_idx, state_idx, query)
+
             for i, idx in enumerate(active_indices):
                 state = states[idx]
                 response = responses[i]
 
                 # Parse response
                 step_content = self._parse_step_response(response, step_num)
-                step_text = f"Step {step_num}: {step_content}"
 
                 # Track for continuation
                 state['forced_steps'].append(ForcedStep(step_number=step_num, content=step_content))
 
                 # Detect action
                 action_type, action_input = self._parse_action(step_content)
+                parsed_results.append((idx, step_content, action_type, action_input))
+
+                # Collect search queries for batch retrieval
+                if action_type == "search":
+                    query = action_input or state['question']
+                    search_actions.append((len(parsed_results) - 1, idx, query))
+
+            # Phase 2: Batch retrieval for all Search actions
+            all_passages = {}  # result_idx -> passages
+            if search_actions and self.retriever is not None:
+                queries = [sa[2] for sa in search_actions]
+
+                # Batch retrieve if supported, otherwise sequential
+                if hasattr(self.retriever, 'batch_retrieve'):
+                    passages_list = self.retriever.batch_retrieve(queries, top_k=self.top_k_passages)
+                else:
+                    passages_list = [self.retriever.retrieve(q, top_k=self.top_k_passages) for q in queries]
+
+                # Map back to result indices
+                for (result_idx, state_idx, query), passages in zip(search_actions, passages_list):
+                    all_passages[result_idx] = passages
+
+            # Phase 3: Build steps with retrieved passages
+            for result_idx, (idx, step_content, action_type, action_input) in enumerate(parsed_results):
+                state = states[idx]
+                step_text = f"Step {step_num}: {step_content}"
 
                 if action_type == "finish":
                     # Final answer step
@@ -948,9 +1107,9 @@ Continue with Step {next_step_num}."""
                     state['finished'] = True
 
                 elif action_type == "search":
-                    # RAG step - retrieve and continue
+                    # RAG step - use pre-fetched passages
                     query = action_input or state['question']
-                    passages = self.retriever.retrieve(query, top_k=self.top_k_passages)
+                    passages = all_passages.get(result_idx, [])
 
                     # Format observation
                     observation = self._format_observation(passages)
