@@ -461,6 +461,12 @@ def main():
         help="Number of MC rollouts (default: 8)",
     )
     parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=16,
+        help="Batch size for vLLM processing (default: 16)",
+    )
+    parser.add_argument(
         "--output-dir",
         type=str,
         default="outputs/batch_test_hybrid",
@@ -687,7 +693,7 @@ def main():
         return
 
     # Process in batches for parallel efficiency
-    batch_size = args.num_questions  # Process all questions in one batch for max parallelism
+    batch_size = args.batch_size  # Process all questions in one batch for max parallelism
     # Or use smaller batches if needed: batch_size = min(16, len(questions_to_process))
 
     print(f"\n[PARALLEL MODE] Processing {len(questions_to_process)} questions in parallel batches")
