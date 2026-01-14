@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(du:*)",
+      "Bash(xargs:*)",
+      "Bash(findmnt:*)",
+      "Bash(pip show:*)",
+      "Bash(nvidia-smi:*)",
+      "Bash(python:*)",
+      "Bash(pip uninstall:*)",
+      "Bash(pip install:*)",
+      "Bash(wc:*)",
+      "Bash(cat:*)",
+      "Bash(lsof:*)",
+      "Bash(tar:*)",
+      "Bash(rm:*)",
+      "Bash(python3:*)",
+      "Bash(chmod:*)",
+      "Bash(ls:*)",
+      "Bash(grep:*)",
+      "Bash(kill:*)",
+      "Bash(fuser:*)",
+      "Bash(git stash:*)",
+      "Bash(git checkout:*)",
+      "Bash(git add:*)",
+      "Bash(git reset:*)",
+      "Bash(git branch:*)",
+      "Bash(git push:*)",
+      "Bash(git commit:*)",
+      "Bash(git ls-tree:*)",
+      "Bash(git pull:*)",
+      "Bash(git config:*)",
+      "Bash(tail:*)"
+    ]
+  }
+}

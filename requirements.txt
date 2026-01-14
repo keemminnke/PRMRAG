@@ -2,7 +2,7 @@
 # CRITICAL: numpy must be <2.0 for vLLM + flash_attn compatibility!
 torch>=2.0.0
 transformers>=4.35.0
-numpy<2.0,>=1.24.0  # Must be <2.0 for pyarrow/pandas compatibility with vLLM
+numpy<2.0 
 pandas>=2.0.0,<2.4.0
 pyarrow>=22.0.0,<23.0.0
 
@@ -51,6 +51,6 @@ mypy>=1.5.0
 # Optional performance optimizations
 # flash-attn 2.4.2 tested and working with vLLM 0.13.0 + numpy<2.0
 # WARNING: flash-attn installation requires CUDA and can take 10+ minutes to compile
-flash-attn>=2.4.0,<2.5.0
+flash-attn--no-bulid-isolation
 ninja>=1.11.1.1
 # sentence-transformers>=2.2.0  # Already included in FlagEmbedding

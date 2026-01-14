@@ -674,100 +674,128 @@ def main():
     results_fp = open(results_file, 'a' if args.resume else 'w', encoding='utf-8')
     failures_fp = open(failures_file, 'a' if args.resume else 'w', encoding='utf-8')
 
-    for i, q in enumerate(questions, 1):
-        question_id = q.get('_id')
-        question = q['question']
-        gold_answer = q['answer']
+    # Filter out already processed questions
+    questions_to_process = [
+        q for q in questions
+        if q.get('_id') not in processed_question_ids
+    ]
 
-        if question_id in processed_question_ids:
-            print(f"[{i}/{len(questions)}] Skipping {question_id} (already saved)")
-            continue
+    if not questions_to_process:
+        print("All questions already processed!")
+        results_fp.close()
+        failures_fp.close()
+        return
 
-        print(f"[{i}/{len(questions)}] Processing {question_id}...")
-        print(f"  Q: {question[:80]}..." if len(question) > 80 else f"  Q: {question}")
+    # Process in batches for parallel efficiency
+    batch_size = args.num_questions  # Process all questions in one batch for max parallelism
+    # Or use smaller batches if needed: batch_size = min(16, len(questions_to_process))
+
+    print(f"\n[PARALLEL MODE] Processing {len(questions_to_process)} questions in parallel batches")
+    print(f"  Batch size: {batch_size}")
+
+    for batch_start in range(0, len(questions_to_process), batch_size):
+        batch_end = min(batch_start + batch_size, len(questions_to_process))
+        batch_questions = questions_to_process[batch_start:batch_end]
+
+        print(f"\n{'='*70}")
+        print(f"BATCH {batch_start // batch_size + 1}: Questions {batch_start + 1} to {batch_end}")
+        print(f"{'='*70}")
+
+        # Prepare question data for batch processing
+        batch_data = []
+        for q in batch_questions:
+            batch_data.append({
+                'id': q.get('_id'),
+                'question': q['question'],
+                'gold_answer': q['answer'],
+                'supporting_facts': q.get('supporting_facts'),
+            })
 
         try:
-            # Generate trajectory
-            trajectory = generator.generate_trajectory(
-                question=question,
-                gold_answer=gold_answer,
-                trajectory_id=question_id,
+            # Generate trajectories in PARALLEL (all questions × 1 trajectory each)
+            trajectories = generator.generate_batch_parallel(
+                questions=batch_data,
+                num_trajectories_per_question=1,
+                show_progress=True,
             )
 
-            if trajectory is None:
-                print(f"  ❌ Generation failed (all steps rejected)")
-                summary_stats['failed'] += 1
-                failure_rec = {
-                    'question_id': question_id,
-                    'question': question,
-                    'gold_answer': gold_answer,
-                    'failure_type': 'generation_failed',
-                    'error': 'all_steps_rejected',
-                    'dataset_idx': q.get('__dataset_idx'),
-                    'filtered_idx': q.get('__filtered_idx'),
-                    'question_level': q.get('level'),
-                }
-                failures_fp.write(json.dumps(failure_rec, ensure_ascii=False) + '\n')
-                failures_fp.flush()
+            # Process results
+            for q, trajectory in zip(batch_questions, trajectories):
+                question_id = q.get('_id')
+
+                if trajectory is None:
+                    print(f"  ❌ {question_id}: Generation failed")
+                    summary_stats['failed'] += 1
+                    failure_rec = {
+                        'question_id': question_id,
+                        'question': q['question'],
+                        'gold_answer': q['answer'],
+                        'failure_type': 'generation_failed',
+                        'error': 'all_steps_rejected',
+                        'dataset_idx': q.get('__dataset_idx'),
+                        'filtered_idx': q.get('__filtered_idx'),
+                        'question_level': q.get('level'),
+                    }
+                    failures_fp.write(json.dumps(failure_rec, ensure_ascii=False) + '\n')
+                    failures_fp.flush()
+                    if args.fsync:
+                        os.fsync(failures_fp.fileno())
+                    processed_question_ids.add(question_id)
+                    continue
+
+                # Format result
+                result = format_trajectory_for_review(trajectory, q)
+
+                # Add selection metadata
+                result['dataset_idx'] = q.get('__dataset_idx')
+                result['filtered_idx'] = q.get('__filtered_idx')
+                result['question_level'] = q.get('level')
+                result['run_id'] = run_id
+
+                # Write to file immediately
+                results_fp.write(json.dumps(result, ensure_ascii=False) + '\n')
+                results_fp.flush()
                 if args.fsync:
-                    os.fsync(failures_fp.fileno())
+                    os.fsync(results_fp.fileno())
+
                 processed_question_ids.add(question_id)
-                continue
+                update_summary_stats(summary_stats, result)
 
-            # Format result
-            result = format_trajectory_for_review(trajectory, q)
-
-            # Add selection metadata (helps deterministic continuation)
-            result['dataset_idx'] = q.get('__dataset_idx')
-            result['filtered_idx'] = q.get('__filtered_idx')
-            result['question_level'] = q.get('level')
-            result['run_id'] = run_id
-
-            # Write to file immediately (incremental save)
-            results_fp.write(json.dumps(result, ensure_ascii=False) + '\n')
-            results_fp.flush()
-            if args.fsync:
-                os.fsync(results_fp.fileno())
-
-            processed_question_ids.add(question_id)
-            update_summary_stats(summary_stats, result)
-
-            # Print summary
-            status = "✅" if result['is_correct'] else "❌"
-            rag_info = f"({result['num_rag_steps']} RAG steps)" if result['has_rag'] else "(CoT only)"
-
-            if result['has_rag']:
-                fc = result['format_compliance']
-                compliance_rate = fc['rag_fully_compliant'] / max(fc['total_rag_steps'], 1) * 100
-                rag_info += f" [Format: {fc['rag_fully_compliant']}/{fc['total_rag_steps']} ({compliance_rate:.0f}%)]"
-
-            print(f"  {status} {result['num_steps']} steps {rag_info}")
-
-            # Print progress every 100 questions
-            if i % 100 == 0:
-                print(f"\n✓ Progress: {i}/{len(questions)} questions completed ({summary_stats['correct']}/{summary_stats['total']} correct, {summary_stats['correct']/max(summary_stats['total'],1)*100:.1f}%)\n")
+                # Print summary
+                status = "✅" if result['is_correct'] else "❌"
+                rag_info = f"({result['num_rag_steps']} RAG)" if result['has_rag'] else "(CoT)"
+                print(f"  {status} {question_id[:20]}... {result['num_steps']} steps {rag_info}")
 
         except Exception as e:
-            print(f"  ❌ Error: {e}")
+            print(f"  ❌ Batch error: {e}")
             import traceback
             traceback.print_exc()
-            summary_stats['failed'] += 1
-            failure_rec = {
-                'question_id': question_id,
-                'question': question,
-                'gold_answer': gold_answer,
-                'failure_type': 'exception',
-                'error': str(e),
-                'dataset_idx': q.get('__dataset_idx'),
-                'filtered_idx': q.get('__filtered_idx'),
-                'question_level': q.get('level'),
-            }
-            failures_fp.write(json.dumps(failure_rec, ensure_ascii=False) + '\n')
-            failures_fp.flush()
-            if args.fsync:
-                os.fsync(failures_fp.fileno())
-            processed_question_ids.add(question_id)
-            continue
+
+            # Mark all questions in batch as failed
+            for q in batch_questions:
+                question_id = q.get('_id')
+                if question_id not in processed_question_ids:
+                    summary_stats['failed'] += 1
+                    failure_rec = {
+                        'question_id': question_id,
+                        'question': q['question'],
+                        'gold_answer': q['answer'],
+                        'failure_type': 'exception',
+                        'error': str(e),
+                        'dataset_idx': q.get('__dataset_idx'),
+                        'filtered_idx': q.get('__filtered_idx'),
+                        'question_level': q.get('level'),
+                    }
+                    failures_fp.write(json.dumps(failure_rec, ensure_ascii=False) + '\n')
+                    failures_fp.flush()
+                    if args.fsync:
+                        os.fsync(failures_fp.fileno())
+                    processed_question_ids.add(question_id)
+
+        # Print progress after each batch
+        print(f"\n✓ Batch complete: {summary_stats['total']} processed, "
+              f"{summary_stats['correct']}/{summary_stats['total']} correct "
+              f"({summary_stats['correct']/max(summary_stats['total'],1)*100:.1f}%)")
 
     # Close results file
     results_fp.close()
