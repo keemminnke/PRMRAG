@@ -123,3 +123,76 @@ class BGEReranker:
         if top_k is not None:
             return reranked_docs[:top_k]
         return reranked_docs
+
+    def batch_rerank(
+        self,
+        queries: List[str],
+        documents_list: List[List[Dict[str, Any]]],
+        top_k: int = None
+    ) -> List[List[Dict[str, Any]]]:
+        """Batch rerank documents for multiple queries.
+
+        Efficiently processes all query-document pairs in larger batches
+        to maximize GPU utilization.
+
+        Args:
+            queries: List of search queries
+            documents_list: List of document lists (one per query)
+            top_k: Number of top documents to return per query
+
+        Returns:
+            List of reranked document lists
+        """
+        if not queries:
+            return []
+
+        # Flatten all query-document pairs
+        all_pairs = []
+        pair_indices = []  # Track which query each pair belongs to
+
+        for query_idx, (query, documents) in enumerate(zip(queries, documents_list)):
+            for doc in documents:
+                all_pairs.append([query, doc['text']])
+                pair_indices.append((query_idx, doc))
+
+        if not all_pairs:
+            return [[] for _ in queries]
+
+        # Compute all scores in batches
+        all_scores = []
+        for i in range(0, len(all_pairs), self.batch_size):
+            batch_pairs = all_pairs[i:i + self.batch_size]
+
+            inputs = self.tokenizer(
+                batch_pairs,
+                padding=True,
+                truncation=True,
+                max_length=512,
+                return_tensors='pt'
+            ).to(self.device)
+
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                batch_scores = outputs.logits.squeeze(-1).cpu().tolist()
+
+                if isinstance(batch_scores, float):
+                    batch_scores = [batch_scores]
+
+                all_scores.extend(batch_scores)
+
+        # Group results by query
+        results_by_query = [[] for _ in queries]
+        for (query_idx, doc), score in zip(pair_indices, all_scores):
+            reranked_doc = doc.copy()
+            reranked_doc['rerank_score'] = score
+            results_by_query[query_idx].append(reranked_doc)
+
+        # Sort each query's results and apply top_k
+        final_results = []
+        for docs in results_by_query:
+            docs.sort(key=lambda x: x['rerank_score'], reverse=True)
+            if top_k is not None:
+                docs = docs[:top_k]
+            final_results.append(docs)
+
+        return final_results

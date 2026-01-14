@@ -49,26 +49,27 @@ def parse_rag_content(content: str) -> Dict[str, Optional[str]]:
         'sub_answer': None,
     }
 
-    # Parse Thought
-    thought_match = re.search(r'Thought:\s*(.+?)(?=\n(?:Action:|Observation:|Sub-answer:|$))', content, re.DOTALL | re.IGNORECASE)
+    # Parse Thought (supports both "Thought:" and "**Thought:**" markdown format)
+    thought_match = re.search(r'\*?\*?Thought:\*?\*?\s*(.+?)(?=\n(?:\*?\*?Action:|\*?\*?Observation:|Sub-answer:|$))', content, re.DOTALL | re.IGNORECASE)
     if thought_match:
         result['thought'] = thought_match.group(1).strip()
 
     # Parse Action and Action Input
-    # Match: Search[query="..."], Finish[answer="..."], or legacy Search[query]
-    action_match = re.search(r'Action:\s*(Search|Finish)\[(?:query=|answer=)?"?(.+?)"?\]', content, re.IGNORECASE)
+    # Match: Search[query="..."], Finish[answer="..."], Reason[content="..."], or legacy Search[query]
+    # Supports both "Action:" and "**Action:**" markdown format
+    action_match = re.search(r'\*?\*?Action:\*?\*?\s*(Search|Finish|Reason)\[(?:query=|answer=|content=)?"?(.+?)"?\]', content, re.IGNORECASE)
     if action_match:
         result['action'] = action_match.group(1)
         result['action_input'] = action_match.group(2).strip()
 
-    # Parse Observation
+    # Parse Observation (supports both "Observation:" and "**Observation:**" markdown format)
     # Match until next section or end of string
-    obs_match = re.search(r'Observation:\s*(.+?)(?=\n\s*(?:Thought:|Action:|Sub-answer:|Final Answer:)|$)', content, re.DOTALL | re.IGNORECASE)
+    obs_match = re.search(r'\*?\*?Observation:\*?\*?\s*(.+?)(?=\n\s*(?:\*?\*?Thought:|\*?\*?Action:|Sub-answer:|Final Answer:)|$)', content, re.DOTALL | re.IGNORECASE)
     if obs_match:
         result['observation'] = obs_match.group(1).strip()
     else:
         # Fallback: match until end of string
-        obs_match_simple = re.search(r'Observation:\s*(.+)', content, re.DOTALL | re.IGNORECASE)
+        obs_match_simple = re.search(r'\*?\*?Observation:\*?\*?\s*(.+)', content, re.DOTALL | re.IGNORECASE)
         if obs_match_simple:
             result['observation'] = obs_match_simple.group(1).strip()
 
@@ -378,8 +379,10 @@ class AdaptiveTrajectoryGenerator:
 
             # Intent-based routing (same logic for all steps)
             # CHECK INTENT FIRST: Does model want to finish or search?
-            has_finish_intent = "Action: Finish" in cot_step_content or "Action:Finish" in cot_step_content
-            has_search_intent = "Action: Search" in cot_step_content or "Action:Search" in cot_step_content
+            # Supports both "Action:" and "**Action:**" markdown format
+            content_lower = cot_step_content.lower()
+            has_finish_intent = "action: finish" in content_lower or "action:finish" in content_lower
+            has_search_intent = "action: search" in content_lower or "action:search" in content_lower
 
             # ================================================================
             # PATH 0: VOLUNTARY FINISH - Model wants to provide final answer
@@ -2047,9 +2050,10 @@ class AdaptiveTrajectoryGenerator:
                 print(f"\n  [{ts.trajectory_id}] Step {step_num}:")
                 print(f"    CoT MC = {mc_cot:.3f}, MC_prev = {ts.mc_prev:.3f}")
 
-                # Check intent
-                has_finish_intent = "Action: Finish" in cot_content or "Action:Finish" in cot_content
-                has_search_intent = "Action: Search" in cot_content or "Action:Search" in cot_content
+                # Check intent (supports both "Action:" and "**Action:**" markdown format)
+                content_lower = cot_content.lower()
+                has_finish_intent = "action: finish" in content_lower or "action:finish" in content_lower
+                has_search_intent = "action: search" in content_lower or "action:search" in content_lower
 
                 # PATH 0: VOLUNTARY FINISH
                 if has_finish_intent:

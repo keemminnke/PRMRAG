@@ -221,7 +221,9 @@ class HybridRetriever:
         queries: List[str],
         top_k: int = 5
     ) -> List[List[Dict[str, Any]]]:
-        """Retrieve for multiple queries.
+        """Retrieve for multiple queries with batch processing.
+
+        Uses batch encoding for BGE (main bottleneck) to improve efficiency.
 
         Args:
             queries: List of search queries
@@ -230,9 +232,70 @@ class HybridRetriever:
         Returns:
             List of retrieval results
         """
-        all_results = []
+        if not queries:
+            return []
+
+        # Step 1: Batch retrieve from BGE (main bottleneck - uses batch encoding)
+        bge_all_results = self.bge.batch_retrieve(queries, top_k=self.k_dense)
+
+        # Step 2: Retrieve from BM25 (fast, no batching needed)
+        bm25_all_results = []
         for query in queries:
-            results = self.retrieve(query, top_k)
-            all_results.append(results)
+            bm25_results = self.bm25.retrieve(query, top_k=self.k_sparse)
+            bm25_all_results.append(bm25_results)
+
+        # Step 3: Fuse results for each query
+        all_candidates = []
+        for i, query in enumerate(queries):
+            bm25_results = bm25_all_results[i]
+            bge_results = bge_all_results[i]
+
+            # Fuse scores
+            if self.fusion_method == "rrf":
+                fused_scores = self._fuse_rrf(bm25_results, bge_results)
+            elif self.fusion_method == "weighted":
+                fused_scores = self._fuse_weighted(bm25_results, bge_results)
+            else:
+                raise ValueError(f"Unknown fusion method: {self.fusion_method}")
+
+            # Get candidates
+            num_candidates = self.rerank_top_n if self.reranker else top_k
+            sorted_doc_ids = sorted(
+                fused_scores.keys(),
+                key=lambda doc_id: fused_scores[doc_id],
+                reverse=True
+            )[:num_candidates]
+
+            # Build doc map
+            doc_map = {}
+            for result in bm25_results + bge_results:
+                doc_id = result['doc_id']
+                if doc_id not in doc_map:
+                    doc_map[doc_id] = result
+
+            # Build candidate results
+            candidates = []
+            for doc_id in sorted_doc_ids:
+                doc = doc_map[doc_id]
+                candidates.append({
+                    'doc_id': doc_id,
+                    'title': doc['title'],
+                    'text': doc['text'],
+                    'score': fused_scores[doc_id],
+                })
+            all_candidates.append(candidates)
+
+        # Step 4: Rerank if reranker is available
+        if self.reranker:
+            # Batch rerank if supported, otherwise sequential
+            if hasattr(self.reranker, 'batch_rerank'):
+                all_results = self.reranker.batch_rerank(queries, all_candidates, top_k=top_k)
+            else:
+                all_results = []
+                for query, candidates in zip(queries, all_candidates):
+                    reranked = self.reranker.rerank(query, candidates, top_k=top_k)
+                    all_results.append(reranked)
+        else:
+            all_results = all_candidates
 
         return all_results
