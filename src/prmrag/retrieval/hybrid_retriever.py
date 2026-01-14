@@ -221,7 +221,10 @@ class HybridRetriever:
         queries: List[str],
         top_k: int = 5
     ) -> List[List[Dict[str, Any]]]:
-        """Retrieve for multiple queries.
+        """Batch retrieve for multiple queries using efficient batching.
+
+        This method batches the underlying BGE retriever calls for much faster
+        embedding encoding (single batch vs. N individual calls).
 
         Args:
             queries: List of search queries
@@ -230,9 +233,66 @@ class HybridRetriever:
         Returns:
             List of retrieval results
         """
+        if not queries:
+            return []
+
+        # Batch BM25 retrieval (usually fast, but batch if supported)
+        if hasattr(self.bm25, 'batch_retrieve'):
+            all_bm25_results = self.bm25.batch_retrieve(queries, top_k=self.k_sparse)
+        else:
+            all_bm25_results = [self.bm25.retrieve(q, top_k=self.k_sparse) for q in queries]
+
+        # Batch BGE retrieval (critical for performance - encodes all queries at once)
+        if hasattr(self.bge, 'batch_retrieve'):
+            all_bge_results = self.bge.batch_retrieve(queries, top_k=self.k_dense)
+        else:
+            all_bge_results = [self.bge.retrieve(q, top_k=self.k_dense) for q in queries]
+
+        # Fuse and optionally rerank for each query
         all_results = []
-        for query in queries:
-            results = self.retrieve(query, top_k)
-            all_results.append(results)
+        for i, query in enumerate(queries):
+            bm25_results = all_bm25_results[i]
+            bge_results = all_bge_results[i]
+
+            # Fuse scores
+            if self.fusion_method == "rrf":
+                fused_scores = self._fuse_rrf(bm25_results, bge_results)
+            elif self.fusion_method == "weighted":
+                fused_scores = self._fuse_weighted(bm25_results, bge_results)
+            else:
+                raise ValueError(f"Unknown fusion method: {self.fusion_method}")
+
+            # Get candidates
+            num_candidates = self.rerank_top_n if self.reranker else top_k
+            sorted_doc_ids = sorted(
+                fused_scores.keys(),
+                key=lambda doc_id: fused_scores[doc_id],
+                reverse=True
+            )[:num_candidates]
+
+            # Build candidate results
+            doc_map = {}
+            for result in bm25_results + bge_results:
+                doc_id = result['doc_id']
+                if doc_id not in doc_map:
+                    doc_map[doc_id] = result
+
+            candidate_results = []
+            for doc_id in sorted_doc_ids:
+                doc = doc_map[doc_id]
+                candidate_results.append({
+                    'doc_id': doc_id,
+                    'title': doc['title'],
+                    'text': doc['text'],
+                    'score': fused_scores[doc_id],
+                })
+
+            # Rerank if available
+            if self.reranker:
+                final_results = self.reranker.rerank(query, candidate_results, top_k=top_k)
+            else:
+                final_results = candidate_results
+
+            all_results.append(final_results)
 
         return all_results
