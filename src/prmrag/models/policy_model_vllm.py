@@ -196,50 +196,19 @@ class PolicyModelVLLM:
         return results
 
     def format_rollout_prompt(self, user_message: str) -> str:
-        """Format prompt for MC rollout (complete solution generation).
+        """Format prompt for MC rollout - uses same system prompt as main generation.
+
+        Rollout should use the same action space (Search, Reason, Finish) as main generation
+        to accurately estimate success probability with RAG capability.
 
         Args:
             user_message: User's message/prompt
 
         Returns:
-            Formatted prompt for rollout
+            Formatted prompt for rollout (same format as main generation)
         """
-        # Rollout system prompt - generate complete solution at once
-        system_prompt = """You are an expert question-answering agent solving problems through reasoning.
-
-Your task: Given a question and any previous reasoning steps, continue reasoning until you reach a COMPLETE final answer.
-
-IMPORTANT:
-- Generate ALL reasoning steps needed (don't stop early)
-- Think through the problem step by step
-- Provide a specific, concrete final answer
-- Your answer should directly answer the question asked
-
-Example format:
-[Continue reasoning from where it left off]
-Step X: [your thinking]
-Step X+1: [more thinking]
-...
-Therefore, the answer is: [specific answer]"""
-
-        if hasattr(self.tokenizer, 'apply_chat_template'):
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message}
-            ]
-            return self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True
-            )
-        else:
-            # Fallback to manual format
-            return f"""<|im_start|>system
-{system_prompt}<|im_end|>
-<|im_start|>user
-{user_message}<|im_end|>
-<|im_start|>assistant
-"""
+        # Use the same system prompt as main generation for consistent behavior
+        return self.format_prompt_for_qwen(user_message)
 
     def format_prompt_for_qwen(self, user_message: str) -> str:
         """Format prompt for Qwen2.5 with Adaptive Reasoning strategy.

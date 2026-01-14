@@ -106,14 +106,13 @@ class JudgeLabeler(BaseLabeler):
     def _build_whole_trajectory_prompt(self, trajectory: Trajectory) -> str:
         """Build prompt for evaluating all steps in one call.
 
-        VersaPRM의 평가 기준을 유지하면서 한 번의 호출로 모든 스텝을 평가.
+        Strict Process Supervision: 검색 전략과 증거 기반 추론을 엄격히 평가.
         """
         # 1. 전체 Trajectory 구성
         interaction_history = []
         for i, step in enumerate(trajectory.steps, 1):
             step_text = f"## Step {i}\n"
             step_text += f"**Action:** {step.action}\n"
-            # [추가] Finish 스텝이면 모델의 최종 예측값 공개
             if "Finish" in str(step.action) and trajectory.final_answer:
                 step_text += f"**Model's Final Prediction:** {trajectory.final_answer}\n"
             if step.observation and step.observation.strip():
@@ -123,58 +122,44 @@ class JudgeLabeler(BaseLabeler):
             interaction_history.append(step_text)
 
         history_str = "\n\n".join(interaction_history)
+        gold_answer = trajectory.gold_answer if self.use_gold_answer else "N/A"
 
-        # 2. VersaPRM 프롬프트 (다중 스텝 평가)
+        # 2. Strict Process Supervisor 프롬프트
         prompt = f"""You are a **Strict Process Supervisor** for an Active RAG (Retrieval-Augmented Generation) agent.
-                Your goal is NOT just to check if the answer is correct, but to judge whether the agent's **search strategy** and **reliance on evidence** are flawless.
-                You must penalize "lucky guesses" (correct answers without evidence) and reward "strategic resilience" (retrying after failure).
+Your goal is NOT just to check if the answer is correct, but to judge whether the agent's **search strategy** and **reliance on evidence** are flawless.
+You must penalize "lucky guesses" (correct answers without evidence) and reward "strategic resilience" (retrying after failure).
 
-                # Task
-                You will be given a full interaction trajectory consisting of multiple steps.
-                Your task is to **evaluate EACH step independently** based on the criteria below and assign a label (GOOD or BAD).
+# Task
+You will be given a full interaction trajectory consisting of multiple steps.
+Your task is to **evaluate EACH step independently** based on the criteria below and assign a label (GOOD or BAD).
 
-                "# Evaluation Criteria (Strict Process Supervision)",
-                "Evaluate whether the agent correctly identifies the need for external information.",
-                "",
-                "**Case 0: MISSING SEARCH (The 'Overconfidence' Error)**",
-                "If the Agent chooses to **Answer (Finish)** or **Reason** using internal knowledge WITHOUT any prior successful Search:",
-                "**BAD if:**",
-                "- **Unsubstantiated Claim:** The question asks for specific factual details (e.g., obscure names, dates, statistics, recent events) that require verification, but the Agent skips 'Search' and relies on internal memory.",
-                "- **Hallucination Risk:** The Agent generates specific entities or facts that are not common knowledge, without any retrieved Observation to back them up.",
-                "**GOOD if:**",
-                "- **Common Knowledge:** The question is trivial or general knowledge (e.g., 'What is 2+2?', 'Who is the president of USA? - if widely known') where search is genuinely unnecessary.",
-                "**Case 1: Action is SEARCH**",
-                "GOOD if:",
-                "- **Query Quality:** The query is specific, relevant, and logically derived.",
-                "- **Remediation:** If previous search failed, the agent tries a DIFFERENT strategy/keyword.",
-                "BAD if:",
-                "- **Looping:** Repeats the exact same failed query.",
-                "- **Vague:** Query is too generic to be useful.",
-                "",
-                "**Case 2: Action is FINISH / REASON (The 'Answering' Phase)**",
-                "GOOD if:",
-                "- **Evidence-Based:** The answer is strictly derived from the provided Observation.",
-                "- **Sufficiency:** The retrieved information is actually sufficient to answer the question.",
-                "BAD if:",
-                "- **Parametric Shortcut (CRITICAL):** The Observation is EMPTY or IRRELEVANT, but the agent **answers anyway using internal knowledge** instead of searching. (Even if the answer is factually correct, this is BAD in RAG context).",
-                "- **Hallucination:** Claims facts not found in the Observation.",
-                "",
-                "**Case 3: Handling Retrieval Failures**",
-                "If the previous Observation was IRRELEVANT or EMPTY:",
-                "GOOD if:",
-                "- **Recognition:** The agent admits 'I did not find the information'.",
-                "- **Retry:** The agent immediately performs a **Search** action.",
-                "BAD if:",
-                "- **Ignoring Failure:** The agent ignores the bad result and proceeds to answer.",
-                "- **Lazy Finish:** The agent decides to 'Finish' without trying to search again, relying on guess work.",
-                "",
+# Evaluation Criteria (Strict Process Supervision)
+
+**Case 0: MISSING SEARCH (The 'Overconfidence' Error)**
+If the Agent chooses to **Answer (Finish)** or **Reason** using internal knowledge WITHOUT any prior successful Search:
+- **BAD if:** The question asks for specific factual details (e.g., obscure names, dates, statistics) that require verification, but the Agent skips 'Search' and relies on internal memory.
+- **GOOD if:** The question is trivial or general knowledge where search is genuinely unnecessary.
+
+**Case 1: Action is SEARCH**
+- **GOOD if:** The query is specific, relevant, and logically derived. If previous search failed, the agent tries a DIFFERENT strategy.
+- **BAD if:** Repeats the exact same failed query, or query is too vague to be useful.
+
+**Case 2: Action is FINISH / REASON (The 'Answering' Phase)**
+- **GOOD if:** The answer is strictly derived from the provided Observation with sufficient evidence.
+- **BAD if:** The Observation is EMPTY or IRRELEVANT, but the agent answers anyway using internal knowledge (Parametric Shortcut). Even if factually correct, this is BAD in RAG context.
+
+**Case 3: Handling Retrieval Failures**
+If the previous Observation was IRRELEVANT or EMPTY:
+- **GOOD if:** The agent admits failure and immediately performs another **Search** action.
+- **BAD if:** The agent ignores the bad result and proceeds to answer (Lazy Finish).
+
 # Input Data
 
 ## Question
 {trajectory.question}
 
 ## Correct Answer (Ground Truth)
-{trajectory.gold_answer if self.use_gold_answer else "N/A"}
+{gold_answer}
 
 ## Full Trajectory
 {history_str}
@@ -188,8 +173,7 @@ Example Output Format:
 ```json
 [
   {{"step": 1, "label": "GOOD", "reasoning": "The search query is specific and relevant."}},
-  {{"step": 2, "label": "BAD", "reasoning": "The model mentions 'Apple released output', but the Observation only talks about 'Microsoft'. This is a hallucination."}},
-  ...
+  {{"step": 2, "label": "BAD", "reasoning": "The model claims facts not in the Observation. This is a hallucination."}}
 ]
 ```
 
@@ -269,155 +253,6 @@ Evaluate all {len(trajectory.steps)} steps now."""
 
         return labels
 
-    def _build_versaprm_prompt(
-        self,
-        trajectory: Trajectory,
-        step_idx: int,
-    ) -> str:
-        """Build VersaPRM-style judge prompt (single step, legacy).
-
-        VersaPRM evaluates whether a step is helpful for reaching the correct answer.
-        """
-        step = trajectory.steps[step_idx]
-        prefix_steps = trajectory.get_prefix(step_idx - 1) if step_idx > 0 else []
-
-        prompt_parts = [
-            "You are an expert evaluator for question-answering systems.",
-            "",
-            "# Task",
-            "Evaluate whether a reasoning step is GOOD or BAD for answering the question correctly.",
-            "",
-            "# Evaluation Criteria",
-            "A step is GOOD if:",
-            "- It retrieves relevant information that helps answer the question",
-            "- It makes correct logical inferences",
-            "- The retrieved passages are relevant and useful",
-            "",
-            "A step is BAD if:",
-            "- It retrieves irrelevant or misleading information",
-            "- It makes incorrect logical inferences",
-            "- The passages are off-topic or unhelpful",
-            "",
-            f"# Question\n{trajectory.question}",
-        ]
-
-        # Add gold answer if available
-        if self.use_gold_answer and trajectory.gold_answer:
-            prompt_parts.extend([
-                "",
-                f"# Correct Answer\n{trajectory.gold_answer}",
-            ])
-
-        # Add supporting facts if available
-        if self.use_supporting_facts and trajectory.supporting_facts:
-            prompt_parts.extend([
-                "",
-                "# Supporting Facts (for reference)",
-            ])
-            for i, fact in enumerate(trajectory.supporting_facts, 1):
-                prompt_parts.append(f"{i}. {fact}")
-
-        # Add previous steps for context
-        if prefix_steps:
-            prompt_parts.extend([
-                "",
-                "# Previous Steps (Context)",
-            ])
-            for i, prev_step in enumerate(prefix_steps, 1):
-                prompt_parts.append(f"Step {i}:")
-                prompt_parts.append(f"{prev_step.action}")
-                if prev_step.observation:
-                    # No truncation - Judge needs full context to detect hallucinations
-                    prompt_parts.append(f"Observation: {prev_step.observation}")
-                prompt_parts.append("")
-
-        # Add current step to evaluate
-        # This step's Observation is CRITICAL for evaluation
-        prompt_parts.extend([
-            "",
-            "# Current Step to Evaluate",
-            f"Action Segment: {step.action}",  # Contains "Thought: ...\nAction: ..."
-        ])
-
-        # [추가] 마지막 스텝(Finish)이라면 모델이 낸 '최종 예측값'을 Judge에게 공개
-        if "Finish" in str(step.action) and trajectory.final_answer:
-            prompt_parts.append(f"Model's Final Prediction: {trajectory.final_answer}")
-
-        # Show retrieved passages (Observation) for current step only
-        if step.observation and step.observation.strip():
-            prompt_parts.append("\nObservation (Retrieved Information):")
-            prompt_parts.append(step.observation)
-        elif step.passages and step.passages[0]:
-            # Fallback: if observation is empty but passages exist
-            prompt_parts.append("\nObservation (Retrieved Information):")
-            for i, passage in enumerate(step.passages, 1):
-                if passage and passage.strip():
-                    prompt_parts.append(f"{i}. {passage}")
-
-        prompt_parts.extend([
-            "",
-            "# Your Evaluation Task",
-            "Please think step by step to evaluate this interaction.",
-            "",
-            "**CRITICAL RULE: Even if the final answer matches the Correct Answer, you MUST label the step as BAD if:**",
-            "- The Model claims facts (names, dates, numbers) that are NOT present in the Observation",
-            "- The Model makes inferences not supported by the retrieved information",
-            "- The Model hallucinates or fabricates information",
-            "- The search query is irrelevant, too vague, or poorly formulated (for Search steps)",
-            "- The retrieved documents don't help answer the question (for Search steps)",
-            "",
-            "Evaluation Steps:",
-            "1. **For Search steps**: Evaluate the search query quality",
-            "   - Is the query relevant to answering the original question?",
-            "   - Is the query specific enough (not too vague)?",
-            "   - Does the query consider previous steps' context?",
-            "   - Did the search retrieve helpful information?",
-            "",
-            "2. **For all steps**: Check grounding in retrieved information",
-            "   - Carefully read the 'Observation' and identify what factual information it actually contains",
-            "   - Check if the Model's 'Thought' or 'Action' makes claims beyond what the Observation supports",
-            "",
-            "3. **Verify progress toward answer**",
-            "   - Does the step move toward the Correct Answer using ONLY the information in Observation?",
-            "",
-            "4. **Final determination**: GOOD or BAD",
-            "",
-            "Output Format:",
-            "Thinking Process:",
-            "[Write down your step-by-step analysis here. Be verbose and critical.]",
-            "",
-            "Final Verification:",
-            "Reasoning: [Summary of your judgment - explain if hallucination was detected]",
-            "Label: [GOOD or BAD]"
-        ])
-
-        return "\n".join(prompt_parts)
-
-    def _build_default_prompt(
-        self,
-        trajectory: Trajectory,
-        step_idx: int,
-    ) -> str:
-        """Build default judge prompt."""
-        step = trajectory.steps[step_idx]
-
-        prompt = f"""Evaluate the following reasoning step:
-
-Question: {trajectory.question}
-Gold Answer: {trajectory.gold_answer or 'N/A'}
-
-Step {step_idx + 1}:
-Action: {step.action}
-Observation: {step.observation}
-
-Is this step GOOD (helpful) or BAD (unhelpful) for answering the question?
-
-IMPORTANT: Output ONLY the following two lines:
-Reasoning: [One sentence, max 50 words]
-Label: [GOOD or BAD]
-"""
-        return prompt
-
     def _call_llm_with_retry(self, prompt: str) -> str:
         """Call LLM with retry logic.
 
@@ -490,74 +325,6 @@ Label: GOOD"""
 {user_message}<|im_end|>
 <|im_start|>assistant
 """
-
-    def _parse_judge_response(self, response: str) -> tuple[str, str, float]:
-        """Parse LLM judge response.
-
-        QwQ-32B generates long chain-of-thought reasoning before final judgment.
-        This parser extracts ONLY the final structured output (last occurrence).
-
-        Args:
-            response: Raw LLM response (may contain long CoT)
-
-        Returns:
-            Tuple of (label, reasoning, confidence)
-        """
-        import re
-
-        # Default values - CRITICAL: BAD instead of GOOD to avoid false positives
-        label = "BAD"  # Conservative: parsing failure = don't trust the step
-        reasoning = ""
-        confidence = 1.0  # Fixed confidence since we removed it from prompt
-
-        # Strategy: Parse from END to get final structured output
-        # QwQ often outputs long reasoning, then "Reasoning: ... Label: ..." at end
-        lines = response.strip().split("\n")
-
-        # Regex patterns for flexible matching (handles **Label:**, Final Label:, etc.)
-        label_pattern = re.compile(r'(?:Final\s+)?Label:\s*\*?\*?([A-Z]+)\*?\*?', re.IGNORECASE)
-        reasoning_pattern = re.compile(r'Reasoning:\s*(.+)', re.IGNORECASE)
-
-        # Reverse iterate to find LAST occurrence of each field
-        for line in reversed(lines):
-            line = line.strip()
-
-            # Find last Label using regex
-            if not label or label == "BAD":  # Only override default if we find valid label
-                match = label_pattern.search(line)
-                if match:
-                    found_label = match.group(1).upper()
-                    if "GOOD" in found_label:
-                        label = "GOOD"
-                    elif "BAD" in found_label:
-                        label = "BAD"
-
-            # Find last Reasoning using regex
-            if reasoning == "":
-                match = reasoning_pattern.search(line)
-                if match:
-                    reasoning = match.group(1).strip()
-                    # If found both, we're done
-                    if label in ["GOOD", "BAD"]:
-                        break
-
-        # Smart truncate: keep full if short, otherwise truncate at sentence boundary
-        max_length = 200
-        if len(reasoning) > max_length:
-            # Try to find last sentence boundary before max_length
-            truncated = reasoning[:max_length]
-            # Look for sentence endings: ., !, ?
-            last_period = max(truncated.rfind('. '), truncated.rfind('.'))
-            last_exclaim = truncated.rfind('!')
-            last_question = truncated.rfind('?')
-            last_boundary = max(last_period, last_exclaim, last_question)
-
-            if last_boundary > max_length // 2:  # Only use if boundary is past halfway
-                reasoning = reasoning[:last_boundary + 1]
-            else:
-                reasoning = truncated + "..."
-
-        return label, reasoning, confidence
 
     def label_batch(
         self,
