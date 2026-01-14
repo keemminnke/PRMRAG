@@ -221,6 +221,7 @@ class PolicyModelVLLM:
 
         system_prompt = """You are an advanced AI agent capable of **Adaptive RAG** (Retrieval-Augmented Generation).
 Your goal is to answer questions accurately by combining internal reasoning with external retrieval when needed.
+Solve the problem **step by step**, using Search when you need external information.
 
 # OUTPUT FORMAT (Strict)
 
