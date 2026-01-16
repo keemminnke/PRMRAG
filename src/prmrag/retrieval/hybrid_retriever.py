@@ -249,7 +249,7 @@ class HybridRetriever:
             all_bge_results = [self.bge.retrieve(q, top_k=self.k_dense) for q in queries]
 
         # Fuse and optionally rerank for each query
-        all_results = []
+        all_candidates = []
         for i, query in enumerate(queries):
             bm25_results = all_bm25_results[i]
             bge_results = all_bge_results[i]
@@ -287,12 +287,19 @@ class HybridRetriever:
                     'score': fused_scores[doc_id],
                 })
 
-            # Rerank if available
-            if self.reranker:
-                final_results = self.reranker.rerank(query, candidate_results, top_k=top_k)
-            else:
-                final_results = candidate_results
+            all_candidates.append(candidate_results)
 
-            all_results.append(final_results)
+        # Batch rerank all candidates at once (much faster than sequential)
+        if self.reranker:
+            if hasattr(self.reranker, 'batch_rerank'):
+                all_results = self.reranker.batch_rerank(queries, all_candidates, top_k=top_k)
+            else:
+                # Fallback to sequential reranking
+                all_results = []
+                for query, candidates in zip(queries, all_candidates):
+                    reranked = self.reranker.rerank(query, candidates, top_k=top_k)
+                    all_results.append(reranked)
+        else:
+            all_results = all_candidates
 
         return all_results

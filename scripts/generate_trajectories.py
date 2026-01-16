@@ -2,7 +2,7 @@
 """Stage 1: Generate trajectories only (no Judge evaluation).
 
 Generate N trajectories per question using Policy model.
-Uses HYBRID retrieval (BM25 + BGE-M3) with RRF fusion + BGE Reranker.
+Uses Dense retrieval (BGE-M3) + BGE Reranker - Fully GPU accelerated.
 
 Usage:
     python scripts/generate_trajectories.py \
@@ -25,9 +25,44 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from prmrag.models import load_policy_model
 from prmrag.generation.adaptive_generator import SimpleTrajectoryGenerator
 from prmrag.retrieval.bge_retriever import BGERetriever
-from prmrag.retrieval.bm25_retriever import BM25Retriever
-from prmrag.retrieval.hybrid_retriever import HybridRetriever
 from prmrag.retrieval.bge_reranker import BGEReranker
+
+
+class DenseRetrieverWithReranker:
+    """BGE Dense Retriever + Reranker (no BM25, fully GPU-accelerated)."""
+
+    def __init__(self, bge_retriever, reranker, top_k_candidates: int = 50):
+        self.bge = bge_retriever
+        self.reranker = reranker
+        self.top_k_candidates = top_k_candidates
+        print(f"✓ Dense retriever initialized (BGE + Reranker)")
+
+    def retrieve(self, query: str, top_k: int = 5):
+        """Single query retrieval."""
+        # Get candidates from BGE
+        candidates = self.bge.retrieve(query, top_k=self.top_k_candidates)
+        # Rerank
+        if self.reranker:
+            return self.reranker.rerank(query, candidates, top_k=top_k)
+        return candidates[:top_k]
+
+    def batch_retrieve(self, queries, top_k: int = 5):
+        """Batch retrieval - fully GPU accelerated."""
+        if not queries:
+            return []
+
+        # Batch BGE retrieval (GPU)
+        all_candidates = self.bge.batch_retrieve(queries, top_k=self.top_k_candidates)
+
+        # Batch rerank (GPU)
+        if self.reranker and hasattr(self.reranker, 'batch_rerank'):
+            return self.reranker.batch_rerank(queries, all_candidates, top_k=top_k)
+        elif self.reranker:
+            # Fallback to sequential
+            return [self.reranker.rerank(q, c, top_k=top_k)
+                    for q, c in zip(queries, all_candidates)]
+        else:
+            return [c[:top_k] for c in all_candidates]
 
 
 def get_truncated_text(doc_text_list, max_chars=1200):
@@ -141,6 +176,8 @@ def main():
                         help='Number of questions per batch (default: 50)')
     parser.add_argument('--limit', type=int, default=None,
                         help='Limit number of questions (for testing)')
+    parser.add_argument('--resume', action='store_true',
+                        help='Resume from existing output file (skip already processed questions)')
 
     # Model settings
     parser.add_argument('--policy_model', type=str, default='Qwen/Qwen2.5-7B-Instruct',
@@ -173,7 +210,7 @@ def main():
     print(f"Samples per question: {args.num_samples}")
     print(f"Batch size: {args.batch_size}")
     print(f"Temperature: {args.temperature}")
-    print(f"Retriever: HybridRetriever (BM25 + BGE-M3) + RRF + Reranker")
+    print(f"Retriever: Dense (BGE-M3 + Reranker) - Fully GPU accelerated")
     print("=" * 70)
 
     # Load questions
@@ -189,8 +226,8 @@ def main():
     corpus_file = data_dir / "kilt" / "kilt_knowledgesource.json"
     corpus = load_kilt_corpus(corpus_file, limit=args.corpus_limit)
 
-    # [2] Initialize retrievers
-    print(f"\n[2/4] Initializing HYBRID retriever (BM25 + BGE-M3)...")
+    # [2] Initialize Dense Retriever (BGE + Reranker, fully GPU)
+    print(f"\n[2/4] Initializing Dense retriever (BGE-M3 + Reranker)...")
 
     # BGE retriever
     embedding_cache = data_dir / "embeddings" / "kilt_wikipedia_bge_m3.npy"
@@ -201,30 +238,17 @@ def main():
         embedding_cache_path=str(embedding_cache)
     )
 
-    # BM25 retriever
-    bm25_cache = data_dir / "indexes" / "kilt_wikipedia_bm25.pkl"
-    print(f"  [2.2] Initializing BM25 retriever...")
-    bm25_retriever = BM25Retriever(
-        corpus=corpus,
-        index_cache_path=str(bm25_cache)
-    )
+    # BGE Reranker
+    print(f"  [2.2] Initializing BGE Reranker...")
+    reranker = BGEReranker(device="cuda", batch_size=64)
 
-    # BGE Reranker (always enabled)
-    print(f"  [2.3] Initializing BGE Reranker...")
-    reranker = BGEReranker(device="cuda")
-
-    # Hybrid retriever (RRF fusion + Reranker)
-    print(f"  [2.4] Combining with RRF fusion + Reranker...")
-    retriever = HybridRetriever(
-        bm25_retriever=bm25_retriever,
+    # Combine BGE + Reranker (fully GPU accelerated)
+    print(f"  [2.3] Combining BGE + Reranker...")
+    retriever = DenseRetrieverWithReranker(
         bge_retriever=bge_retriever,
-        fusion_method="rrf",
-        k_sparse=50,
-        k_dense=50,
         reranker=reranker,
-        rerank_top_n=args.rerank_top_n,
+        top_k_candidates=args.rerank_top_n,
     )
-    print(f"✓ Hybrid retriever initialized (RRF + Reranker)")
 
     # [3] Initialize policy model
     print(f"\n[3/4] Loading policy model...")
@@ -245,52 +269,115 @@ def main():
     }
     generator = SimpleTrajectoryGenerator(policy_model, retriever, generator_config)
 
-    # [4] Process in batches
+    # [4] Process in batches with incremental saving
     print(f"\n[4/4] Generating trajectories...")
-    all_trajectories = []
-    num_batches = (len(questions) + args.batch_size - 1) // args.batch_size
+    total_generated = 0
+    total_correct = 0
 
-    for batch_idx in range(num_batches):
-        start_idx = batch_idx * args.batch_size
-        end_idx = min(start_idx + args.batch_size, len(questions))
-        batch_questions = questions[start_idx:end_idx]
+    # Create output directory
+    output_dir = os.path.dirname(args.output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
 
-        print(f"\n--- Batch {batch_idx + 1}/{num_batches} ---")
-        print(f"  Questions: {start_idx + 1} ~ {end_idx}")
-        print(f"  Trajectories to generate: {len(batch_questions) * args.num_samples}")
+    # Resume: load already processed question IDs
+    processed_question_ids = set()
+    if args.resume and os.path.exists(args.output_path):
+        print(f"Resume mode: loading existing results from {args.output_path}")
+        with open(args.output_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                if line.strip():
+                    try:
+                        data = json.loads(line)
+                        # Extract question_id from trajectory_id (format: "{qid}_sample_{n}")
+                        traj_id = data.get('trajectory_id', '')
+                        if '_sample_' in traj_id:
+                            qid = traj_id.rsplit('_sample_', 1)[0]
+                            processed_question_ids.add(qid)
+                        total_generated += 1
+                        if data.get('is_correct'):
+                            total_correct += 1
+                    except json.JSONDecodeError:
+                        continue
+        print(f"  Found {len(processed_question_ids)} questions already processed ({total_generated} trajectories)")
 
-        # Generate trajectories
-        trajectories = generator.generate_batch(
-            batch_questions,
-            num_samples=args.num_samples,
-            show_progress=True,
-        )
+    # Filter out already processed questions
+    if args.resume:
+        questions_to_process = [
+            q for q in questions
+            if q.get('_id', q.get('id', str(hash(q['question'])))) not in processed_question_ids
+        ]
+        print(f"  Remaining questions: {len(questions_to_process)}")
+    else:
+        questions_to_process = questions
 
-        all_trajectories.extend(trajectories)
-        print(f"  Generated: {len(trajectories)} trajectories")
-        print(f"  Total so far: {len(all_trajectories)}")
+    if not questions_to_process:
+        print("All questions already processed!")
+        return
 
-        # Save checkpoint every 10 batches
-        if (batch_idx + 1) % 10 == 0:
-            checkpoint_path = args.output_path.replace('.jsonl', f'_checkpoint_{batch_idx + 1}.jsonl')
-            save_trajectories(all_trajectories, checkpoint_path)
+    num_batches = (len(questions_to_process) + args.batch_size - 1) // args.batch_size
 
-    # Save final results
-    save_trajectories(all_trajectories, args.output_path)
+    # Open file in append mode for incremental saving
+    file_mode = 'a' if args.resume else 'w'
+    with open(args.output_path, file_mode, encoding='utf-8') as f:
+        for batch_idx in range(num_batches):
+            start_idx = batch_idx * args.batch_size
+            end_idx = min(start_idx + args.batch_size, len(questions_to_process))
+            batch_questions = questions_to_process[start_idx:end_idx]
+
+            print(f"\n--- Batch {batch_idx + 1}/{num_batches} ---")
+            print(f"  Questions: {start_idx + 1} ~ {end_idx}")
+            print(f"  Trajectories to generate: {len(batch_questions) * args.num_samples}")
+
+            # Generate trajectories
+            trajectories = generator.generate_batch(
+                batch_questions,
+                num_samples=args.num_samples,
+                show_progress=True,
+            )
+
+            # Save each trajectory immediately
+            for traj in trajectories:
+                record = {
+                    'trajectory_id': traj.trajectory_id,
+                    'question': traj.question,
+                    'gold_answer': traj.gold_answer,
+                    'final_answer': traj.final_answer,
+                    'is_correct': traj.is_correct,
+                    'supporting_facts': traj.supporting_facts,
+                    'metadata': traj.metadata,
+                    'steps': [
+                        {
+                            'step_id': step.step_id,
+                            'step_type': step.step_type.value,
+                            'text': step.text,
+                            'content': step.content,
+                            'used_passages': step.used_passages,
+                            'metadata': step.metadata,
+                        }
+                        for step in traj.steps
+                    ],
+                }
+                f.write(json.dumps(record, ensure_ascii=False) + '\n')
+
+                if traj.is_correct:
+                    total_correct += 1
+
+            # Flush and sync to disk after each batch
+            f.flush()
+            os.fsync(f.fileno())
+
+            total_generated += len(trajectories)
+            accuracy = total_correct / total_generated * 100 if total_generated > 0 else 0
+            print(f"  ✓ Saved {len(trajectories)} trajectories (Total: {total_generated}, Accuracy: {accuracy:.1f}%)")
 
     # Print summary
     print("\n" + "=" * 70)
     print("Generation Complete!")
     print("=" * 70)
-    print(f"Total questions: {len(questions)}")
-    print(f"Total trajectories: {len(all_trajectories)}")
-
-    correct_count = sum(1 for t in all_trajectories if t.is_correct)
-    print(f"Correct answers: {correct_count}/{len(all_trajectories)} ({100*correct_count/len(all_trajectories):.1f}%)")
-
-    avg_steps = sum(len(t.steps) for t in all_trajectories) / len(all_trajectories)
-    print(f"Average steps per trajectory: {avg_steps:.1f}")
-
+    print(f"Total questions processed: {len(questions_to_process)} (of {len(questions)})")
+    print(f"Total trajectories: {total_generated}")
+    if total_generated > 0:
+        print(f"Correct answers: {total_correct}/{total_generated} ({total_correct/total_generated*100:.1f}%)")
     print(f"\nOutput: {args.output_path}")
 
 

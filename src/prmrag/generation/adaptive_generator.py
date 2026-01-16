@@ -299,6 +299,11 @@ Continue with Step {next_step_num}."""
     def _parse_action(self, content: str) -> Tuple[Optional[str], Optional[str]]:
         """Parse action from step content.
 
+        Expected format (no markdown):
+        - Action: Finish[answer="..."]
+        - Action: Search[query="..."]
+        - Action: Reason[content="..."]
+
         Returns:
             Tuple of (action_type, action_input)
             action_type: 'search', 'finish', 'reason', or None
@@ -332,7 +337,7 @@ Continue with Step {next_step_num}."""
         if reason_match:
             return ('reason', reason_match.group(1).strip())
 
-        # Check for simple finish markers
+        # Fallback: Check for simple finish markers
         if any(marker in content.lower() for marker in ['final answer:', 'the answer is', 'therefore, the answer']):
             return ('finish', None)
 
