@@ -16,6 +16,7 @@ policy_model:
   temperature: 0.8
   top_p: 0.95
   max_tokens: 200  # Per step
+  max_model_len: 16384  # Extend context length for long prompts
 
 # Retrieval settings
 retrieval:

@@ -13,6 +13,7 @@ rpe:
   model_name: "Qwen/Qwen2.5-7B-Instruct"  # Updated to Qwen3-7B equivalent
   model_path: null  # Override with local path if needed
   device: "cuda"
+  max_model_len: 16384  # Extend context length for long prompts
 
   # Monte Carlo rollout settings
   num_rollouts: 5

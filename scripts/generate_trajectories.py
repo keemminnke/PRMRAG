@@ -198,7 +198,7 @@ def main():
     # GPU settings
     parser.add_argument('--gpu_memory_utilization', type=float, default=0.7,
                         help='GPU memory utilization for policy model')
-    parser.add_argument('--max_model_len', type=int, default=8192,
+    parser.add_argument('--max_model_len', type=int, default=16384,
                         help='Max model context length')
 
     args = parser.parse_args()

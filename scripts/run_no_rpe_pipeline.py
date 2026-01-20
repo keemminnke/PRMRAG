@@ -191,7 +191,7 @@ def main():
         'model_name': args.policy_model,
         'temperature': args.temperature,
         'gpu_memory_utilization': args.policy_gpu_util,
-        'max_model_len': 8192,
+        'max_model_len': 16384,
     }
     policy_model = load_policy_model(policy_config)
 
