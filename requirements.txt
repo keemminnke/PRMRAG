@@ -18,8 +18,9 @@ anthropic>=0.8.0
 
 # Optional: Fast inference
 vllm>=0.2.0
-# flash-attn>=2.5.0,<=2.5.8  # Optional: vllm has built-in attention
 # guidance>=0.1.0
+# flash-attn: install with `pip install flash-attn --no-build-isolation`
+flash-attn>=2.0.0
 
 # Evaluation & metrics
 scikit-learn>=1.3.0
@@ -39,3 +40,4 @@ pytest>=7.4.0
 black>=23.7.0
 isort>=5.12.0
 mypy>=1.5.0
+FlagEmbedding>=1.3.5

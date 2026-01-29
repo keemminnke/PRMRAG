@@ -10,6 +10,7 @@ Optimizations:
 import json
 import sys
 import os
+import re
 import argparse
 from pathlib import Path
 from datetime import datetime
@@ -22,8 +23,42 @@ from prmrag.labeling.judge_labeler import JudgeLabeler
 from prmrag.data.schemas import Trajectory, TrajectoryStep
 
 
+def parse_content(content: str) -> dict:
+    """Parse content field to extract Thought, Action, Observation.
+
+    Expected format in content:
+        Thought: [reasoning]
+        Action: Search[query="..."] or Finish[answer="..."]
+
+        Observation:
+        [1] Title: ...
+         text...
+    """
+    # 1. Extract Thought: from start until "Action:"
+    thought_match = re.search(r'Thought:\s*(.+?)(?=\nAction:)', content, re.DOTALL)
+    thought = thought_match.group(1).strip() if thought_match else ""
+
+    # 2. Extract Action: until "Observation:" or end
+    action_match = re.search(r'Action:\s*(.+?)(?=\n\nObservation:|$)', content, re.DOTALL)
+    action = action_match.group(1).strip() if action_match else ""
+
+    # 3. Extract Observation: everything after
+    obs_match = re.search(r'Observation:\s*(.+)', content, re.DOTALL)
+    observation = obs_match.group(1).strip() if obs_match else ""
+
+    return {
+        'thought': thought,
+        'action': action,
+        'observation': observation
+    }
+
+
 def load_trajectories(filepath: Path):
-    """Load trajectories from JSONL file."""
+    """Load trajectories from JSONL file.
+
+    Handles new data format where content field contains:
+    Thought, Action, and Observation together.
+    """
     trajectories = []
     with open(filepath, 'r') as f:
         for line in f:
@@ -35,44 +70,39 @@ def load_trajectories(filepath: Path):
             # Convert to Trajectory schema
             steps = []
             for step_data in data['steps']:
-                # Determine action_type
-                if step_data.get('num_passages', 0) > 0:
-                    action_type = 'retrieve'
-                elif step_data.get('action') == 'Finish':
-                    action_type = 'answer'
+                # Parse content field
+                content = step_data.get('content', '')
+                parsed = parse_content(content)
+
+                thought = parsed['thought']
+                action = parsed['action']
+                observation = parsed['observation']
+
+                # Determine action_type: search, finish, reason
+                if 'Search[' in action:
+                    action_type = 'search'
+                elif 'Finish[' in action:
+                    action_type = 'finish'
                 else:
                     action_type = 'reason'
 
-                # Build full action with thought
-                thought = step_data.get('thought', '')
-                action_name = step_data.get('action', 'Unknown')
-
-                # For Finish action, include the predicted answer
-                if action_name == 'Finish':
-                    predicted_ans = data.get('predicted_answer', 'Unknown')
-                    action_with_answer = f"{action_name}[answer=\"{predicted_ans}\"]"
-                else:
-                    action_with_answer = action_name
-
-                if thought:
-                    full_action = f"Thought: {thought}\nAction: {action_with_answer}"
-                else:
-                    full_action = f"Action: {action_with_answer}"
+                # Build full action string for prompt
+                full_action = f"Thought: {thought}\nAction: {action}"
 
                 step = TrajectoryStep(
-                    step_id=step_data['step_num'] - 1,
+                    step_id=step_data.get('step_id', 1) - 1,
                     action_type=action_type,
                     action=full_action,
-                    observation=step_data.get('observation', ''),
-                    passages=[step_data.get('observation', '')] if step_data.get('observation') else [],
+                    observation=observation,
+                    passages=[observation] if observation else [],
                 )
                 steps.append(step)
 
             trajectory = Trajectory(
-                trajectory_id=data['question_id'],
+                trajectory_id=data.get('trajectory_id', data.get('question_id', '')),
                 question=data['question'],
                 gold_answer=data['gold_answer'],
-                final_answer=data.get('predicted_answer', ''),
+                final_answer=data.get('final_answer', ''),
                 steps=steps,
                 supporting_facts=[],
             )
@@ -100,9 +130,9 @@ def load_processed_ids(output_file: Path) -> set:
 def main():
     parser = argparse.ArgumentParser(description="Judge labeling with QwQ-32B")
     parser.add_argument("--input", type=str,
-                        default="./outputs/hybrid_1000q_medium_fulltext_merged/results_merged.jsonl")
+                        default="./outputs/trajectories_500q_16s.jsonl")
     parser.add_argument("--output", type=str,
-                        default="./outputs/judge_labels_qwq_new_prompt.jsonl")
+                        default="./outputs/judge_labels_500q_16s.jsonl")
     parser.add_argument("--limit", type=int, default=None,
                         help="Limit number of trajectories (default: all)")
     parser.add_argument("--resume", action="store_true",
@@ -147,7 +177,7 @@ def main():
     config = {
         'model_name': 'Qwen/QwQ-32B',
         'temperature': 0.3,
-        'max_tokens': 3072,
+        'max_tokens': 8192,
         'max_model_len': 32768,
         'gpu_memory_utilization': 0.95,
         'tensor_parallel_size': 1,
@@ -166,7 +196,8 @@ def main():
 
     # Statistics
     total_steps = 0
-    consensus_count = 0
+    good_count = 0
+    bad_count = 0
     error_count = 0
 
     # Process with progress bar
@@ -199,24 +230,26 @@ def main():
         }
 
         for step_idx, (step, judge_label) in enumerate(zip(original_data['steps'], judge_labels)):
+            # Get action from metadata for new data format
+            action_name = step.get('metadata', {}).get('action', step.get('action', 'unknown'))
+
             step_output = {
-                'step_num': step['step_num'],
-                'rpe_label': step.get('label', 'unknown'),
+                'step_id': step.get('step_id', step_idx + 1),
+                'step_type': step.get('step_type', 'unknown'),
                 'judge_label': judge_label.label,
                 'judge_reasoning': judge_label.reasoning,
                 'judge_confidence': judge_label.confidence,
-                'mc_before': step.get('mc_before'),
-                'mc_after': step.get('mc_after'),
-                'rpe': step.get('rpe'),
-                'action': step.get('action'),
-                'num_passages': step.get('num_passages', 0),
+                'action': action_name,
+                'num_passages': len(step.get('used_passages', [])),
             }
             output_data['steps'].append(step_output)
 
             # Update statistics
             total_steps += 1
-            if step_output['rpe_label'] == judge_label.label.lower():
-                consensus_count += 1
+            if judge_label.label == 'GOOD':
+                good_count += 1
+            elif judge_label.label == 'BAD':
+                bad_count += 1
 
         # Write immediately (incremental save)
         out_fp.write(json.dumps(output_data, ensure_ascii=False) + '\n')
@@ -234,8 +267,8 @@ def main():
     print(f"Total steps evaluated: {total_steps}")
     print(f"Errors: {error_count}")
     if total_steps > 0:
-        print(f"Consensus (RPE=Judge): {consensus_count}/{total_steps} ({consensus_count/total_steps*100:.1f}%)")
-        print(f"Disagreement: {total_steps - consensus_count}/{total_steps} ({(total_steps-consensus_count)/total_steps*100:.1f}%)")
+        print(f"GOOD labels: {good_count}/{total_steps} ({good_count/total_steps*100:.1f}%)")
+        print(f"BAD labels: {bad_count}/{total_steps} ({bad_count/total_steps*100:.1f}%)")
     print()
     print(f"✓ Output saved to: {output_file}")
     print()

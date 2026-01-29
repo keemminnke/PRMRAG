@@ -6,7 +6,7 @@ Usage:
         --train-data outputs/test_judge_5q_newdata_merged_clean.jsonl \
         --output-dir outputs/critic_model_test \
         --model-name Qwen/Qwen2.5-7B-Instruct \
-        --num-epochs 3
+        --num-epochs 1
 
 This script trains a critic model that can:
 1. Generate rationale for step evaluation
@@ -78,7 +78,7 @@ def main():
     parser.add_argument(
         "--num-epochs",
         type=int,
-        default=3,
+        default=1,
         help="Number of training epochs"
     )
     parser.add_argument(
@@ -189,8 +189,9 @@ def main():
     # Show sample
     print("Sample training example:")
     print("-" * 70)
-    print(train_dataset[0]['text'][:500])
-    print("...")
+    sample_messages = train_dataset[0]['messages']
+    for msg in sample_messages:
+        print(f"[{msg['role']}]: {msg['content'][:200]}...")
     print("-" * 70)
     print()
 

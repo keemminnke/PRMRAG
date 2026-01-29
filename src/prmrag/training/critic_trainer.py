@@ -18,10 +18,9 @@ from datasets import Dataset
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    TrainingArguments,
 )
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-from trl import SFTTrainer, DataCollatorForCompletionOnlyLM
+from peft import LoraConfig, get_peft_model
+from trl import SFTTrainer, SFTConfig
 
 
 @dataclass
@@ -46,7 +45,7 @@ class CriticTrainingConfig:
     gradient_accumulation_steps: int = 4
     learning_rate: float = 2e-4
     warmup_ratio: float = 0.1
-    max_seq_length: int = 2048
+    max_seq_length: int = 4096  # Increased for RAG (long observations)
 
     # Data settings
     consensus_only: bool = True  # Only use consensus steps
@@ -63,115 +62,119 @@ class CriticTrainingConfig:
 
 
 class CriticDataFormatter:
-    """Format trajectory data for critic training."""
+    """Format trajectory data for critic training (Chat Template Support)."""
 
     def __init__(self, tokenizer: AutoTokenizer):
         self.tokenizer = tokenizer
+        # Response template for masking - will be set based on tokenizer
+        self._response_template = None
 
-        # Response template for masking
-        self.response_template = "### Critic:\n"
-        self.instruction_template = "### User:\n"
+    @property
+    def response_template(self) -> str:
+        """Get response template based on tokenizer type."""
+        if self._response_template is None:
+            # Try to detect from tokenizer
+            if hasattr(self.tokenizer, 'chat_template') and self.tokenizer.chat_template:
+                if 'im_start' in self.tokenizer.chat_template:
+                    # Qwen/DeepSeek style
+                    self._response_template = "<|im_start|>assistant\n"
+                else:
+                    # Generic fallback
+                    self._response_template = "assistant\n"
+            else:
+                self._response_template = "<|im_start|>assistant\n"
+        return self._response_template
 
     def format_step_for_training(
         self,
         question: str,
-        gold_answer: str,
         previous_steps: List[Dict[str, Any]],
         current_step: Dict[str, Any],
     ) -> str:
-        """Format a single step into training format.
+        """Format a single step into training format using Chat Template.
 
-        Format:
-            ### User:
-            Question: {question}
-            Gold Answer: {gold_answer}
-
-            Previous Steps:
-            Step 1: {action}
-            Observation: {obs}
-            ...
-
-            Current Step to Evaluate:
-            {thought}
-            {action}
-            Observation: {obs}
-
-            ### Critic:
-            Reasoning: {judge_reasoning}
-            Label: {GOOD/BAD}
+        NOTE: Gold Answer is intentionally excluded to prevent data leakage.
+        The critic must learn to evaluate step quality based on reasoning logic,
+        not by comparing with the answer.
 
         Args:
             question: Original question
-            gold_answer: Correct answer
             previous_steps: List of previous steps (context)
             current_step: Step to evaluate
 
         Returns:
-            Formatted text for training
+            Formatted text for training with chat template applied
         """
-        # Build instruction (input)
-        parts = [self.instruction_template]
-        parts.append(f"Question: {question}")
-        parts.append(f"Gold Answer: {gold_answer}")
-        parts.append("")
+        # Build user input context (NO gold answer - prevents data leakage)
+        input_parts = []
+        input_parts.append(f"Question: {question}")
+        input_parts.append("")
 
         # Add previous steps for context
         if previous_steps:
-            parts.append("Previous Steps:")
+            input_parts.append("Previous Steps:")
             for i, prev_step in enumerate(previous_steps, 1):
-                parts.append(f"Step {i}:")
+                input_parts.append(f"Step {i}:")
 
                 # Add thought if exists
                 thought = prev_step.get('thought')
                 if thought:
-                    parts.append(f"Thought: {thought}")
+                    input_parts.append(f"Thought: {thought}")
 
                 # Add action
                 action = prev_step.get('action', 'Unknown')
                 action_input = prev_step.get('action_input', '')
                 if action_input:
-                    parts.append(f"Action: {action}[{action_input}]")
+                    input_parts.append(f"Action: {action}[{action_input}]")
                 else:
-                    parts.append(f"Action: {action}")
+                    input_parts.append(f"Action: {action}")
 
                 # Add observation if exists
                 obs = prev_step.get('observation')
                 if obs:
-                    parts.append(f"Observation: {obs}")
+                    input_parts.append(f"Observation: {obs}")
 
-                parts.append("")
+                input_parts.append("")
 
         # Add current step to evaluate
-        parts.append("Current Step to Evaluate:")
+        input_parts.append("Current Step to Evaluate:")
 
         thought = current_step.get('thought')
         if thought:
-            parts.append(f"Thought: {thought}")
+            input_parts.append(f"Thought: {thought}")
 
         action = current_step.get('action', 'Unknown')
         action_input = current_step.get('action_input', '')
         if action_input:
-            parts.append(f"Action: {action}[{action_input}]")
+            input_parts.append(f"Action: {action}[{action_input}]")
         else:
-            parts.append(f"Action: {action}")
+            input_parts.append(f"Action: {action}")
 
         obs = current_step.get('observation')
         if obs:
-            parts.append(f"Observation: {obs}")
+            input_parts.append(f"Observation: {obs}")
 
-        parts.append("")
+        input_parts.append("")
+        input_parts.append("Task: Evaluate the quality of the Current Step. Analyze whether the reasoning is logically sound and grounded in evidence, then provide a label (GOOD/BAD).")
 
-        # Build response (output) - this is what model should learn
-        # CoT style: Generate reasoning first, then verdict
-        # This encourages thoughtful evaluation before making judgment
+        user_content = "\n".join(input_parts)
+
+        # Build assistant response (what model should learn)
         label = current_step.get('judge_label', 'UNKNOWN').upper()
         reasoning = current_step.get('judge_reasoning', '')
+        assistant_content = f"Reasoning: {reasoning}\nLabel: {label}"
 
-        parts.append(self.response_template)
-        parts.append(f"Reasoning: {reasoning}")
-        parts.append(f"Label: {label}")
+        # System prompt for critic role
+        system_content = "You are a step-level critic model for evaluating reasoning quality in multi-hop question answering. Analyze each step's logical soundness and evidence grounding, then provide a label (GOOD/BAD)."
 
-        return "\n".join(parts)
+        # Return messages format for trl conversational training
+        messages = [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_content},
+            {"role": "assistant", "content": assistant_content}
+        ]
+
+        return messages
 
     def prepare_training_data(
         self,
@@ -182,49 +185,59 @@ class CriticDataFormatter:
 
         Args:
             data_file: Path to merged JSONL file with judge labels
-            consensus_only: Only use steps with consensus
+            consensus_only: Only use steps with consensus (if True) or include
+                           all steps with judge labels (both GOOD and BAD)
 
         Returns:
             List of formatted training samples
         """
         training_samples = []
+        label_counts = {'GOOD': 0, 'BAD': 0}
 
         with open(data_file) as f:
             for line in f:
                 trajectory = json.loads(line)
 
                 question = trajectory['question']
-                gold_answer = trajectory['gold_answer']
+                # gold_answer removed - prevents data leakage
                 steps = trajectory['steps']
 
                 # Process each step
                 for idx, step in enumerate(steps):
-                    # Skip if consensus_only and no consensus
-                    if consensus_only and not step.get('consensus', False):
-                        continue
+                    label = step.get('judge_label', 'UNKNOWN').upper()
 
                     # Skip if no judge label
-                    if 'judge_label' not in step:
+                    if label not in ['GOOD', 'BAD']:
+                        continue
+
+                    # Filtering logic:
+                    # - If consensus_only=True: use consensus steps (typically GOOD)
+                    # - Always include BAD steps (important for learning to reject)
+                    is_consensus = step.get('consensus', False)
+                    is_bad = (label == 'BAD')
+
+                    if consensus_only and not (is_consensus or is_bad):
                         continue
 
                     # Get previous steps for context
                     previous_steps = steps[:idx]
 
-                    # Format step
-                    formatted_text = self.format_step_for_training(
+                    # Format step (no gold_answer) - returns messages format
+                    messages = self.format_step_for_training(
                         question=question,
-                        gold_answer=gold_answer,
                         previous_steps=previous_steps,
                         current_step=step,
                     )
 
                     training_samples.append({
-                        'text': formatted_text,
+                        'messages': messages,  # trl conversational format
                         'question_id': trajectory['question_id'],
-                        'step_num': step['step_num'],
-                        'label': step.get('judge_label', 'UNKNOWN'),
+                        'step_num': step.get('step_num', idx + 1),
+                        'label': label,
                     })
+                    label_counts[label] += 1
 
+        print(f"  Label distribution: GOOD={label_counts['GOOD']}, BAD={label_counts['BAD']}")
         return training_samples
 
 
@@ -303,7 +316,6 @@ class CriticTrainer:
         # Prepare for LoRA
         if self.config.gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
-            self.model = prepare_model_for_kbit_training(self.model)
 
         # LoRA config
         peft_config = LoraConfig(
@@ -335,15 +347,9 @@ class CriticTrainer:
         if self.model is None:
             self.load_model()
 
-        # Data collator for completion-only loss
-        # Only compute loss on "### Critic:" part
-        collator = DataCollatorForCompletionOnlyLM(
-            response_template=self.formatter.response_template,
-            tokenizer=self.tokenizer,
-        )
-
-        # Training arguments
-        training_args = TrainingArguments(
+        # SFTConfig with completion_only_loss (replaces DataCollatorForCompletionOnlyLM)
+        # assistant_only_loss=True: only compute loss on assistant responses
+        sft_config = SFTConfig(
             output_dir=self.config.output_dir,
             num_train_epochs=self.config.num_train_epochs,
             per_device_train_batch_size=self.config.per_device_train_batch_size,
@@ -353,6 +359,7 @@ class CriticTrainer:
             logging_steps=self.config.logging_steps,
             save_steps=self.config.save_steps,
             eval_steps=self.config.eval_steps if eval_dataset else None,
+            eval_strategy="steps" if eval_dataset else "no",
             fp16=self.config.fp16,
             bf16=self.config.bf16,
             gradient_checkpointing=self.config.gradient_checkpointing,
@@ -361,18 +368,19 @@ class CriticTrainer:
             metric_for_best_model="eval_loss" if eval_dataset else None,
             report_to="tensorboard",
             remove_unused_columns=False,
+            # Note: assistant_only_loss requires chat template with {% generation %}
+            # Using full sequence loss for now (trl 0.27+ compatibility)
+            assistant_only_loss=False,
+            max_length=self.config.max_seq_length,
         )
 
         # SFT Trainer
         trainer = SFTTrainer(
             model=self.model,
-            args=training_args,
+            args=sft_config,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
-            dataset_text_field="text",
-            data_collator=collator,
-            max_seq_length=self.config.max_seq_length,
-            tokenizer=self.tokenizer,
+            processing_class=self.tokenizer,
         )
 
         # Train

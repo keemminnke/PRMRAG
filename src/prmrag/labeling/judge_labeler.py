@@ -139,7 +139,7 @@ class JudgeLabeler(BaseLabeler):
             thought = full_content.strip()
 
         if action_match:
-            action = action_match.group(0).strip()
+            action = action_match.group(1).strip()  # group(1) = Search[...] / Finish[...] only
         else:
             action = getattr(step, 'action_type', 'Unknown')
             if hasattr(action, 'value'):
@@ -199,54 +199,68 @@ class JudgeLabeler(BaseLabeler):
 
         # 2. Strict Process Supervisor 프롬프트
         prompt = f"""You are a **Strict Process Supervisor** for an Active RAG (Retrieval-Augmented Generation) agent.
-Your goal is NOT just to check if the answer is correct, but to judge whether the agent's **search strategy** and **reliance on evidence** are flawless.
+Your goal is NOT just to check if the answer is correct, but to judge whether the agent's **search strategy**, **question grounding**, and **reliance on evidence** are flawless.
 You must penalize "lucky guesses" (correct answers without evidence) and reward "strategic resilience" (retrying after failure).
+
+# Key Rules (Non-negotiable)
+- You must NOT use your own world knowledge. Treat ANY factual claim not supported by Observation as a hallucination.
+- A "successful search" means the Observation contains information DIRECTLY relevant to the Question's entities and required relations.
+  If the Observation is about a different entity (namesake, fictional character vs real person, wrong relation direction), it is NOT successful.
 
 # Task
 You will be given a full interaction trajectory consisting of multiple steps.
-Your task is to **evaluate EACH step independently** based on the criteria below and assign a label (GOOD or BAD).
+Evaluate EACH step independently (but you may use previous steps to determine whether search has succeeded) and assign GOOD or BAD.
 
 # Evaluation Criteria (Strict Process Supervision)
 
-**Case 0: MISSING SEARCH (The 'Overconfidence' Error)**
-If the Agent chooses to **Answer (Finish)** or **Reason** using internal knowledge WITHOUT any prior successful Search:
-- **BAD if:** The question asks for specific factual details (e.g., obscure names, dates, statistics) that require verification, but the Agent skips 'Search' and relies on internal memory.
-- **GOOD if:** The question is trivial or general knowledge where search is genuinely unnecessary.
+**Case 0: QUESTION MISINTERPRETATION (Entity/Relation Error)**
+- **BAD if:** The step assumes the wrong entity type/domain (e.g., fictional character vs real person), wrong relation direction (son vs father), or drifts to a namesake, contradicting the Question.
+- **GOOD if:** The step maintains correct entity grounding and relation direction consistent with the Question.
 
-**Case 1: Action is SEARCH**
-- **GOOD if:** The query is specific, relevant, and logically derived. If previous search failed, the agent tries a DIFFERENT strategy.
-- **BAD if:** Repeats the exact same failed query, or query is too vague to be useful.
+**Case 1: MISSING SEARCH (The 'Overconfidence' Error)**
+If the Agent chooses to **Finish** with factual details WITHOUT any prior successful Search:
+- **BAD** unless the question is truly trivial/general knowledge.
 
-**Case 2: Action is FINISH / REASON (The 'Answering' Phase)**
-- **GOOD if:** The answer is strictly derived from the provided Observation with sufficient evidence.
-- **BAD if:** The Observation is EMPTY or IRRELEVANT, but the agent answers anyway using internal knowledge (Parametric Shortcut). Even if factually correct, this is BAD in RAG context.
+**Case 2: Action is SEARCH**
+- **GOOD if:** The query is specific, grounded in the Question (correct entities/relations), and logically derived.
+  If previous search failed, the agent tries a meaningfully different strategy (synonyms, disambiguation terms, relation-focused query).
+- **BAD if:** Repeats the same failed query, is too vague, targets the wrong entity/domain, or ignores needed disambiguation.
+- **BAD if:** The query is derived from any unsupported assumption or hallucinated claim in the Thought or prior steps.
+  Do NOT accept "grounded in prior assumption" as justification unless that assumption is explicitly supported by Observation.
 
-**Case 3: Handling Retrieval Failures**
+
+**Case 3: Action is REASON**
+- **GOOD if:** It only plans next actions or summarizes Observation WITHOUT introducing new factual claims.
+- **BAD if:** It asserts any factual claim not explicitly supported by the current Observation (hallucination).
+
+**Case 4: Action is FINISH (Final Answer)**
+- **BAD if any of the following:**
+  (a) The answer is "Uncertain", "Unknown", "None", "N/A", or empty (non-response).
+  (b) The Thought contains uncertainty phrases like "cannot determine", "not sure", "insufficient information", "unable to verify".
+  (c) The answer is NOT logically derived from the previous Observations and Thoughts (even if accidentally correct).
+  (d) The answer does NOT semantically match the Ground Truth Answer.
+  (e) The Observation evidence is empty, irrelevant, or insufficient to support the answer.
+- **GOOD if and only if:** (1) The answer is specific and definitive (not uncertain), (2) it is logically derived from the accumulated Observation evidence in previous steps, AND (3) it semantically matches the Ground Truth Answer.
+- NOTE: Correct-by-luck without proper reasoning chain is still BAD. The agent must demonstrate HOW it arrived at the answer using retrieved evidence.
+
+**Case 5: Handling Retrieval Failures**
 If the previous Observation was IRRELEVANT or EMPTY:
-- **GOOD if:** The agent admits failure and immediately performs another **Search** action.
-- **BAD if:** The agent ignores the bad result and proceeds to answer (Lazy Finish).
+- **GOOD if:** The agent admits failure and performs another **Search** immediately (with a changed strategy).
+- **BAD if:** The agent proceeds to REASON/FINISH as if it succeeded.
 
 # Input Data
-
-## Task
 **Question:** {trajectory.question}
 **Ground Truth Answer:** {gold_answer}
-
 ## Full Trajectory
 {history_str}
-
 {final_answer_section}
 
 # Output Instructions
-1. Analyze the trajectory step by step.
-2. For each step, check specifically for hallucinations against the Observation.
-3. Output the result in a **JSON list** format.
-
-Example Output Format:
+Return a JSON list:
 ```json
 [
-  {{"step": 1, "label": "GOOD", "reasoning": "The search query is specific and relevant."}},
-  {{"step": 2, "label": "BAD", "reasoning": "The model claims facts not in the Observation. This is a hallucination."}}
+  {{"step": 1, "label": "GOOD", "reasoning": "..."}},
+  ...
 ]
 ```
 
