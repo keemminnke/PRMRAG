@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(nvidia-smi:*)",
+      "Bash(python -m json.tool:*)",
+      "Bash(python3:*)",
+      "Bash(dmesg:*)",
+      "Bash(fuser:*)",
+      "Bash(ps:*)",
+      "Bash(kill:*)",
+      "Bash(pip show:*)",
+      "Bash(pip install:*)",
+      "Bash(python:*)",
+      "Bash(pip uninstall:*)",
+      "Bash(conda search:*)",
+      "Bash(conda info:*)",
+      "Bash(conda create:*)",
+      "Bash(conda install:*)",
+      "Bash(du:*)",
+      "Bash(quota:*)",
+      "Bash(ln:*)",
+      "Bash(HF_HOME=/home/work/.conda/storage/.cache/huggingface python:*)",
+      "Bash(HF_HOME=/home/work/.conda/storage/.cache/huggingface python3:*)",
+      "Bash(ls:*)",
+      "Bash(grep:*)",
+      "Bash(pkill:*)",
+      "Bash(lsof:*)",
+      "Bash(head -10 echo \"\" echo \"=== 다른 trajectory 생성 스크립트 확인 ===\" ls -la scripts/*traj*.py scripts/*generat*.py)",
+      "Bash(echo \"없음\" echo \"\" echo \"=== outputs 폴더의 다른 결과 파일 확인 ===\" ls -la outputs/*.jsonl)",
+      "Bash(timeout 5 strace:*)"
+    ]
+  }
+}

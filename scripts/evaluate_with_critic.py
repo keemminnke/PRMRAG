@@ -13,7 +13,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 
 
-def load_critic_model(critic_path: str, base_model: str = "Qwen/Qwen2.5-7B-Instruct"):
+def load_critic_model(critic_path: str, base_model: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"):
     """Load trained critic model."""
     print(f"Loading critic model from {critic_path}...")
 
@@ -118,10 +118,7 @@ def format_step_for_critic(question: str, previous_steps: list, current_step: di
         input_parts.append(f"Observation: {parsed['observation'][:500]}")
 
     input_parts.append("")
-    input_parts.append("You are a step-level critic for evaluating reasoning quality in multi-hop question answering. "
-        "Analyze each step's logical soundness and evidence grounding. "
-        "First, provide a reasoning explanation, and then output the final label (GOOD/BAD)."
-        )
+    input_parts.append("Task: Evaluate the quality of the Current Step. First, analyze whether the reasoning is logically sound and grounded in evidence using the <think> tag, then provide a label (GOOD/BAD).")
 
     return "\n".join(input_parts)
 
@@ -132,8 +129,8 @@ def evaluate_step(model, tokenizer, question: str, previous_steps: list, current
     system_content = (
         "You are a step-level critic for evaluating reasoning quality in multi-hop question answering. "
         "Analyze each step's logical soundness and evidence grounding. "
-        "First, provide a reasoning explanation, and then output the final label (GOOD/BAD)."
-        )
+        "First, provide a reasoning explanation inside <think> tags, and then output the final label (GOOD/BAD)."
+    )
 
     messages = [
         {"role": "system", "content": system_content},
@@ -141,32 +138,41 @@ def evaluate_step(model, tokenizer, question: str, previous_steps: list, current
     ]
     prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
-    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=4096).to(model.device)
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=8000).to(model.device)
 
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
-            max_new_tokens=256,
+            max_new_tokens=512,  # Increased for <think> reasoning
             do_sample=False,
             pad_token_id=tokenizer.pad_token_id,
         )
 
     response = tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
 
-    # Parse label
+    # Parse label (after </think> tag)
     label = "UNKNOWN"
     if "Label: GOOD" in response or "Label:GOOD" in response:
         label = "GOOD"
     elif "Label: BAD" in response or "Label:BAD" in response:
         label = "BAD"
 
-    return {"label": label, "reasoning": response}
+    # Extract reasoning from <think> tags
+    reasoning = response
+    if "<think>" in response and "</think>" in response:
+        think_start = response.find("<think>") + len("<think>")
+        think_end = response.find("</think>")
+        reasoning = response[think_start:think_end].strip()
+
+    return {"label": label, "reasoning": reasoning, "raw_response": response}
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--trajectories", type=str, default="outputs/test_trajectories_10.jsonl")
-    parser.add_argument("--critic-model", type=str, default="outputs/critic_model_full/final_model")
+    parser.add_argument("--critic-model", type=str, default="outputs/critic_model/final_model")
+    parser.add_argument("--base-model", type=str, default="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+                        help="Base model for the critic (must match training)")
     parser.add_argument("--output", type=str, default="outputs/critic_evaluation_results.jsonl")
     args = parser.parse_args()
 
@@ -179,7 +185,7 @@ def main():
     print(f"✓ Loaded {len(trajectories)} trajectories")
 
     # Load critic
-    model, tokenizer = load_critic_model(args.critic_model)
+    model, tokenizer = load_critic_model(args.critic_model, args.base_model)
 
     # Evaluate
     print(f"\n{'='*70}")

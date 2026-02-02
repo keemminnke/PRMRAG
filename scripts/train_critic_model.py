@@ -53,18 +53,12 @@ def main():
         default=None,
         help="Path to eval data (optional)"
     )
-    parser.add_argument(
-        "--consensus-only",
-        action="store_true",
-        default=True,
-        help="Only use consensus steps (default: True)"
-    )
 
     # Model
     parser.add_argument(
         "--model-name",
         type=str,
-        default="Qwen/Qwen2.5-7B-Instruct",
+        default="deepseek-ai/DeepSeek-R1-0528-Qwen3-8B",
         help="Base model to fine-tune"
     )
     parser.add_argument(
@@ -84,13 +78,13 @@ def main():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=4,
+        default=1,
         help="Per-device batch size"
     )
     parser.add_argument(
         "--gradient-accumulation",
         type=int,
-        default=4,
+        default=16,
         help="Gradient accumulation steps"
     )
     parser.add_argument(
@@ -102,7 +96,7 @@ def main():
     parser.add_argument(
         "--max-seq-length",
         type=int,
-        default=2048,
+        default=4096,
         help="Maximum sequence length"
     )
 
@@ -142,23 +136,10 @@ def main():
         print(f"Eval data:      {args.eval_data}")
     print(f"Model:          {args.model_name}")
     print(f"Output dir:     {args.output_dir}")
-    print(f"Consensus only: {args.consensus_only}")
     print()
 
-    # Create config
-    config = CriticTrainingConfig(
-        model_name=args.model_name,
-        output_dir=args.output_dir,
-        num_train_epochs=args.num_epochs,
-        per_device_train_batch_size=args.batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation,
-        learning_rate=args.learning_rate,
-        max_seq_length=args.max_seq_length,
-        lora_r=args.lora_r,
-        lora_alpha=args.lora_alpha,
-        lora_dropout=args.lora_dropout,
-        consensus_only=args.consensus_only,
-    )
+    # Create config (unused, using create_critic_trainer instead)
+    # config = CriticTrainingConfig(...)
 
     # Create trainer
     trainer = create_critic_trainer(
@@ -172,7 +153,6 @@ def main():
         lora_r=args.lora_r,
         lora_alpha=args.lora_alpha,
         lora_dropout=args.lora_dropout,
-        consensus_only=args.consensus_only,
     )
 
     # Prepare data
@@ -186,13 +166,86 @@ def main():
     print("=" * 70)
     print()
 
-    # Show sample
-    print("Sample training example:")
-    print("-" * 70)
+    # Count labels
+    label_counts = {'GOOD': 0, 'BAD': 0, 'OTHER': 0}
+    for sample in train_dataset:
+        label = sample.get('label', 'OTHER')
+        if label in label_counts:
+            label_counts[label] += 1
+        else:
+            label_counts['OTHER'] += 1
+
+    print(f"Total samples: {len(train_dataset)}")
+    print(f"Label distribution:")
+    print(f"  - GOOD: {label_counts['GOOD']} ({100*label_counts['GOOD']/len(train_dataset):.1f}%)")
+    print(f"  - BAD: {label_counts['BAD']} ({100*label_counts['BAD']/len(train_dataset):.1f}%)")
+    if label_counts['OTHER'] > 0:
+        print(f"  - OTHER: {label_counts['OTHER']}")
+    print()
+
+    # Show detailed sample (full content, not truncated)
+    print("=" * 70)
+    print("SAMPLE TRAINING EXAMPLE (FULL)")
+    print("=" * 70)
     sample_messages = train_dataset[0]['messages']
     for msg in sample_messages:
-        print(f"[{msg['role']}]: {msg['content'][:200]}...")
-    print("-" * 70)
+        print(f"\n[{msg['role'].upper()}]:")
+        print("-" * 50)
+        print(msg['content'])
+        print("-" * 50)
+
+    # Show second sample if available (different label if possible)
+    if len(train_dataset) > 1:
+        # Find a sample with different label
+        first_label = train_dataset[0].get('label')
+        second_idx = 1
+        for i, sample in enumerate(train_dataset):
+            if sample.get('label') != first_label:
+                second_idx = i
+                break
+
+        print("\n" + "=" * 70)
+        print(f"SECOND SAMPLE (label={train_dataset[second_idx].get('label')})")
+        print("=" * 70)
+        sample_messages = train_dataset[second_idx]['messages']
+        for msg in sample_messages:
+            print(f"\n[{msg['role'].upper()}]:")
+            print("-" * 50)
+            print(msg['content'])
+            print("-" * 50)
+
+    # Tokenize and show token counts for first sample
+    print("\n" + "=" * 70)
+    print("TOKEN ANALYSIS")
+    print("=" * 70)
+    sample_text = trainer.tokenizer.apply_chat_template(
+        train_dataset[0]['messages'],
+        tokenize=False,
+        add_generation_prompt=False
+    )
+    tokens = trainer.tokenizer.encode(sample_text)
+    print(f"Sample 1 token count: {len(tokens)}")
+    print(f"Max sequence length: {args.max_seq_length}")
+    if len(tokens) > args.max_seq_length:
+        print(f"WARNING: Sample exceeds max_seq_length by {len(tokens) - args.max_seq_length} tokens!")
+
+    # Check a few more samples for token length distribution
+    token_lengths = []
+    for i in range(min(100, len(train_dataset))):
+        text = trainer.tokenizer.apply_chat_template(
+            train_dataset[i]['messages'],
+            tokenize=False,
+            add_generation_prompt=False
+        )
+        token_lengths.append(len(trainer.tokenizer.encode(text)))
+
+    print(f"\nToken length stats (first {len(token_lengths)} samples):")
+    print(f"  Min: {min(token_lengths)}")
+    print(f"  Max: {max(token_lengths)}")
+    print(f"  Avg: {sum(token_lengths)/len(token_lengths):.0f}")
+    exceeding = sum(1 for l in token_lengths if l > args.max_seq_length)
+    if exceeding > 0:
+        print(f"  Exceeding max_seq_length: {exceeding} ({100*exceeding/len(token_lengths):.1f}%)")
     print()
 
     # Train

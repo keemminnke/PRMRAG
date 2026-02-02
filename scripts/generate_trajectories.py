@@ -174,8 +174,8 @@ def main():
                         help='Number of trajectories per question (default: 16)')
     parser.add_argument('--batch_size', type=int, default=50,
                         help='Number of questions per batch (default: 50)')
-    parser.add_argument('--limit', type=int, default=None,
-                        help='Limit number of questions (for testing)')
+    parser.add_argument('--limit', type=int, default=500,
+                        help='Limit number of questions (default: 500)')
     parser.add_argument('--resume', action='store_true',
                         help='Resume from existing output file (skip already processed questions)')
 
