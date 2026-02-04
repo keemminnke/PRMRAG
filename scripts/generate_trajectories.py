@@ -196,7 +196,7 @@ def main():
                         help='Rerank top-N candidates from fusion (default: 20)')
 
     # GPU settings
-    parser.add_argument('--gpu_memory_utilization', type=float, default=0.7,
+    parser.add_argument('--gpu_memory_utilization', type=float, default=0.88,
                         help='GPU memory utilization for policy model')
     parser.add_argument('--max_model_len', type=int, default=16384,
                         help='Max model context length')

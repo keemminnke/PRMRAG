@@ -33,18 +33,48 @@ def parse_content(content: str) -> dict:
         Observation:
         [1] Title: ...
          text...
+
+    Handles edge cases:
+    - Multiple Action: in content (take first valid one)
+    - Mixed Reason/Finish in one step
+    - Newlines inside action brackets
     """
     # 1. Extract Thought: from start until "Action:"
     thought_match = re.search(r'Thought:\s*(.+?)(?=\nAction:)', content, re.DOTALL)
     thought = thought_match.group(1).strip() if thought_match else ""
 
-    # 2. Extract Action: until "Observation:" or end
-    action_match = re.search(r'Action:\s*(.+?)(?=\n\nObservation:|$)', content, re.DOTALL)
-    action = action_match.group(1).strip() if action_match else ""
+    # 2. Extract Action - find first valid action pattern
+    # Handle: Search[...], Finish[...], Reason[...]
+    action = ""
+    action_patterns = [
+        r'Action:\s*(Search\[query=["\']?.+?["\']?\])',
+        r'Action:\s*(Finish\[answer=["\']?.+?["\']?\])',
+        r'Action:\s*(Reason\[content=["\']?.+?["\']?\])',
+        r'Action:\s*(Search\[[^\]]+\])',
+        r'Action:\s*(Finish\[[^\]]+\])',
+        r'Action:\s*(Reason\[[^\]]+\])',
+    ]
 
-    # 3. Extract Observation: everything after
+    for pattern in action_patterns:
+        match = re.search(pattern, content, re.IGNORECASE | re.DOTALL)
+        if match:
+            action = match.group(1).strip()
+            # Clean up: remove internal newlines
+            action = re.sub(r'\s+', ' ', action)
+            break
+
+    # Fallback: simple extraction if no bracket pattern found
+    if not action:
+        action_match = re.search(r'Action:\s*(\w+)', content)
+        action = action_match.group(1).strip() if action_match else "Unknown"
+
+    # 3. Extract Observation: everything after "Observation:"
     obs_match = re.search(r'Observation:\s*(.+)', content, re.DOTALL)
     observation = obs_match.group(1).strip() if obs_match else ""
+
+    # Clean observation - remove any trailing "Action:" blocks that got mixed in
+    if 'Action:' in observation:
+        observation = observation[:observation.find('Action:')].strip()
 
     return {
         'thought': thought,
@@ -112,7 +142,7 @@ def load_trajectories(filepath: Path):
 
 
 def load_processed_ids(output_file: Path) -> set:
-    """Load already processed question IDs from output file."""
+    """Load already processed trajectory IDs from output file."""
     processed = set()
     if output_file.exists():
         with open(output_file, 'r') as f:
@@ -121,7 +151,10 @@ def load_processed_ids(output_file: Path) -> set:
                 if line:
                     try:
                         data = json.loads(line)
-                        processed.add(data.get('question_id'))
+                        # Support both old (question_id) and new (trajectory_id) format
+                        tid = data.get('trajectory_id', data.get('question_id'))
+                        if tid:
+                            processed.add(tid)
                     except:
                         pass
     return processed
@@ -130,13 +163,15 @@ def load_processed_ids(output_file: Path) -> set:
 def main():
     parser = argparse.ArgumentParser(description="Judge labeling with QwQ-32B")
     parser.add_argument("--input", type=str,
-                        default="./outputs/trajectories_500q_16s.jsonl")
+                        default="./outputs/trajectories_xml.jsonl")
     parser.add_argument("--output", type=str,
                         default="./outputs/judge_labels_500q_16s.jsonl")
     parser.add_argument("--limit", type=int, default=None,
                         help="Limit number of trajectories (default: all)")
     parser.add_argument("--resume", action="store_true",
                         help="Resume from existing output file")
+    parser.add_argument("--batch-size", type=int, default=50,
+                        help="Batch size for vLLM batch processing (default: 50)")
     args = parser.parse_args()
 
     input_file = Path(args.input)
@@ -147,6 +182,7 @@ def main():
     print("=" * 70)
     print()
     print("Optimizations:")
+    print("  ✓ vLLM batch processing: 여러 trajectory를 한 번에 처리")
     print("  ✓ Trajectory 단위 배치: 한 번의 LLM 호출로 모든 step 평가")
     print("  ✓ Incremental save: JSONL로 저장 (중간 중단 시 복구 가능)")
     print("  ✓ Resume 지원: --resume로 이어서 처리")
@@ -200,59 +236,95 @@ def main():
     bad_count = 0
     error_count = 0
 
-    # Process with progress bar
-    for trajectory, original_data in tqdm(remaining, desc="Judge labeling"):
-        try:
-            # Label all steps in one LLM call (batch mode)
-            judge_labels = judge_labeler.label_trajectory(trajectory)
+    # Process in batches using vLLM batch processing
+    batch_size = args.batch_size
+    num_batches = (len(remaining) + batch_size - 1) // batch_size
 
+    print(f"Processing {len(remaining)} trajectories in {num_batches} batches (batch_size={batch_size})")
+    print()
+
+    for batch_idx in tqdm(range(num_batches), desc="Batch processing"):
+        start_idx = batch_idx * batch_size
+        end_idx = min(start_idx + batch_size, len(remaining))
+        batch = remaining[start_idx:end_idx]
+
+        # Extract trajectories for batch processing
+        trajectories = [t for t, d in batch]
+        original_datas = [d for t, d in batch]
+
+        try:
+            # Use vLLM batch processing for much faster inference
+            all_judge_labels = judge_labeler.label_batch(trajectories, show_progress=False)
         except Exception as e:
-            tqdm.write(f"  ERROR {trajectory.trajectory_id}: {e}")
-            error_count += 1
+            tqdm.write(f"  BATCH ERROR: {e}")
+            error_count += len(batch)
             from prmrag.data.schemas import JudgeLabel
-            judge_labels = [
-                JudgeLabel(
-                    step_id=step_idx,
-                    label='UNKNOWN',
-                    reasoning=f'Error: {str(e)}',
-                    confidence=0.0,
-                )
-                for step_idx in range(len(trajectory.steps))
+            all_judge_labels = [
+                [
+                    JudgeLabel(
+                        step_id=step_idx,
+                        label='UNKNOWN',
+                        reasoning=f'Error: {str(e)}',
+                        confidence=0.0,
+                    )
+                    for step_idx in range(len(t.steps))
+                ]
+                for t in trajectories
             ]
 
-        # Prepare output
-        output_data = {
-            'question_id': trajectory.trajectory_id,
-            'question': trajectory.question,
-            'gold_answer': trajectory.gold_answer,
-            'predicted_answer': trajectory.final_answer,
-            'steps': []
-        }
-
-        for step_idx, (step, judge_label) in enumerate(zip(original_data['steps'], judge_labels)):
-            # Get action from metadata for new data format
-            action_name = step.get('metadata', {}).get('action', step.get('action', 'unknown'))
-
-            step_output = {
-                'step_id': step.get('step_id', step_idx + 1),
-                'step_type': step.get('step_type', 'unknown'),
-                'judge_label': judge_label.label,
-                'judge_reasoning': judge_label.reasoning,
-                'judge_confidence': judge_label.confidence,
-                'action': action_name,
-                'num_passages': len(step.get('used_passages', [])),
+        # Process each result in the batch
+        for trajectory, original_data, judge_labels in zip(trajectories, original_datas, all_judge_labels):
+            # Prepare output
+            output_data = {
+                'trajectory_id': trajectory.trajectory_id,
+                'question': trajectory.question,
+                'gold_answer': trajectory.gold_answer,
+                'predicted_answer': trajectory.final_answer,
+                'is_correct': original_data.get('is_correct', False),
+                'steps': []
             }
-            output_data['steps'].append(step_output)
 
-            # Update statistics
-            total_steps += 1
-            if judge_label.label == 'GOOD':
-                good_count += 1
-            elif judge_label.label == 'BAD':
-                bad_count += 1
+            for step_idx, (step, judge_label) in enumerate(zip(original_data['steps'], judge_labels)):
+                # Parse content to get clean thought/action/observation
+                content = step.get('content', '')
+                parsed = parse_content(content)
 
-        # Write immediately (incremental save)
-        out_fp.write(json.dumps(output_data, ensure_ascii=False) + '\n')
+                # Get action type from metadata or infer from parsed action
+                action_name = step.get('metadata', {}).get('action', 'unknown')
+                if action_name == 'unknown':
+                    if 'Search[' in parsed['action']:
+                        action_name = 'search'
+                    elif 'Finish[' in parsed['action']:
+                        action_name = 'finish'
+                    elif 'Reason[' in parsed['action']:
+                        action_name = 'reason'
+
+                step_output = {
+                    'step_id': step.get('step_id', step_idx + 1),
+                    'step_type': step.get('step_type', action_name),
+                    # Parsed fields (clean)
+                    'thought': parsed['thought'],
+                    'action': parsed['action'],
+                    'observation': parsed['observation'][:2000] if parsed['observation'] else '',  # Truncate long obs
+                    # Judge labels
+                    'judge_label': judge_label.label,
+                    'judge_reasoning': judge_label.reasoning,
+                    # Metadata
+                    'num_passages': len(step.get('used_passages', [])),
+                }
+                output_data['steps'].append(step_output)
+
+                # Update statistics
+                total_steps += 1
+                if judge_label.label == 'GOOD':
+                    good_count += 1
+                elif judge_label.label == 'BAD':
+                    bad_count += 1
+
+            # Write immediately (incremental save)
+            out_fp.write(json.dumps(output_data, ensure_ascii=False) + '\n')
+
+        # Flush after each batch
         out_fp.flush()
 
     out_fp.close()

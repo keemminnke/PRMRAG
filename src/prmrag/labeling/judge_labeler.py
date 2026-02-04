@@ -104,64 +104,101 @@ class JudgeLabeler(BaseLabeler):
         return labels
 
     def _parse_step_sections(self, step) -> dict:
-        """Parse step content into Thought, Action, Observation sections.
+        """Parse step content into XML tag sections.
 
-        Handles new format:
-        **Thought:** [reasoning]
-        **Action:** Reason[content="..."] / Search[query="..."] / Finish[answer="..."]
-        **Observation:** [retrieved passages]
+        XML format:
+        <think>reasoning</think>
+        <search>query</search> or <answer>answer</answer>
+        <documents>retrieved passages</documents>
+
+        Also supports legacy ReAct format for backwards compatibility.
         """
         # Get full content from either 'content' or 'action' field
         full_content = getattr(step, 'content', None) or getattr(step, 'action', '') or ''
 
-        # Try to extract **Thought:** section
-        thought_match = re.search(
-            r'\*?\*?Thought:\*?\*?\s*(.+?)(?=\*?\*?Action:|$)',
-            full_content,
-            re.IGNORECASE | re.DOTALL
-        )
+        thought = ''
+        action = ''
+        action_type = ''
+        documents = ''
 
-        # Parse Action from content (handles all three action types with brackets)
-        action_match = re.search(
-            r'Action:\s*(Search\[.*?\]|Finish\[.*?\]|Reason\[.*?\]|Reason)',
-            full_content,
-            re.IGNORECASE | re.DOTALL
-        )
+        # Try XML format first
+        # Extract <think>
+        think_match = re.search(r'<think>(.*?)</think>', full_content, re.DOTALL)
+        if think_match:
+            thought = think_match.group(1).strip()
 
-        if thought_match:
-            thought = thought_match.group(1).strip()
-        elif action_match:
-            # Everything before Action is Thought
-            thought = full_content[:action_match.start()].strip()
-            # Remove **Thought:** prefix if present
-            thought = re.sub(r'^\*?\*?Thought:\*?\*?\s*', '', thought, flags=re.IGNORECASE)
-        else:
-            thought = full_content.strip()
+        # Extract <search>
+        search_match = re.search(r'<search>(.*?)</search>', full_content, re.DOTALL)
+        if search_match:
+            action = f"Search[{search_match.group(1).strip()}]"
+            action_type = 'search'
 
-        if action_match:
-            action = action_match.group(1).strip()  # group(1) = Search[...] / Finish[...] only
-        else:
-            action = getattr(step, 'action_type', 'Unknown')
-            if hasattr(action, 'value'):
-                action = action.value
+        # Extract <answer>
+        answer_match = re.search(r'<answer>(.*?)</answer>', full_content, re.DOTALL)
+        if answer_match:
+            action = f"Finish[{answer_match.group(1).strip()}]"
+            action_type = 'finish'
 
-        # Get observation - either from attribute or from content
-        observation = getattr(step, 'observation', '') or ''
+        # Extract <documents>
+        docs_match = re.search(r'<documents>(.*?)</documents>', full_content, re.DOTALL)
+        if docs_match:
+            documents = docs_match.group(1).strip()
 
-        # Also try to extract observation from content if not in attribute
-        if not observation:
+        # If no XML tags found, try legacy ReAct format
+        if not think_match and not search_match and not answer_match:
+            # Legacy: Thought:
+            thought_match = re.search(
+                r'Thought:\s*(.+?)(?=Action:|$)',
+                full_content,
+                re.IGNORECASE | re.DOTALL
+            )
+            if thought_match:
+                thought = thought_match.group(1).strip()
+
+            # Legacy: Action: Search[...] / Finish[...] / Reason[...]
+            action_match = re.search(
+                r'Action:\s*(Search\[.*?\]|Finish\[.*?\]|Reason\[.*?\]|Reason)',
+                full_content,
+                re.IGNORECASE | re.DOTALL
+            )
+            if action_match:
+                action = action_match.group(1).strip()
+                if 'Search' in action:
+                    action_type = 'search'
+                elif 'Finish' in action:
+                    action_type = 'finish'
+                else:
+                    action_type = 'reason'
+
+            # Legacy: Documents:
             obs_match = re.search(
-                r'\*?\*?Observation:\*?\*?\s*(.+?)$',
+                r'Documents:\s*(.+?)$',
                 full_content,
                 re.IGNORECASE | re.DOTALL
             )
             if obs_match:
-                observation = obs_match.group(1).strip()
+                documents = obs_match.group(1).strip()
+
+        # If still no action, check step attributes
+        if not action:
+            action_type = getattr(step, 'action_type', '') or ''
+            if hasattr(action_type, 'value'):
+                action_type = action_type.value
+            action = action_type.capitalize() if action_type else 'Unknown'
+
+        # If think is empty but we have thought from step attribute
+        if not thought:
+            thought = getattr(step, 'think', '') or getattr(step, 'thought', '') or ''
+
+        # Get documents from step attribute if not found
+        if not documents:
+            documents = getattr(step, 'observation', '') or getattr(step, 'documents', '') or ''
 
         return {
             'thought': thought,
             'action': action,
-            'observation': observation,
+            'action_type': action_type,
+            'documents': documents,
         }
 
     def _build_whole_trajectory_prompt(self, trajectory: Trajectory) -> str:
@@ -169,23 +206,46 @@ class JudgeLabeler(BaseLabeler):
 
         Strict Process Supervision: 검색 전략과 증거 기반 추론을 엄격히 평가.
         """
-        # 1. 전체 Trajectory 구성
+        # 1. 전체 Trajectory 구성 (XML 태그 형식)
         interaction_history = []
         for i, step in enumerate(trajectory.steps, 1):
             sections = self._parse_step_sections(step)
 
             step_text = f"## Step {i}\n"
 
-            # Thought (reasoning)
+            # Think (reasoning)
             if sections['thought']:
-                step_text += f"**Thought:**\n{sections['thought']}\n\n"
+                step_text += f"<think>{sections['thought']}</think>\n"
 
-            # Action
-            step_text += f"**Action:** {sections['action']}\n"
+            # Action (search or answer)
+            action = sections.get('action', '')
+            action_type = sections.get('action_type', '')
 
-            # Observation (retrieved passages)
-            if sections['observation'] and sections['observation'].strip():
-                step_text += f"\n**Observation:**\n{sections['observation']}\n"
+            if action_type == 'search' or 'Search' in action:
+                # Extract query from Search[query] format
+                query = action
+                if 'Search[' in action:
+                    import re
+                    match = re.search(r'Search\[(.+?)\]', action)
+                    if match:
+                        query = match.group(1)
+                step_text += f"<search>{query}</search>\n"
+            elif action_type == 'finish' or 'Finish' in action:
+                # Extract answer from Finish[answer] format
+                answer = action
+                if 'Finish[' in action:
+                    import re
+                    match = re.search(r'Finish\[(.+?)\]', action)
+                    if match:
+                        answer = match.group(1)
+                step_text += f"<answer>{answer}</answer>\n"
+            elif action:
+                # Reason or other - just include think
+                pass
+
+            # Documents (retrieved passages)
+            if sections['documents'] and sections['documents'].strip():
+                step_text += f"<documents>{sections['documents']}</documents>\n"
 
             interaction_history.append(step_text)
 
@@ -197,15 +257,21 @@ class JudgeLabeler(BaseLabeler):
         if trajectory.final_answer:
             final_answer_section = f"## Model's Final Answer\n{trajectory.final_answer}"
 
-        # 2. Strict Process Supervisor 프롬프트
+        # 2. Strict Process Supervisor 프롬프트 (XML 태그 형식)
         prompt = f"""You are a **Strict Process Supervisor** for an Active RAG (Retrieval-Augmented Generation) agent.
 Your goal is NOT just to check if the answer is correct, but to judge whether the agent's **search strategy**, **question grounding**, and **reliance on evidence** are flawless.
 You must penalize "lucky guesses" (correct answers without evidence) and reward "strategic resilience" (retrying after failure).
 
+The trajectory uses these XML tags:
+- <think>reasoning</think> - Agent's internal reasoning
+- <search>query</search> - Search action with query
+- <answer>final answer</answer> - Final answer submission
+- <documents>passages</documents> - Retrieved documents from search
+
 # Key Rules (Non-negotiable)
-- You must NOT use your own world knowledge. Treat ANY factual claim not supported by Observation as a hallucination.
-- A "successful search" means the Observation contains information DIRECTLY relevant to the Question's entities and required relations.
-  If the Observation is about a different entity (namesake, fictional character vs real person, wrong relation direction), it is NOT successful.
+- You must NOT use your own world knowledge. Treat ANY factual claim not supported by <documents> as a hallucination.
+- A "successful search" means the <documents> contains information DIRECTLY relevant to the Question's entities and required relations.
+  If the <documents> is about a different entity (namesake, fictional character vs real person, wrong relation direction), it is NOT successful.
 
 # Task
 You will be given a full interaction trajectory consisting of multiple steps.
@@ -214,43 +280,41 @@ Evaluate EACH step independently (but you may use previous steps to determine wh
 # Evaluation Criteria (Strict Process Supervision)
 
 **Case 0: QUESTION MISINTERPRETATION (Entity/Relation Error)**
-- **BAD if:** The step assumes the wrong entity type/domain (e.g., fictional character vs real person), wrong relation direction (son vs father), or drifts to a namesake, contradicting the Question.
+- **BAD if:** The <think> assumes the wrong entity type/domain (e.g., fictional character vs real person), wrong relation direction (son vs father), or drifts to a namesake.
 - **GOOD if:** The step maintains correct entity grounding and relation direction consistent with the Question.
 
 **Case 1: MISSING SEARCH (The 'Overconfidence' Error)**
-If the Agent chooses to **Finish** with factual details WITHOUT any prior successful Search:
+If the Agent uses <answer> with factual details WITHOUT any prior successful <search>:
 - **BAD** unless the question is truly trivial/general knowledge.
 
-**Case 2: Action is SEARCH**
+**Case 2: Step has <search> tag**
 - **GOOD if:** The query is specific, grounded in the Question (correct entities/relations), and logically derived.
   If previous search failed, the agent tries a meaningfully different strategy (synonyms, disambiguation terms, relation-focused query).
 - **BAD if:** Repeats the same failed query, is too vague, targets the wrong entity/domain, or ignores needed disambiguation.
-- **BAD if:** The query is derived from any unsupported assumption or hallucinated claim in the Thought or prior steps.
-  Do NOT accept "grounded in prior assumption" as justification unless that assumption is explicitly supported by Observation.
+- **BAD if:** The query is derived from any unsupported assumption or hallucinated claim in <think> or prior steps.
 
+**Case 3: Step has only <think> (Reasoning step)**
+- **GOOD if:** It only plans next actions or summarizes <documents> WITHOUT introducing new factual claims.
+- **BAD if:** It asserts any factual claim not explicitly supported by the <documents> (hallucination).
 
-**Case 3: Action is REASON**
-- **GOOD if:** It only plans next actions or summarizes Observation WITHOUT introducing new factual claims.
-- **BAD if:** It asserts any factual claim not explicitly supported by the current Observation (hallucination).
-
-**Case 4: Action is FINISH (Final Answer)**
+**Case 4: Step has <answer> tag (Final Answer)**
 - **BAD if any of the following:**
   (a) The answer is "Uncertain", "Unknown", "None", "N/A", or empty (non-response).
-  (b) The Thought contains uncertainty phrases like "cannot determine", "not sure", "insufficient information", "unable to verify".
-  (c) The answer is NOT logically derived from the previous Observations and Thoughts (even if accidentally correct).
-  (d) The answer does NOT semantically match the Ground Truth Answer.
-  (e) The Observation evidence is empty, irrelevant, or insufficient to support the answer.
-- **GOOD if and only if:** (1) The answer is specific and definitive (not uncertain), (2) it is logically derived from the accumulated Observation evidence in previous steps, AND (3) it semantically matches the Ground Truth Answer.
-- NOTE: Correct-by-luck without proper reasoning chain is still BAD. The agent must demonstrate HOW it arrived at the answer using retrieved evidence.
+  (b) The <think> contains uncertainty phrases like "cannot determine", "not sure", "insufficient information".
+  (c) The answer is NOT logically derivable from the accumulated <documents> - the agent made a logical leap.
+  (d) The agent finishes despite having insufficient evidence in <documents> (premature conclusion).
+  (e) The answer contradicts information explicitly stated in <documents>.
+- **GOOD if and only if:** (1) The answer is specific and definitive, (2) there is sufficient evidence in <documents>, AND (3) the answer can be logically derived from the accumulated <documents>.
+- IMPORTANT: Evaluate ONLY whether the reasoning chain is logically sound. Do NOT directly compare the answer to the Ground Truth.
 
 **Case 5: Handling Retrieval Failures**
-If the previous Observation was IRRELEVANT or EMPTY:
-- **GOOD if:** The agent admits failure and performs another **Search** immediately (with a changed strategy).
-- **BAD if:** The agent proceeds to REASON/FINISH as if it succeeded.
+If the previous <documents> was IRRELEVANT or EMPTY:
+- **GOOD if:** The agent admits failure and performs another <search> immediately (with a changed strategy).
+- **BAD if:** The agent proceeds to <answer> as if the search succeeded.
 
 # Input Data
 **Question:** {trajectory.question}
-**Ground Truth Answer:** {gold_answer}
+**Ground Truth Answer (for reference only - do NOT use this to judge correctness):** {gold_answer}
 ## Full Trajectory
 {history_str}
 {final_answer_section}
@@ -321,7 +385,7 @@ Evaluate all {len(trajectory.steps)} steps now."""
                     label = 'GOOD'
                 else:
                     label = 'BAD'
-                reasoning = result.get('reasoning', '')[:200]
+                reasoning = result.get('reasoning', '')  # No truncation
             else:
                 # Default if parsing failed
                 label = 'BAD'
@@ -331,7 +395,6 @@ Evaluate all {len(trajectory.steps)} steps now."""
                 step_id=step_idx,
                 label=label,
                 reasoning=reasoning,
-                confidence=1.0,
                 metadata={
                     "model_name": self.model_name,
                     "prompt_style": "whole_trajectory",

@@ -129,7 +129,9 @@ def evaluate_step(model, tokenizer, question: str, previous_steps: list, current
     system_content = (
         "You are a step-level critic for evaluating reasoning quality in multi-hop question answering. "
         "Analyze each step's logical soundness and evidence grounding. "
-        "First, provide a reasoning explanation inside <think> tags, and then output the final label (GOOD/BAD)."
+        "First, think inside <think> tags, then output:\n"
+        "Label: GOOD or BAD\n"
+        "Reasoning: <brief explanation>"
     )
 
     messages = [
@@ -143,28 +145,65 @@ def evaluate_step(model, tokenizer, question: str, previous_steps: list, current
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
-            max_new_tokens=512,  # Increased for <think> reasoning
+            max_new_tokens=1024,
             do_sample=False,
             pad_token_id=tokenizer.pad_token_id,
         )
 
     response = tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
 
-    # Parse label (after </think> tag)
+    # Parse final output after </think> tag
     label = "UNKNOWN"
-    if "Label: GOOD" in response or "Label:GOOD" in response:
-        label = "GOOD"
-    elif "Label: BAD" in response or "Label:BAD" in response:
-        label = "BAD"
+    reasoning = ""
+    is_truncated = False
 
-    # Extract reasoning from <think> tags
-    reasoning = response
-    if "<think>" in response and "</think>" in response:
-        think_start = response.find("<think>") + len("<think>")
-        think_end = response.find("</think>")
-        reasoning = response[think_start:think_end].strip()
+    # Get content after </think> (the final answer)
+    if "</think>" in response:
+        final_output = response.split("</think>", 1)[1].strip()
+    else:
+        # No </think> tag - might be truncated or different format
+        final_output = response.strip()
+        if "<think>" in response and "</think>" not in response:
+            is_truncated = True
 
-    return {"label": label, "reasoning": reasoning, "raw_response": response}
+    # Parse Label
+    if "Label:" in final_output:
+        label_line = final_output.split("Label:", 1)[1].split("\n")[0].strip()
+        if "GOOD" in label_line.upper():
+            label = "GOOD"
+        elif "BAD" in label_line.upper():
+            label = "BAD"
+    else:
+        # Fallback: look for GOOD/BAD anywhere in final output
+        if "GOOD" in final_output.upper() and "BAD" not in final_output.upper():
+            label = "GOOD"
+        elif "BAD" in final_output.upper():
+            label = "BAD"
+
+    # Parse Reasoning
+    if "Reasoning:" in final_output:
+        reasoning = final_output.split("Reasoning:", 1)[1].strip()
+        # Clean up: take only until next section or end
+        if "\n\n" in reasoning:
+            reasoning = reasoning.split("\n\n")[0].strip()
+    elif label != "UNKNOWN":
+        # Use everything after Label line as reasoning
+        lines = final_output.split("\n")
+        reasoning_lines = []
+        found_label = False
+        for line in lines:
+            if "Label:" in line:
+                found_label = True
+                continue
+            if found_label and line.strip():
+                reasoning_lines.append(line.strip())
+        reasoning = " ".join(reasoning_lines)
+
+    return {
+        "label": label,
+        "reasoning": reasoning,
+        "is_truncated": is_truncated
+    }
 
 
 def main():
@@ -219,9 +258,11 @@ def main():
                 'observation': parsed['observation'][:300] if parsed['observation'] else '',
                 'critic_label': result['label'],
                 'critic_reasoning': result['reasoning'],
+                'is_truncated': result.get('is_truncated', False),
             })
 
-            print(f"   Step {i+1} ({parsed['action'][:10]}): {result['label']}")
+            truncated_marker = " [TRUNCATED]" if result.get('is_truncated') else ""
+            print(f"   Step {i+1} ({parsed['action'][:10]}): {result['label']}{truncated_marker}")
 
         results.append({
             'question_id': traj.get('question_id'),
@@ -245,11 +286,17 @@ def main():
     total_steps = sum(len(r['step_evaluations']) for r in results)
     good = sum(1 for r in results for s in r['step_evaluations'] if s['critic_label'] == 'GOOD')
     bad = sum(1 for r in results for s in r['step_evaluations'] if s['critic_label'] == 'BAD')
+    unknown = sum(1 for r in results for s in r['step_evaluations'] if s['critic_label'] == 'UNKNOWN')
+    truncated = sum(1 for r in results for s in r['step_evaluations'] if s.get('is_truncated'))
 
     print(f"Trajectories: {len(results)}")
     print(f"Total steps: {total_steps}")
     print(f"GOOD: {good} ({100*good/total_steps:.1f}%)")
     print(f"BAD: {bad} ({100*bad/total_steps:.1f}%)")
+    if unknown > 0:
+        print(f"UNKNOWN: {unknown} ({100*unknown/total_steps:.1f}%)")
+    if truncated > 0:
+        print(f"Truncated responses: {truncated} ({100*truncated/total_steps:.1f}%)")
     print(f"\nSaved to: {args.output}")
 
 

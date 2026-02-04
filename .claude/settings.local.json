@@ -27,7 +27,9 @@
       "Bash(lsof:*)",
       "Bash(head -10 echo \"\" echo \"=== 다른 trajectory 생성 스크립트 확인 ===\" ls -la scripts/*traj*.py scripts/*generat*.py)",
       "Bash(echo \"없음\" echo \"\" echo \"=== outputs 폴더의 다른 결과 파일 확인 ===\" ls -la outputs/*.jsonl)",
-      "Bash(timeout 5 strace:*)"
+      "Bash(timeout 5 strace:*)",
+      "Bash(apt-get update:*)",
+      "Bash(apt-get install:*)"
     ]
   }
 }

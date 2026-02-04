@@ -9,6 +9,7 @@ Key Features:
 """
 
 import json
+import re
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
@@ -19,9 +20,148 @@ from datasets import Dataset
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
+    TrainerCallback,
 )
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from trl import SFTTrainer, SFTConfig, DataCollatorForCompletionOnlyLM
+
+
+class DebugCallback(TrainerCallback):
+    """실시간 학습 디버깅을 위한 Callback.
+
+    Features:
+    1. Loss 추이 모니터링 (매 step)
+    2. 실제 예측 결과 샘플링 (매 N step)
+    3. GPU 메모리 사용량 출력
+    4. Gradient norm 추적
+    """
+
+    def __init__(self, tokenizer, eval_samples, eval_interval=100, num_samples=3):
+        """
+        Args:
+            tokenizer: 토크나이저
+            eval_samples: 평가용 샘플 리스트 (messages 포함)
+            eval_interval: 몇 step마다 샘플 예측할지
+            num_samples: 예측할 샘플 수
+        """
+        self.tokenizer = tokenizer
+        self.eval_samples = eval_samples[:num_samples] if eval_samples else []
+        self.eval_interval = eval_interval
+        self.loss_history = []
+        self.grad_norm_history = []
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        """매 로깅 step마다 호출."""
+        if logs:
+            loss = logs.get('loss')
+            grad_norm = logs.get('grad_norm')
+
+            if loss is not None:
+                self.loss_history.append(loss)
+
+            if grad_norm is not None:
+                self.grad_norm_history.append(grad_norm)
+
+            # GPU 메모리 사용량
+            if torch.cuda.is_available():
+                allocated = torch.cuda.memory_allocated() / 1024**3
+                reserved = torch.cuda.memory_reserved() / 1024**3
+
+                print(f"\n{'='*60}")
+                print(f"[Step {state.global_step}] Loss: {loss:.4f}" if loss else f"[Step {state.global_step}]")
+                if grad_norm:
+                    print(f"  Grad Norm: {grad_norm:.4f}")
+                print(f"  GPU Memory: {allocated:.2f}GB allocated / {reserved:.2f}GB reserved")
+
+                # Loss 추이 요약 (최근 10개)
+                if len(self.loss_history) >= 10:
+                    recent = self.loss_history[-10:]
+                    print(f"  Recent Loss (last 10): {sum(recent)/len(recent):.4f} (min: {min(recent):.4f}, max: {max(recent):.4f})")
+                print(f"{'='*60}")
+
+    def on_step_end(self, args, state, control, model=None, **kwargs):
+        """매 step 끝에 호출. 주기적으로 샘플 예측 수행."""
+        if state.global_step % self.eval_interval == 0 and state.global_step > 0:
+            if model and self.eval_samples:
+                self._run_sample_predictions(model, state.global_step)
+
+    def _run_sample_predictions(self, model, step):
+        """샘플에 대해 실제 예측 수행."""
+        print(f"\n{'#'*70}")
+        print(f"# SAMPLE PREDICTIONS at Step {step}")
+        print(f"{'#'*70}")
+
+        model.eval()
+
+        for i, sample in enumerate(self.eval_samples):
+            messages = sample['messages']
+            expected_label = sample.get('label', 'UNKNOWN')
+
+            # User message만 추출 (assistant 제외)
+            input_messages = [m for m in messages if m['role'] != 'assistant']
+
+            # 입력 생성
+            input_text = self.tokenizer.apply_chat_template(
+                input_messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+
+            inputs = self.tokenizer(input_text, return_tensors="pt").to(model.device)
+
+            with torch.no_grad():
+                outputs = model.generate(
+                    **inputs,
+                    max_new_tokens=512,
+                    temperature=0.1,
+                    do_sample=True,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                )
+
+            generated = self.tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
+
+            # Label 추출 (1 = GOOD, 0 = BAD)
+            predicted_label = -1  # Unknown
+            if "Label: 1" in generated or "Label:1" in generated:
+                predicted_label = 1
+            elif "Label: 0" in generated or "Label:0" in generated:
+                predicted_label = 0
+
+            match = "✓" if predicted_label == expected_label else "✗"
+
+            print(f"\n[Sample {i+1}] Expected: {expected_label} | Predicted: {predicted_label} {match}")
+            print(f"Generated (truncated):")
+            print(f"  {generated[:300]}...")
+
+        model.train()
+        print(f"\n{'#'*70}\n")
+
+    def on_train_end(self, args, state, control, **kwargs):
+        """학습 종료 시 최종 통계 출력."""
+        print(f"\n{'='*70}")
+        print("TRAINING SUMMARY")
+        print(f"{'='*70}")
+        print(f"Total steps: {state.global_step}")
+        print(f"Total epochs: {state.epoch:.2f}")
+
+        if self.loss_history:
+            print(f"\nLoss Statistics:")
+            print(f"  Initial: {self.loss_history[0]:.4f}")
+            print(f"  Final: {self.loss_history[-1]:.4f}")
+            print(f"  Min: {min(self.loss_history):.4f}")
+            print(f"  Max: {max(self.loss_history):.4f}")
+            print(f"  Avg: {sum(self.loss_history)/len(self.loss_history):.4f}")
+
+            # Loss 감소율
+            if len(self.loss_history) > 1:
+                reduction = (self.loss_history[0] - self.loss_history[-1]) / self.loss_history[0] * 100
+                print(f"  Reduction: {reduction:.1f}%")
+
+        if self.grad_norm_history:
+            print(f"\nGradient Norm Statistics:")
+            print(f"  Avg: {sum(self.grad_norm_history)/len(self.grad_norm_history):.4f}")
+            print(f"  Max: {max(self.grad_norm_history):.4f}")
+        print(f"{'='*70}")
 
 
 @dataclass
@@ -94,8 +234,9 @@ class CriticDataFormatter:
                 action_input = prev_step.get('action_input', '')
                 input_parts.append(f"Action: {action}[{action_input}]" if action_input else f"Action: {action}")
 
-                if prev_step.get('observation'):
-                    input_parts.append(f"Observation: {prev_step.get('observation')}")
+                if prev_step.get('observation') or prev_step.get('documents'):
+                    docs = prev_step.get('documents') or prev_step.get('observation')
+                    input_parts.append(f"Documents: {docs}")
                 input_parts.append("")
 
         input_parts.append("Current Step to Evaluate:")
@@ -106,26 +247,28 @@ class CriticDataFormatter:
         action_input = current_step.get('action_input', '')
         input_parts.append(f"Action: {action}[{action_input}]" if action_input else f"Action: {action}")
 
-        if current_step.get('observation'):
-            input_parts.append(f"Observation: {current_step.get('observation')}")
+        if current_step.get('observation') or current_step.get('documents'):
+            docs = current_step.get('documents') or current_step.get('observation')
+            input_parts.append(f"Documents: {docs}")
 
         input_parts.append("")
-        input_parts.append("Task: Evaluate the quality of the Current Step. First, analyze whether the reasoning is logically sound and grounded in evidence using the <think> tag, then provide a label (GOOD/BAD).")
+        input_parts.append("Task: Evaluate the quality of the Current Step. Provide reasoning and then a label (1=good, 0=bad).")
 
         user_content = "\n".join(input_parts)
-        
-        # 2. Build Assistant Response (DeepSeek Style)
-        # We inject the reasoning into <think> tags to train the model's internal monologue.
-        label = current_step.get('judge_label', 'UNKNOWN').upper()
+
+        # 2. Build Assistant Response (Direct format without <think> tags)
+        # Output: reasoning followed by label (1/0)
+        # Label is already numeric (1=good, 0=bad) from preprocessed data
+        label = current_step.get('judge_label', 0)
         reasoning = current_step.get('judge_reasoning', '')
-        
-        # The Core Logic: Reasoning First, Label Last.
-        assistant_content = f"<think>\n{reasoning}\n</think>\nLabel: {label}"
+
+        # Direct format: Reasoning + Label (no special tags)
+        assistant_content = f"Reasoning: {reasoning}\nLabel: {label}"
 
         system_content = (
             "You are a step-level critic for evaluating reasoning quality in multi-hop question answering. "
             "Analyze each step's logical soundness and evidence grounding. "
-            "First, provide a reasoning explanation inside <think> tags, and then output the final label (GOOD/BAD)."
+            "Output your reasoning followed by a label (1=good, 0=bad)."
         )
 
         return [
@@ -136,7 +279,7 @@ class CriticDataFormatter:
 
     def prepare_training_data(self, data_file: Path) -> List[Dict[str, Any]]:
         training_samples = []
-        label_counts = {'GOOD': 0, 'BAD': 0}
+        label_counts = {1: 0, 0: 0}  # 1=good, 0=bad
 
         print(f"Reading data from {data_file}...")
         with open(data_file) as f:
@@ -147,9 +290,10 @@ class CriticDataFormatter:
                     steps = trajectory['steps']
 
                     for idx, step in enumerate(steps):
-                        label = step.get('judge_label', 'UNKNOWN').upper()
-                        # Only train on valid labels
-                        if label not in ['GOOD', 'BAD']:
+                        # Label is already numeric (1=good, 0=bad) from preprocessed data
+                        label = step.get('judge_label')
+                        # Only train on valid labels (0 or 1)
+                        if label not in [0, 1]:
                             continue
 
                         messages = self.format_step_for_training(
@@ -162,13 +306,13 @@ class CriticDataFormatter:
                             'messages': messages,  # SFTTrainer expects 'messages' column
                             'question_id': trajectory.get('question_id', trajectory.get('trajectory_id')),
                             'step_num': step.get('step_num', idx + 1),
-                            'label': label,
+                            'label': label,  # 1=good, 0=bad
                         })
                         label_counts[label] += 1
                 except json.JSONDecodeError:
                     continue
 
-        print(f"  Data Stats: GOOD={label_counts['GOOD']}, BAD={label_counts['BAD']}")
+        print(f"  Data Stats: 1(good)={label_counts[1]}, 0(bad)={label_counts[0]}")
         return training_samples
 
 
@@ -181,7 +325,13 @@ class CriticTrainer:
         self.tokenizer = AutoTokenizer.from_pretrained(config.model_name, trust_remote_code=True)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-        
+
+        # IMPORTANT: Set truncation_side="left" to preserve Assistant output (training target)
+        # When sequence exceeds max_seq_length, truncate from the left (input) instead of right (output)
+        self.tokenizer.truncation_side = "left"
+        # Set padding_side="right" for proper batch padding
+        self.tokenizer.padding_side = "right"
+
         self.formatter = CriticDataFormatter(self.tokenizer)
         self.model = None
 
@@ -264,7 +414,7 @@ class CriticTrainer:
         self.model.print_trainable_parameters()
         print("✓ Model loaded with LoRA")
 
-    def train(self, train_dataset: Dataset, eval_dataset: Optional[Dataset] = None):
+    def train(self, train_dataset: Dataset, eval_dataset: Optional[Dataset] = None, debug_interval: int = 100):
         if self.model is None:
             self.load_model()
 
@@ -272,7 +422,7 @@ class CriticTrainer:
         # This ensures we only calculate loss on the Assistant's response (Reasoning + Label),
         # not on the User's prompt.
         response_template = self._get_response_template()
-        
+
         collator = DataCollatorForCompletionOnlyLM(
             response_template=response_template,
             tokenizer=self.tokenizer,
@@ -298,10 +448,35 @@ class CriticTrainer:
             remove_unused_columns=True,
         )
 
+        # 디버깅용 샘플 준비 (GOOD/BAD 각각 포함)
+        debug_samples = []
+        good_sample = None
+        bad_sample = None
+        for sample in train_dataset:
+            if sample.get('label') == 'GOOD' and good_sample is None:
+                good_sample = sample
+            elif sample.get('label') == 'BAD' and bad_sample is None:
+                bad_sample = sample
+            if good_sample and bad_sample:
+                break
+        if good_sample:
+            debug_samples.append(good_sample)
+        if bad_sample:
+            debug_samples.append(bad_sample)
+
+        # DebugCallback 생성
+        debug_callback = DebugCallback(
+            tokenizer=self.tokenizer,
+            eval_samples=debug_samples,
+            eval_interval=debug_interval,
+            num_samples=2,
+        )
+
         print("\n" + "=" * 70)
         print(f"STARTING TRAINING with template: {repr(response_template)}")
+        print(f"Debug interval: {debug_interval} steps")
         print("=" * 70)
-        
+
         trainer = SFTTrainer(
             model=self.model,
             args=sft_config,
@@ -309,6 +484,7 @@ class CriticTrainer:
             eval_dataset=eval_dataset,
             processing_class=self.tokenizer,
             data_collator=collator, # Apply masking
+            callbacks=[debug_callback],  # 디버깅 callback 추가
         )
 
         trainer.train()

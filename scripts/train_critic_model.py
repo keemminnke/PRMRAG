@@ -120,6 +120,14 @@ def main():
         help="LoRA dropout"
     )
 
+    # Debug
+    parser.add_argument(
+        "--debug-interval",
+        type=int,
+        default=100,
+        help="Interval (steps) for sample prediction debugging"
+    )
+
     args = parser.parse_args()
 
     # Validate
@@ -166,21 +174,21 @@ def main():
     print("=" * 70)
     print()
 
-    # Count labels
-    label_counts = {'GOOD': 0, 'BAD': 0, 'OTHER': 0}
+    # Count labels (1 = GOOD, 0 = BAD)
+    label_counts = {1: 0, 0: 0, -1: 0}  # 1=GOOD, 0=BAD, -1=OTHER
     for sample in train_dataset:
-        label = sample.get('label', 'OTHER')
+        label = sample.get('label', -1)
         if label in label_counts:
             label_counts[label] += 1
         else:
-            label_counts['OTHER'] += 1
+            label_counts[-1] += 1
 
     print(f"Total samples: {len(train_dataset)}")
-    print(f"Label distribution:")
-    print(f"  - GOOD: {label_counts['GOOD']} ({100*label_counts['GOOD']/len(train_dataset):.1f}%)")
-    print(f"  - BAD: {label_counts['BAD']} ({100*label_counts['BAD']/len(train_dataset):.1f}%)")
-    if label_counts['OTHER'] > 0:
-        print(f"  - OTHER: {label_counts['OTHER']}")
+    print(f"Label distribution (1=GOOD, 0=BAD):")
+    print(f"  - 1 (GOOD): {label_counts[1]} ({100*label_counts[1]/len(train_dataset):.1f}%)")
+    print(f"  - 0 (BAD): {label_counts[0]} ({100*label_counts[0]/len(train_dataset):.1f}%)")
+    if label_counts[-1] > 0:
+        print(f"  - OTHER: {label_counts[-1]}")
     print()
 
     # Show detailed sample (full content, not truncated)
@@ -248,10 +256,11 @@ def main():
         print(f"  Exceeding max_seq_length: {exceeding} ({100*exceeding/len(token_lengths):.1f}%)")
     print()
 
-    # Train
+    # Train with debugging
     trainer.train(
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
+        debug_interval=args.debug_interval,
     )
 
     print("\n" + "=" * 70)
