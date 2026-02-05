@@ -2,14 +2,23 @@
 """Stage 1: Generate trajectories only (no Judge evaluation).
 
 Generate N trajectories per question using Policy model.
-Uses Dense retrieval (BGE-M3) + BGE Reranker - Fully GPU accelerated.
+Supports both KILT corpus (BGE-M3 + Reranker) and HotpotQA (BM25).
 
 Usage:
+    # KILT corpus with BGE-M3 + Reranker (fully GPU accelerated)
     python scripts/generate_trajectories.py \
         --data_path data/raw/questions/hotpotqa_train.jsonl \
         --output_path outputs/trajectories.jsonl \
         --num_samples 16 \
         --batch_size 50
+
+    # HotpotQA validation with BM25 only (no rerank)
+    python scripts/generate_trajectories.py \
+        --data_path data/hotpot_dev_distractor_v1.json \
+        --output_path outputs/trajectories_hotpot.jsonl \
+        --num_samples 8 \
+        --use_hotpotqa_corpus \
+        --no_rerank
 """
 
 import sys
@@ -26,6 +35,7 @@ from prmrag.models import load_policy_model
 from prmrag.generation.adaptive_generator import SimpleTrajectoryGenerator
 from prmrag.retrieval.bge_retriever import BGERetriever
 from prmrag.retrieval.bge_reranker import BGEReranker
+from prmrag.retrieval import BM25Retriever
 
 
 class DenseRetrieverWithReranker:
@@ -63,6 +73,27 @@ class DenseRetrieverWithReranker:
                     for q, c in zip(queries, all_candidates)]
         else:
             return [c[:top_k] for c in all_candidates]
+
+
+def build_hotpotqa_corpus(data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Build corpus from HotpotQA context paragraphs."""
+    corpus = []
+    seen = set()
+
+    for item in data:
+        for title, sentences in item.get('context', []):
+            text = ' '.join(sentences)
+            key = f"{title}::{text[:100]}"
+            if key not in seen:
+                corpus.append({
+                    'id': f"hotpotqa_{len(corpus)}",
+                    'title': title,
+                    'text': text,
+                })
+                seen.add(key)
+
+    print(f"  Built HotpotQA corpus: {len(corpus)} passages")
+    return corpus
 
 
 def get_truncated_text(doc_text_list, max_chars=1200):
@@ -194,6 +225,10 @@ def main():
                         help='Number of passages to retrieve per query')
     parser.add_argument('--rerank_top_n', type=int, default=20,
                         help='Rerank top-N candidates from fusion (default: 20)')
+    parser.add_argument('--use_hotpotqa_corpus', action='store_true',
+                        help='Use HotpotQA context as corpus instead of KILT')
+    parser.add_argument('--no_rerank', action='store_true',
+                        help='Disable reranking (use BM25 only for HotpotQA)')
 
     # GPU settings
     parser.add_argument('--gpu_memory_utilization', type=float, default=0.88,
@@ -210,7 +245,14 @@ def main():
     print(f"Samples per question: {args.num_samples}")
     print(f"Batch size: {args.batch_size}")
     print(f"Temperature: {args.temperature}")
-    print(f"Retriever: Dense (BGE-M3 + Reranker) - Fully GPU accelerated")
+    if args.use_hotpotqa_corpus:
+        print(f"Retriever: BM25 (HotpotQA corpus)")
+        if args.no_rerank:
+            print(f"Reranking: Disabled")
+        else:
+            print(f"Reranking: Enabled")
+    else:
+        print(f"Retriever: Dense (BGE-M3 + Reranker) - Fully GPU accelerated")
     print("=" * 70)
 
     # Load questions
@@ -221,34 +263,60 @@ def main():
     # Data directory
     data_dir = Path(__file__).parent.parent / "data"
 
-    # [1] Load KILT corpus
-    print(f"\n[1/4] Loading KILT corpus...")
-    corpus_file = data_dir / "kilt" / "kilt_knowledgesource.json"
-    corpus = load_kilt_corpus(corpus_file, limit=args.corpus_limit)
+    # [1] Load corpus (KILT or HotpotQA)
+    if args.use_hotpotqa_corpus:
+        print(f"\n[1/4] Building corpus from HotpotQA context...")
+        corpus = build_hotpotqa_corpus(questions)
+    else:
+        print(f"\n[1/4] Loading KILT corpus...")
+        corpus_file = data_dir / "kilt" / "kilt_knowledgesource.json"
+        corpus = load_kilt_corpus(corpus_file, limit=args.corpus_limit)
 
-    # [2] Initialize Dense Retriever (BGE + Reranker, fully GPU)
-    print(f"\n[2/4] Initializing Dense retriever (BGE-M3 + Reranker)...")
+    # [2] Initialize Retriever
+    if args.use_hotpotqa_corpus:
+        # HotpotQA mode: BM25 with optional reranking
+        print(f"\n[2/4] Initializing BM25 retriever (HotpotQA mode)...")
+        retriever = BM25Retriever(corpus)
+        print(f"  ✓ BM25 retriever initialized")
 
-    # BGE retriever
-    embedding_cache = data_dir / "embeddings" / "kilt_wikipedia_bge_m3.npy"
-    print(f"  [2.1] Initializing BGE-M3 retriever...")
-    bge_retriever = BGERetriever(
-        corpus=corpus,
-        batch_size=64,
-        embedding_cache_path=str(embedding_cache)
-    )
+        if not args.no_rerank:
+            try:
+                print(f"  Initializing reranker...")
+                reranker = BGEReranker(device="cuda", batch_size=64)
+                retriever = DenseRetrieverWithReranker(
+                    bge_retriever=retriever,  # Using BM25 as first stage
+                    reranker=reranker,
+                    top_k_candidates=args.rerank_top_n,
+                )
+                print(f"  ✓ Reranker enabled")
+            except Exception as e:
+                print(f"  ⚠ Reranker not available: {e}")
+        else:
+            print(f"  ✓ Reranking disabled (BM25 only)")
+    else:
+        # KILT mode: Dense (BGE + Reranker, fully GPU)
+        print(f"\n[2/4] Initializing Dense retriever (BGE-M3 + Reranker)...")
 
-    # BGE Reranker
-    print(f"  [2.2] Initializing BGE Reranker...")
-    reranker = BGEReranker(device="cuda", batch_size=64)
+        # BGE retriever
+        embedding_cache = data_dir / "embeddings" / "kilt_wikipedia_bge_m3.npy"
+        print(f"  [2.1] Initializing BGE-M3 retriever...")
+        bge_retriever = BGERetriever(
+            corpus=corpus,
+            batch_size=64,
+            embedding_cache_path=str(embedding_cache)
+        )
 
-    # Combine BGE + Reranker (fully GPU accelerated)
-    print(f"  [2.3] Combining BGE + Reranker...")
-    retriever = DenseRetrieverWithReranker(
-        bge_retriever=bge_retriever,
-        reranker=reranker,
-        top_k_candidates=args.rerank_top_n,
-    )
+        # BGE Reranker
+        print(f"  [2.2] Initializing BGE Reranker...")
+        reranker = BGEReranker(device="cuda", batch_size=64)
+
+        # Combine BGE + Reranker (fully GPU accelerated)
+        print(f"  [2.3] Combining BGE + Reranker...")
+        retriever = DenseRetrieverWithReranker(
+            bge_retriever=bge_retriever,
+            reranker=reranker,
+            top_k_candidates=args.rerank_top_n,
+        )
 
     # [3] Initialize policy model
     print(f"\n[3/4] Loading policy model...")
@@ -345,8 +413,8 @@ def main():
                         'step_type': step.metadata.get('action', 'unknown'),  # search, answer, reason
                     }
 
-                    # Parse content to extract think, search/answer, documents
-                    content = step.content or ''
+                    # Parse text to extract think, search/answer, documents
+                    content = step.text or ''
 
                     # Extract <think>
                     import re

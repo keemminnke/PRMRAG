@@ -1,4 +1,4 @@
-"""BGE-M3 dense retriever for semantic search."""
+"""BGE-M3 dense retriever with FAISS-GPU for fast similarity search."""
 
 import warnings
 # Suppress XLMRobertaTokenizerFast warning from BGE-M3
@@ -11,9 +11,17 @@ from tqdm import tqdm
 from pathlib import Path
 import pickle
 
+# Import FAISS
+try:
+    import faiss
+    FAISS_AVAILABLE = True
+except ImportError:
+    FAISS_AVAILABLE = False
+    print("Warning: FAISS not available. Install with: pip install faiss-gpu")
+
 
 class BGERetriever:
-    """BGE-M3 dense retriever using semantic embeddings."""
+    """BGE-M3 dense retriever with FAISS-GPU acceleration."""
 
     def __init__(
         self,
@@ -23,8 +31,9 @@ class BGERetriever:
         max_length: int = 512,
         device: Optional[str] = None,
         embedding_cache_path: Optional[str] = None,
+        use_gpu: bool = True,
     ):
-        """Initialize BGE retriever.
+        """Initialize BGE retriever with FAISS-GPU.
 
         Args:
             corpus: List of documents, each with 'id', 'title', 'text'
@@ -32,13 +41,15 @@ class BGERetriever:
             batch_size: Batch size for encoding
             max_length: Max sequence length
             device: Device to use (None = auto-detect)
-            embedding_cache_path: Path to load/save corpus embeddings (None = don't cache)
+            embedding_cache_path: Path to load/save corpus embeddings
+            use_gpu: Whether to use GPU for FAISS (default: True)
         """
         self.corpus = corpus
         self.batch_size = batch_size
         self.max_length = max_length
         self.model_name = model_name
         self.embedding_cache_path = embedding_cache_path
+        self.use_gpu = use_gpu and FAISS_AVAILABLE and torch.cuda.is_available()
 
         # Auto-detect device
         if device is None:
@@ -51,7 +62,7 @@ class BGERetriever:
 
         self.model = BGEM3FlagModel(
             model_name,
-            use_fp16=(self.device == "cuda")  # Use FP16 on GPU for speed
+            use_fp16=(self.device == "cuda")
         )
         print("✓ BGE-M3 model loaded")
 
@@ -63,26 +74,51 @@ class BGERetriever:
         else:
             print(f"Building dense embeddings for {len(corpus)} documents...")
             self.doc_embeddings = self._encode_corpus()
-            print("✓ Dense index built!")
+            print("✓ Dense embeddings built!")
 
-            # Save embeddings if cache path provided
             if embedding_cache_path:
                 self._save_embeddings(embedding_cache_path)
                 print(f"✓ Saved embeddings to {embedding_cache_path}")
 
+        # Build FAISS index
+        self._build_faiss_index()
+
+    def _build_faiss_index(self):
+        """Build FAISS index for fast similarity search."""
+        if not FAISS_AVAILABLE:
+            print("Warning: FAISS not available, falling back to numpy (slow)")
+            self.faiss_index = None
+            return
+
+        print("Building FAISS index...")
+
+        # Get embedding dimension
+        embed_dim = self.doc_embeddings.shape[1]
+
+        # Normalize embeddings for cosine similarity (inner product on normalized = cosine)
+        embeddings = self.doc_embeddings.astype(np.float32)
+        faiss.normalize_L2(embeddings)
+
+        # Create index (IndexFlatIP = Inner Product, use with normalized vectors for cosine sim)
+        self.faiss_index = faiss.IndexFlatIP(embed_dim)
+
+        if self.use_gpu:
+            print("  Moving FAISS index to GPU...")
+            # Use GPU 0
+            res = faiss.StandardGpuResources()
+            self.faiss_index = faiss.index_cpu_to_gpu(res, 0, self.faiss_index)
+            print("  ✓ FAISS index on GPU")
+        else:
+            print("  Using CPU FAISS index")
+
+        # Add embeddings to index
+        self.faiss_index.add(embeddings)
+        print(f"✓ FAISS index built with {self.faiss_index.ntotal} vectors")
+
     def _encode_corpus(self) -> np.ndarray:
-        """Encode all corpus documents into embeddings.
+        """Encode all corpus documents into embeddings."""
+        texts = [f"{doc['title']} {doc['text']}" for doc in self.corpus]
 
-        Returns:
-            Array of shape (num_docs, embedding_dim)
-        """
-        # Prepare texts (title + text)
-        texts = [
-            f"{doc['title']} {doc['text']}"
-            for doc in self.corpus
-        ]
-
-        # Encode in batches
         all_embeddings = []
         for i in tqdm(range(0, len(texts), self.batch_size), desc="Encoding corpus"):
             batch = texts[i:i + self.batch_size]
@@ -93,49 +129,30 @@ class BGERetriever:
             )['dense_vecs']
             all_embeddings.append(embeddings)
 
-        # Concatenate all batches
-        embeddings = np.vstack(all_embeddings)
-        return embeddings
+        return np.vstack(all_embeddings)
 
     def _save_embeddings(self, cache_path: str):
-        """Save corpus embeddings to disk.
-
-        Args:
-            cache_path: Path to save embeddings
-        """
+        """Save corpus embeddings to disk."""
         cache_path = Path(cache_path)
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Save as numpy array (more efficient than pickle)
         np.save(cache_path, self.doc_embeddings)
 
     def _load_embeddings(self, cache_path: str) -> np.ndarray:
-        """Load corpus embeddings from disk.
-
-        Args:
-            cache_path: Path to load embeddings from
-
-        Returns:
-            Loaded embeddings array
-        """
-        # Try standard np.load first
+        """Load corpus embeddings from disk."""
         try:
             embeddings = np.load(cache_path)
-            # If corpus is smaller, take only the first N embeddings
             if len(embeddings) > len(self.corpus):
                 print(f"  Warning: Embedding file has {len(embeddings)} docs, "
                       f"but corpus has {len(self.corpus)} docs. Using first {len(self.corpus)} embeddings.")
                 return embeddings[:len(self.corpus)]
             return embeddings
         except (ValueError, pickle.UnpicklingError):
-            # Fall back to memmap loading (used by embed_kilt_bge_m3.py)
-            # Calculate shape from file size and corpus length
+            # Fall back to memmap loading
             file_size = Path(cache_path).stat().st_size
-            embed_dim = 1024  # BGE-M3 dimension
+            embed_dim = 1024
             bytes_per_float16 = 2
             num_docs_in_file = file_size // (embed_dim * bytes_per_float16)
 
-            # Load full memmap
             full_embeddings = np.memmap(
                 cache_path,
                 dtype=np.float16,
@@ -143,11 +160,9 @@ class BGERetriever:
                 shape=(num_docs_in_file, embed_dim)
             )
 
-            # If corpus is smaller, take only the first N embeddings
             if num_docs_in_file > len(self.corpus):
                 print(f"  Warning: Embedding file has {num_docs_in_file} docs, "
                       f"but corpus has {len(self.corpus)} docs. Using first {len(self.corpus)} embeddings.")
-                # Load the subset into memory (memmap slicing still references the file)
                 return np.array(full_embeddings[:len(self.corpus)])
             elif num_docs_in_file < len(self.corpus):
                 raise ValueError(
@@ -155,22 +170,10 @@ class BGERetriever:
                     f"but corpus has {len(self.corpus)} docs"
                 )
 
-            return full_embeddings
+            return np.array(full_embeddings)  # Load into memory for FAISS
 
-    def retrieve(
-        self,
-        query: str,
-        top_k: int = 5
-    ) -> List[Dict[str, Any]]:
-        """Retrieve top-k documents for a query.
-
-        Args:
-            query: Search query
-            top_k: Number of documents to retrieve
-
-        Returns:
-            List of retrieved documents with scores
-        """
+    def retrieve(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+        """Retrieve top-k documents for a query using FAISS."""
         # Encode query
         query_embedding = self.model.encode(
             [query],
@@ -178,46 +181,44 @@ class BGERetriever:
             batch_size=1,
         )['dense_vecs'][0]
 
-        # Compute cosine similarity with all documents
-        # Normalize query embedding
-        query_norm = query_embedding / np.linalg.norm(query_embedding)
+        # Normalize for cosine similarity
+        query_embedding = query_embedding.astype(np.float32)
+        faiss.normalize_L2(query_embedding.reshape(1, -1))
 
-        # Normalize doc embeddings
-        doc_norms = np.linalg.norm(self.doc_embeddings, axis=1, keepdims=True)
-        doc_embeddings_norm = self.doc_embeddings / doc_norms
-
-        # Compute similarity scores
-        scores = np.dot(doc_embeddings_norm, query_norm)
-
-        # Get top-k indices
-        top_k_indices = np.argsort(scores)[::-1][:top_k]
+        if self.faiss_index is not None:
+            # FAISS search (GPU accelerated)
+            scores, indices = self.faiss_index.search(
+                query_embedding.reshape(1, -1), top_k
+            )
+            scores = scores[0]
+            indices = indices[0]
+        else:
+            # Fallback to numpy (slow)
+            doc_norms = np.linalg.norm(self.doc_embeddings, axis=1, keepdims=True)
+            doc_embeddings_norm = self.doc_embeddings / doc_norms
+            scores = np.dot(doc_embeddings_norm, query_embedding)
+            indices = np.argsort(scores)[::-1][:top_k]
+            scores = scores[indices]
 
         results = []
-        for idx in top_k_indices:
+        for idx, score in zip(indices, scores):
+            if idx < 0:  # FAISS returns -1 for empty slots
+                continue
             doc = self.corpus[idx]
             results.append({
                 'doc_id': doc['id'],
                 'title': doc['title'],
                 'text': doc['text'],
-                'score': float(scores[idx]),
+                'score': float(score),
             })
 
         return results
 
-    def batch_retrieve(
-        self,
-        queries: List[str],
-        top_k: int = 5
-    ) -> List[List[Dict[str, Any]]]:
-        """Retrieve for multiple queries.
+    def batch_retrieve(self, queries: List[str], top_k: int = 5) -> List[List[Dict[str, Any]]]:
+        """Batch retrieve for multiple queries using FAISS."""
+        if not queries:
+            return []
 
-        Args:
-            queries: List of search queries
-            top_k: Number of documents per query
-
-        Returns:
-            List of retrieval results
-        """
         # Encode all queries at once
         query_embeddings = self.model.encode(
             queries,
@@ -225,30 +226,36 @@ class BGERetriever:
             batch_size=self.batch_size,
         )['dense_vecs']
 
-        # Normalize
-        query_norms = np.linalg.norm(query_embeddings, axis=1, keepdims=True)
-        query_embeddings_norm = query_embeddings / query_norms
+        # Normalize for cosine similarity
+        query_embeddings = query_embeddings.astype(np.float32)
+        faiss.normalize_L2(query_embeddings)
 
-        doc_norms = np.linalg.norm(self.doc_embeddings, axis=1, keepdims=True)
-        doc_embeddings_norm = self.doc_embeddings / doc_norms
+        if self.faiss_index is not None:
+            # FAISS batch search (GPU accelerated)
+            scores_matrix, indices_matrix = self.faiss_index.search(query_embeddings, top_k)
+        else:
+            # Fallback to numpy (slow)
+            doc_norms = np.linalg.norm(self.doc_embeddings, axis=1, keepdims=True)
+            doc_embeddings_norm = self.doc_embeddings / doc_norms
+            query_norms = np.linalg.norm(query_embeddings, axis=1, keepdims=True)
+            query_embeddings_norm = query_embeddings / query_norms
+            scores_all = np.dot(query_embeddings_norm, doc_embeddings_norm.T)
+            indices_matrix = np.argsort(scores_all, axis=1)[:, ::-1][:, :top_k]
+            scores_matrix = np.take_along_axis(scores_all, indices_matrix, axis=1)
 
-        # Compute similarity matrix (queries x docs)
-        scores_matrix = np.dot(query_embeddings_norm, doc_embeddings_norm.T)
-
-        # Get top-k for each query
+        # Build results
         all_results = []
-        for i, query in enumerate(queries):
-            scores = scores_matrix[i]
-            top_k_indices = np.argsort(scores)[::-1][:top_k]
-
+        for i in range(len(queries)):
             results = []
-            for idx in top_k_indices:
+            for idx, score in zip(indices_matrix[i], scores_matrix[i]):
+                if idx < 0:
+                    continue
                 doc = self.corpus[idx]
                 results.append({
                     'doc_id': doc['id'],
                     'title': doc['title'],
                     'text': doc['text'],
-                    'score': float(scores[idx]),
+                    'score': float(score),
                 })
             all_results.append(results)
 

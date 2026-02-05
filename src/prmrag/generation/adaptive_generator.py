@@ -538,12 +538,11 @@ class SimpleTrajectoryGenerator:
                         step_id=step_num,
                         step_type=StepType.ANSWER,
                         text=step_content,
-                        content=step_content,
                         used_passages=[],
                         mc_before=0.0,
                         mc_after=0.0,
                         rpe=0.0,
-                        metadata={'action': 'finish'},
+                        metadata={'action': 'answer'},
                     )
                     state['steps'].append(step)
                     state['finished'] = True
@@ -561,7 +560,6 @@ class SimpleTrajectoryGenerator:
                         step_id=step_num,
                         step_type=StepType.RAG,
                         text=full_content,
-                        content=full_content,
                         used_passages=passages,
                         mc_before=0.0,
                         mc_after=0.0,
@@ -579,7 +577,6 @@ class SimpleTrajectoryGenerator:
                         step_id=step_num,
                         step_type=StepType.COT,
                         text=step_content,
-                        content=step_content,
                         used_passages=[],
                         mc_before=0.0,
                         mc_after=0.0,

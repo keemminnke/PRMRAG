@@ -94,9 +94,9 @@ def main():
         help="Learning rate"
     )
     parser.add_argument(
-        "--max-seq-length",
+        "--max-length",
         type=int,
-        default=4096,
+        default=8192,
         help="Maximum sequence length"
     )
 
@@ -157,7 +157,7 @@ def main():
         per_device_train_batch_size=args.batch_size,
         gradient_accumulation_steps=args.gradient_accumulation,
         learning_rate=args.learning_rate,
-        max_seq_length=args.max_seq_length,
+        max_length=args.max_length,
         lora_r=args.lora_r,
         lora_alpha=args.lora_alpha,
         lora_dropout=args.lora_dropout,
@@ -233,9 +233,9 @@ def main():
     )
     tokens = trainer.tokenizer.encode(sample_text)
     print(f"Sample 1 token count: {len(tokens)}")
-    print(f"Max sequence length: {args.max_seq_length}")
-    if len(tokens) > args.max_seq_length:
-        print(f"WARNING: Sample exceeds max_seq_length by {len(tokens) - args.max_seq_length} tokens!")
+    print(f"Max sequence length: {args.max_length}")
+    if len(tokens) > args.max_length:
+        print(f"WARNING: Sample exceeds max_length by {len(tokens) - args.max_length} tokens!")
 
     # Check a few more samples for token length distribution
     token_lengths = []
@@ -251,9 +251,9 @@ def main():
     print(f"  Min: {min(token_lengths)}")
     print(f"  Max: {max(token_lengths)}")
     print(f"  Avg: {sum(token_lengths)/len(token_lengths):.0f}")
-    exceeding = sum(1 for l in token_lengths if l > args.max_seq_length)
+    exceeding = sum(1 for l in token_lengths if l > args.max_length)
     if exceeding > 0:
-        print(f"  Exceeding max_seq_length: {exceeding} ({100*exceeding/len(token_lengths):.1f}%)")
+        print(f"  Exceeding max_length: {exceeding} ({100*exceeding/len(token_lengths):.1f}%)")
     print()
 
     # Train with debugging

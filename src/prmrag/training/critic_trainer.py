@@ -23,7 +23,70 @@ from transformers import (
     TrainerCallback,
 )
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-from trl import SFTTrainer, SFTConfig, DataCollatorForCompletionOnlyLM
+from trl import SFTTrainer, SFTConfig
+
+
+class DataCollatorForCompletionOnlyLM:
+    """Custom Data Collator that masks input tokens and only computes loss on completion (assistant response).
+
+    This implementation:
+    1. Finds the response_template in the tokenized sequence
+    2. Sets labels to -100 for all tokens before the response (input masking)
+    3. Keeps labels for response tokens (both <think> reasoning and Label)
+    """
+
+    def __init__(self, response_template: str, tokenizer, mlm: bool = False):
+        self.response_template = response_template
+        self.tokenizer = tokenizer
+        self.mlm = mlm
+
+        # Tokenize response template to find its token IDs
+        self.response_template_ids = self.tokenizer.encode(
+            response_template, add_special_tokens=False
+        )
+
+    def __call__(self, examples):
+        # Batch tokenization
+        batch = self.tokenizer.pad(
+            examples,
+            padding=True,
+            return_tensors="pt",
+        )
+
+        # Create labels (copy of input_ids)
+        labels = batch["input_ids"].clone()
+
+        # Mask padding tokens
+        labels[labels == self.tokenizer.pad_token_id] = -100
+
+        # For each sequence, find response_template and mask everything before it
+        for i in range(len(labels)):
+            input_ids = batch["input_ids"][i].tolist()
+
+            # Find the start of the response template
+            response_start = self._find_template_start(input_ids)
+
+            if response_start != -1:
+                # Mask all tokens before the response (including the template itself)
+                # We want to train on the content AFTER the template
+                response_content_start = response_start + len(self.response_template_ids)
+                labels[i, :response_content_start] = -100
+            else:
+                # If template not found, mask everything (no loss computed)
+                labels[i, :] = -100
+
+        batch["labels"] = labels
+        return batch
+
+    def _find_template_start(self, input_ids: list) -> int:
+        """Find the starting index of the response template in input_ids."""
+        template_len = len(self.response_template_ids)
+
+        for i in range(len(input_ids) - template_len + 1):
+            if input_ids[i:i + template_len] == self.response_template_ids:
+                return i
+
+        return -1
 
 
 class DebugCallback(TrainerCallback):
@@ -109,7 +172,8 @@ class DebugCallback(TrainerCallback):
 
             inputs = self.tokenizer(input_text, return_tensors="pt").to(model.device)
 
-            with torch.no_grad():
+            # Use autocast for FlashAttention compatibility (requires bf16/fp16)
+            with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 outputs = model.generate(
                     **inputs,
                     max_new_tokens=512,
@@ -187,7 +251,7 @@ class CriticTrainingConfig:
     learning_rate: float = 2e-4
     warmup_ratio: float = 0.1
     # DeepSeek-R1 generates long chains of thought, so we need a long context.
-    max_seq_length: int = 4096 
+    max_length: int = 4096 
 
     # Logging
     logging_steps: int = 10
@@ -261,21 +325,23 @@ class CriticDataFormatter:
             input_parts.append(f"<documents>{current_step['documents']}</documents>")
 
         input_parts.append("")
-        input_parts.append("Task: Evaluate the quality of the Current Step. Provide reasoning and then a label (1=good, 0=bad).")
+        input_parts.append("Task: Evaluate the quality of the Current Step. Think step by step in <think> tags, then provide a label (1=good, 0=bad).")
 
         user_content = "\n".join(input_parts)
 
-        # 2. Build Assistant Response
+        # 2. Build Assistant Response (DeepSeek-R1 style with <think> tags)
+        # Loss is computed on BOTH <think> reasoning AND Label
         label = current_step.get('judge_label', 0)
         reasoning = current_step.get('judge_reasoning', '')
 
-        assistant_content = f"Reasoning: {reasoning}\nLabel: {label}"
+        # DeepSeek-R1 style: <think>reasoning</think> followed by final answer
+        assistant_content = f"<think>{reasoning}</think>\nLabel: {label}"
 
         system_content = (
             "You are a step-level critic for evaluating reasoning quality in multi-hop question answering. "
             "The trajectory uses XML tags: <think> for reasoning, <search> for queries, <answer> for final answers, <documents> for retrieved passages. "
             "Analyze each step's logical soundness and evidence grounding. "
-            "Output your reasoning followed by a label (1=good, 0=bad)."
+            "First think step by step inside <think> tags, then output a label (1=good, 0=bad)."
         )
 
         return [
@@ -340,7 +406,7 @@ class CriticTrainer:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         # IMPORTANT: Set truncation_side="left" to preserve Assistant output (training target)
-        # When sequence exceeds max_seq_length, truncate from the left (input) instead of right (output)
+        # When sequence exceeds max_length, truncate from the left (input) instead of right (output)
         self.tokenizer.truncation_side = "left"
         # Set padding_side="right" for proper batch padding
         self.tokenizer.padding_side = "right"
@@ -456,19 +522,19 @@ class CriticTrainer:
             bf16=self.config.bf16,
             gradient_checkpointing=self.config.gradient_checkpointing,
             save_total_limit=2,
-            max_seq_length=self.config.max_seq_length,
+            max_length=self.config.max_length,
             report_to="tensorboard",
             remove_unused_columns=True,
         )
 
-        # 디버깅용 샘플 준비 (GOOD/BAD 각각 포함)
+        # 디버깅용 샘플 준비 (1=GOOD / 0=BAD 각각 포함)
         debug_samples = []
         good_sample = None
         bad_sample = None
         for sample in train_dataset:
-            if sample.get('label') == 'GOOD' and good_sample is None:
+            if sample.get('label') == 1 and good_sample is None:
                 good_sample = sample
-            elif sample.get('label') == 'BAD' and bad_sample is None:
+            elif sample.get('label') == 0 and bad_sample is None:
                 bad_sample = sample
             if good_sample and bad_sample:
                 break
@@ -512,7 +578,7 @@ class CriticTrainer:
             'config': {
                 'model_name': self.config.model_name,
                 'lora_r': self.config.lora_r,
-                'max_seq_length': self.config.max_seq_length,
+                'max_length': self.config.max_length,
             },
             'training': {
                 'completed_at': datetime.now().isoformat(),
