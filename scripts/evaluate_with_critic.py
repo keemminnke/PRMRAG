@@ -35,7 +35,12 @@ def load_critic_model(critic_path: str, base_model: str = "deepseek-ai/DeepSeek-
 
 
 def parse_step_content(step: dict) -> dict:
-    """Parse step content to extract thought, action, observation."""
+    """Parse step content to extract thought, action, observation.
+
+    Supports both XML format and legacy ReAct format.
+    """
+    import re
+
     # If already has thought/action fields, use them
     if step.get('thought') or step.get('action'):
         return {
@@ -53,30 +58,55 @@ def parse_step_content(step: dict) -> dict:
     action_input = ''
     observation = ''
 
-    # Extract Thought
-    if 'Thought:' in content:
-        thought_start = content.find('Thought:') + len('Thought:')
-        thought_end = content.find('Action:') if 'Action:' in content else len(content)
-        thought = content[thought_start:thought_end].strip()
+    # Try XML format first
+    # Extract <think>
+    think_match = re.search(r'<think>(.*?)</think>', content, re.DOTALL)
+    if think_match:
+        thought = think_match.group(1).strip()
 
-    # Extract Action
-    if 'Action:' in content:
-        action_start = content.find('Action:') + len('Action:')
-        action_end = content.find('Observation:') if 'Observation:' in content else len(content)
-        action_text = content[action_start:action_end].strip()
+    # Extract <search>
+    search_match = re.search(r'<search>(.*?)</search>', content, re.DOTALL)
+    if search_match:
+        action = 'Search'
+        action_input = search_match.group(1).strip()
 
-        # Parse action type and input (e.g., "Search[query]")
-        if '[' in action_text and ']' in action_text:
-            bracket_start = action_text.find('[')
-            action = action_text[:bracket_start].strip()
-            action_input = action_text[bracket_start+1:action_text.rfind(']')].strip()
-        else:
-            action = action_text.split('\n')[0].strip()
+    # Extract <answer>
+    answer_match = re.search(r'<answer>(.*?)</answer>', content, re.DOTALL)
+    if answer_match:
+        action = 'Finish'
+        action_input = answer_match.group(1).strip()
 
-    # Extract Observation
-    if 'Observation:' in content:
-        obs_start = content.find('Observation:') + len('Observation:')
-        observation = content[obs_start:].strip()[:1000]  # Truncate
+    # Extract <documents>
+    docs_match = re.search(r'<documents>(.*?)</documents>', content, re.DOTALL)
+    if docs_match:
+        observation = docs_match.group(1).strip()[:1000]
+
+    # If no XML tags found, try legacy ReAct format
+    if not think_match and not search_match and not answer_match:
+        # Extract Thought
+        if 'Thought:' in content:
+            thought_start = content.find('Thought:') + len('Thought:')
+            thought_end = content.find('Action:') if 'Action:' in content else len(content)
+            thought = content[thought_start:thought_end].strip()
+
+        # Extract Action
+        if 'Action:' in content:
+            action_start = content.find('Action:') + len('Action:')
+            action_end = content.find('Observation:') if 'Observation:' in content else len(content)
+            action_text = content[action_start:action_end].strip()
+
+            # Parse action type and input (e.g., "Search[query]")
+            if '[' in action_text and ']' in action_text:
+                bracket_start = action_text.find('[')
+                action = action_text[:bracket_start].strip()
+                action_input = action_text[bracket_start+1:action_text.rfind(']')].strip()
+            else:
+                action = action_text.split('\n')[0].strip()
+
+        # Extract Observation
+        if 'Observation:' in content:
+            obs_start = content.find('Observation:') + len('Observation:')
+            observation = content[obs_start:].strip()[:1000]  # Truncate
 
     return {
         'thought': thought,

@@ -76,10 +76,14 @@ class PolicyModelVLLM:
         set_seed(seed)
         print(f"  Random seed set to: {seed}")
 
+        # Cache directory for model downloads
+        self.download_dir = "/home/work/.conda/storage/MINKEON_KIM/external_cache/huggingface"
+
         # Load tokenizer separately for chat template formatting
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_name,
-            trust_remote_code=True
+            trust_remote_code=True,
+            cache_dir=self.download_dir,
         )
 
         # Initialize vLLM engine with enforce_eager=True to avoid compilation bugs
@@ -92,6 +96,7 @@ class PolicyModelVLLM:
             'enforce_eager': True,  # Required for vLLM dev versions with GH200
             'disable_log_stats': True,  # Disable verbose logging
             'seed': seed,  # Set seed for vLLM sampling
+            'download_dir': self.download_dir,  # Cache directory for model downloads
         }
 
         # Add max_model_len if specified

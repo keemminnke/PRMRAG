@@ -213,60 +213,67 @@ class CriticDataFormatter:
         current_step: Dict[str, Any],
     ) -> List[Dict[str, str]]:
         """
-        Constructs the chat messages.
+        Constructs the chat messages using XML format.
         Structure:
         System: Define role.
-        User: Context (Question + History + Current Step).
-        Assistant: <think> Reasoning </think> Label.
+        User: Context (Question + History + Current Step) in XML tags.
+        Assistant: Reasoning + Label.
         """
-        
-        # 1. Build User Context
+
+        # 1. Build User Context (XML format)
         input_parts = [f"Question: {question}", ""]
 
         if previous_steps:
             input_parts.append("Previous Steps:")
             for i, prev_step in enumerate(previous_steps, 1):
-                input_parts.append(f"Step {i}:")
-                if prev_step.get('thought'):
-                    input_parts.append(f"Thought: {prev_step.get('thought')}")
-                
-                action = prev_step.get('action', 'Unknown')
-                action_input = prev_step.get('action_input', '')
-                input_parts.append(f"Action: {action}[{action_input}]" if action_input else f"Action: {action}")
+                input_parts.append(f"## Step {i}")
 
-                if prev_step.get('observation') or prev_step.get('documents'):
-                    docs = prev_step.get('documents') or prev_step.get('observation')
-                    input_parts.append(f"Documents: {docs}")
+                # <think>
+                if prev_step.get('think'):
+                    input_parts.append(f"<think>{prev_step['think']}</think>")
+
+                # <search> or <answer>
+                if prev_step.get('search'):
+                    input_parts.append(f"<search>{prev_step['search']}</search>")
+                elif prev_step.get('answer'):
+                    input_parts.append(f"<answer>{prev_step['answer']}</answer>")
+
+                # <documents>
+                if prev_step.get('documents'):
+                    input_parts.append(f"<documents>{prev_step['documents']}</documents>")
                 input_parts.append("")
 
         input_parts.append("Current Step to Evaluate:")
-        if current_step.get('thought'):
-            input_parts.append(f"Thought: {current_step.get('thought')}")
+        input_parts.append(f"## Step {len(previous_steps) + 1}")
 
-        action = current_step.get('action', 'Unknown')
-        action_input = current_step.get('action_input', '')
-        input_parts.append(f"Action: {action}[{action_input}]" if action_input else f"Action: {action}")
+        # <think>
+        if current_step.get('think'):
+            input_parts.append(f"<think>{current_step['think']}</think>")
 
-        if current_step.get('observation') or current_step.get('documents'):
-            docs = current_step.get('documents') or current_step.get('observation')
-            input_parts.append(f"Documents: {docs}")
+        # <search> or <answer>
+        if current_step.get('search'):
+            input_parts.append(f"<search>{current_step['search']}</search>")
+        elif current_step.get('answer'):
+            input_parts.append(f"<answer>{current_step['answer']}</answer>")
+
+        # <documents>
+        if current_step.get('documents'):
+            input_parts.append(f"<documents>{current_step['documents']}</documents>")
 
         input_parts.append("")
         input_parts.append("Task: Evaluate the quality of the Current Step. Provide reasoning and then a label (1=good, 0=bad).")
 
         user_content = "\n".join(input_parts)
 
-        # 2. Build Assistant Response (Direct format without <think> tags)
-        # Output: reasoning followed by label (1/0)
-        # Label is already numeric (1=good, 0=bad) from preprocessed data
+        # 2. Build Assistant Response
         label = current_step.get('judge_label', 0)
         reasoning = current_step.get('judge_reasoning', '')
 
-        # Direct format: Reasoning + Label (no special tags)
         assistant_content = f"Reasoning: {reasoning}\nLabel: {label}"
 
         system_content = (
             "You are a step-level critic for evaluating reasoning quality in multi-hop question answering. "
+            "The trajectory uses XML tags: <think> for reasoning, <search> for queries, <answer> for final answers, <documents> for retrieved passages. "
             "Analyze each step's logical soundness and evidence grounding. "
             "Output your reasoning followed by a label (1=good, 0=bad)."
         )
@@ -290,22 +297,28 @@ class CriticDataFormatter:
                     steps = trajectory['steps']
 
                     for idx, step in enumerate(steps):
-                        # Label is already numeric (1=good, 0=bad) from preprocessed data
-                        label = step.get('judge_label')
-                        # Only train on valid labels (0 or 1)
-                        if label not in [0, 1]:
-                            continue
+                        # Convert label: GOOD->1, BAD->0
+                        raw_label = step.get('judge_label')
+                        if raw_label == 'GOOD' or raw_label == 1:
+                            label = 1
+                        elif raw_label == 'BAD' or raw_label == 0:
+                            label = 0
+                        else:
+                            continue  # Skip invalid labels
+
+                        # Update step with numeric label for formatting
+                        step_with_label = {**step, 'judge_label': label}
 
                         messages = self.format_step_for_training(
                             question=question,
                             previous_steps=steps[:idx],
-                            current_step=step,
+                            current_step=step_with_label,
                         )
 
                         training_samples.append({
                             'messages': messages,  # SFTTrainer expects 'messages' column
                             'question_id': trajectory.get('question_id', trajectory.get('trajectory_id')),
-                            'step_num': step.get('step_num', idx + 1),
+                            'step_num': step.get('step_id', idx + 1),
                             'label': label,  # 1=good, 0=bad
                         })
                         label_counts[label] += 1

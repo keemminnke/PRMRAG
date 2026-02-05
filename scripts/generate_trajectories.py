@@ -337,25 +337,47 @@ def main():
 
             # Save each trajectory immediately
             for traj in trajectories:
+                # Parse steps into trajectories_xml.jsonl format
+                steps_formatted = []
+                for step in traj.steps:
+                    step_data = {
+                        'step_id': step.step_id,
+                        'step_type': step.metadata.get('action', 'unknown'),  # search, answer, reason
+                    }
+
+                    # Parse content to extract think, search/answer, documents
+                    content = step.content or ''
+
+                    # Extract <think>
+                    import re
+                    think_match = re.search(r'<think>(.*?)</think>', content, re.DOTALL)
+                    if think_match:
+                        step_data['think'] = think_match.group(1).strip()
+
+                    # Extract <search> or <answer>
+                    search_match = re.search(r'<search>(.*?)</search>', content, re.DOTALL)
+                    answer_match = re.search(r'<answer>(.*?)</answer>', content, re.DOTALL)
+
+                    if search_match:
+                        step_data['search'] = search_match.group(1).strip()
+                    if answer_match:
+                        step_data['answer'] = answer_match.group(1).strip()
+
+                    # Extract <documents>
+                    docs_match = re.search(r'<documents>(.*?)</documents>', content, re.DOTALL)
+                    if docs_match:
+                        step_data['documents'] = docs_match.group(1).strip()
+
+                    steps_formatted.append(step_data)
+
                 record = {
                     'trajectory_id': traj.trajectory_id,
                     'question': traj.question,
                     'gold_answer': traj.gold_answer,
                     'final_answer': traj.final_answer,
                     'is_correct': traj.is_correct,
-                    'supporting_facts': traj.supporting_facts,
                     'metadata': traj.metadata,
-                    'steps': [
-                        {
-                            'step_id': step.step_id,
-                            'step_type': step.step_type.value,
-                            'text': step.text,
-                            'content': step.content,
-                            'used_passages': step.used_passages,
-                            'metadata': step.metadata,
-                        }
-                        for step in traj.steps
-                    ],
+                    'steps': steps_formatted,
                 }
                 f.write(json.dumps(record, ensure_ascii=False) + '\n')
 

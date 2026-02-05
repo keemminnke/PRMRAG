@@ -24,70 +24,58 @@ from prmrag.data.schemas import Trajectory, TrajectoryStep
 
 
 def parse_content(content: str) -> dict:
-    """Parse content field to extract Thought, Action, Observation.
+    """Parse content field to extract XML tag contents.
 
-    Expected format in content:
-        Thought: [reasoning]
-        Action: Search[query="..."] or Finish[answer="..."]
+    XML format:
+        <think>reasoning</think>
+        <search>query</search> or <answer>answer</answer>
+        <documents>retrieved passages</documents>
 
-        Observation:
-        [1] Title: ...
-         text...
-
-    Handles edge cases:
-    - Multiple Action: in content (take first valid one)
-    - Mixed Reason/Finish in one step
-    - Newlines inside action brackets
+    Returns dict with:
+        - think: reasoning content
+        - search: search query (if search step)
+        - answer: final answer (if answer step)
+        - documents: retrieved passages
+        - action_type: 'search', 'answer', or 'reason'
     """
-    # 1. Extract Thought: from start until "Action:"
-    thought_match = re.search(r'Thought:\s*(.+?)(?=\nAction:)', content, re.DOTALL)
-    thought = thought_match.group(1).strip() if thought_match else ""
+    think = ""
+    search = ""
+    answer = ""
+    documents = ""
+    action_type = "reason"
 
-    # 2. Extract Action - find first valid action pattern
-    # Handle: Search[...], Finish[...], Reason[...]
-    action = ""
-    action_patterns = [
-        r'Action:\s*(Search\[query=["\']?.+?["\']?\])',
-        r'Action:\s*(Finish\[answer=["\']?.+?["\']?\])',
-        r'Action:\s*(Reason\[content=["\']?.+?["\']?\])',
-        r'Action:\s*(Search\[[^\]]+\])',
-        r'Action:\s*(Finish\[[^\]]+\])',
-        r'Action:\s*(Reason\[[^\]]+\])',
-    ]
+    # Extract XML tags
+    think_match = re.search(r'<think>(.*?)</think>', content, re.DOTALL)
+    search_match = re.search(r'<search>(.*?)</search>', content, re.DOTALL)
+    answer_match = re.search(r'<answer>(.*?)</answer>', content, re.DOTALL)
+    docs_match = re.search(r'<documents>(.*?)</documents>', content, re.DOTALL)
 
-    for pattern in action_patterns:
-        match = re.search(pattern, content, re.IGNORECASE | re.DOTALL)
-        if match:
-            action = match.group(1).strip()
-            # Clean up: remove internal newlines
-            action = re.sub(r'\s+', ' ', action)
-            break
+    if think_match:
+        think = think_match.group(1).strip()
 
-    # Fallback: simple extraction if no bracket pattern found
-    if not action:
-        action_match = re.search(r'Action:\s*(\w+)', content)
-        action = action_match.group(1).strip() if action_match else "Unknown"
+    if search_match:
+        search = search_match.group(1).strip()
+        action_type = "search"
+    elif answer_match:
+        answer = answer_match.group(1).strip()
+        action_type = "answer"
 
-    # 3. Extract Observation: everything after "Observation:"
-    obs_match = re.search(r'Observation:\s*(.+)', content, re.DOTALL)
-    observation = obs_match.group(1).strip() if obs_match else ""
-
-    # Clean observation - remove any trailing "Action:" blocks that got mixed in
-    if 'Action:' in observation:
-        observation = observation[:observation.find('Action:')].strip()
+    if docs_match:
+        documents = docs_match.group(1).strip()
 
     return {
-        'thought': thought,
-        'action': action,
-        'observation': observation
+        'think': think,
+        'search': search,
+        'answer': answer,
+        'documents': documents,
+        'action_type': action_type,
     }
 
 
 def load_trajectories(filepath: Path):
     """Load trajectories from JSONL file.
 
-    Handles new data format where content field contains:
-    Thought, Action, and Observation together.
+    Handles XML format: <think>, <search>, <answer>, <documents>
     """
     trajectories = []
     with open(filepath, 'r') as f:
@@ -100,31 +88,21 @@ def load_trajectories(filepath: Path):
             # Convert to Trajectory schema
             steps = []
             for step_data in data['steps']:
-                # Parse content field
-                content = step_data.get('content', '')
+                # Get text content (XML format)
+                content = step_data.get('text', step_data.get('content', ''))
                 parsed = parse_content(content)
 
-                thought = parsed['thought']
-                action = parsed['action']
-                observation = parsed['observation']
-
-                # Determine action_type: search, finish, reason
-                if 'Search[' in action:
-                    action_type = 'search'
-                elif 'Finish[' in action:
+                # Map action_type: search -> search, answer -> finish
+                action_type = parsed['action_type']
+                if action_type == 'answer':
                     action_type = 'finish'
-                else:
-                    action_type = 'reason'
-
-                # Build full action string for prompt
-                full_action = f"Thought: {thought}\nAction: {action}"
 
                 step = TrajectoryStep(
                     step_id=step_data.get('step_id', 1) - 1,
                     action_type=action_type,
-                    action=full_action,
-                    observation=observation,
-                    passages=[observation] if observation else [],
+                    action=content,  # Keep original XML content
+                    observation=parsed['documents'],
+                    passages=[parsed['documents']] if parsed['documents'] else [],
                 )
                 steps.append(step)
 
@@ -285,33 +263,24 @@ def main():
             }
 
             for step_idx, (step, judge_label) in enumerate(zip(original_data['steps'], judge_labels)):
-                # Parse content to get clean thought/action/observation
-                content = step.get('content', '')
+                # Parse content to extract XML fields
+                content = step.get('text', step.get('content', ''))
                 parsed = parse_content(content)
-
-                # Get action type from metadata or infer from parsed action
-                action_name = step.get('metadata', {}).get('action', 'unknown')
-                if action_name == 'unknown':
-                    if 'Search[' in parsed['action']:
-                        action_name = 'search'
-                    elif 'Finish[' in parsed['action']:
-                        action_name = 'finish'
-                    elif 'Reason[' in parsed['action']:
-                        action_name = 'reason'
 
                 step_output = {
                     'step_id': step.get('step_id', step_idx + 1),
-                    'step_type': step.get('step_type', action_name),
-                    # Parsed fields (clean)
-                    'thought': parsed['thought'],
-                    'action': parsed['action'],
-                    'observation': parsed['observation'][:2000] if parsed['observation'] else '',  # Truncate long obs
+                    'step_type': parsed['action_type'],
+                    # XML fields
+                    'think': parsed['think'],
+                    'search': parsed['search'] if parsed['action_type'] == 'search' else None,
+                    'answer': parsed['answer'] if parsed['action_type'] == 'answer' else None,
+                    'documents': parsed['documents'][:2000] if parsed['documents'] else None,
                     # Judge labels
                     'judge_label': judge_label.label,
                     'judge_reasoning': judge_label.reasoning,
-                    # Metadata
-                    'num_passages': len(step.get('used_passages', [])),
                 }
+                # Remove None fields
+                step_output = {k: v for k, v in step_output.items() if v is not None}
                 output_data['steps'].append(step_output)
 
                 # Update statistics

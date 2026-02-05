@@ -29,7 +29,11 @@
       "Bash(echo \"없음\" echo \"\" echo \"=== outputs 폴더의 다른 결과 파일 확인 ===\" ls -la outputs/*.jsonl)",
       "Bash(timeout 5 strace:*)",
       "Bash(apt-get update:*)",
-      "Bash(apt-get install:*)"
+      "Bash(apt-get install:*)",
+      "Bash(for pid in 238139 236243 1159933 247059 50199 1115535 50034 306053)",
+      "Bash(do echo \"=== PID $pid ===\" ps -p $pid -o pid,ppid,cmd --no-headers)",
+      "Bash(echo \"Process not found\" cat /proc/$pid/cmdline)",
+      "Bash(done)"
     ]
   }
 }

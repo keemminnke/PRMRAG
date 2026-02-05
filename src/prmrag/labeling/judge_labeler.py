@@ -111,94 +111,49 @@ class JudgeLabeler(BaseLabeler):
         <search>query</search> or <answer>answer</answer>
         <documents>retrieved passages</documents>
 
-        Also supports legacy ReAct format for backwards compatibility.
+        Returns:
+            dict with: think, search, answer, documents, action_type
         """
-        # Get full content from either 'content' or 'action' field
-        full_content = getattr(step, 'content', None) or getattr(step, 'action', '') or ''
+        # Get full content from either 'text', 'content', or 'action' field
+        full_content = getattr(step, 'text', None) or getattr(step, 'content', None) or getattr(step, 'action', '') or ''
 
-        thought = ''
-        action = ''
-        action_type = ''
+        think = ''
+        search = ''
+        answer = ''
         documents = ''
+        action_type = 'reason'
 
-        # Try XML format first
-        # Extract <think>
+        # Extract XML tags
         think_match = re.search(r'<think>(.*?)</think>', full_content, re.DOTALL)
         if think_match:
-            thought = think_match.group(1).strip()
+            think = think_match.group(1).strip()
 
-        # Extract <search>
         search_match = re.search(r'<search>(.*?)</search>', full_content, re.DOTALL)
         if search_match:
-            action = f"Search[{search_match.group(1).strip()}]"
+            search = search_match.group(1).strip()
             action_type = 'search'
 
-        # Extract <answer>
         answer_match = re.search(r'<answer>(.*?)</answer>', full_content, re.DOTALL)
         if answer_match:
-            action = f"Finish[{answer_match.group(1).strip()}]"
-            action_type = 'finish'
+            answer = answer_match.group(1).strip()
+            action_type = 'answer'
 
-        # Extract <documents>
         docs_match = re.search(r'<documents>(.*?)</documents>', full_content, re.DOTALL)
         if docs_match:
             documents = docs_match.group(1).strip()
 
-        # If no XML tags found, try legacy ReAct format
-        if not think_match and not search_match and not answer_match:
-            # Legacy: Thought:
-            thought_match = re.search(
-                r'Thought:\s*(.+?)(?=Action:|$)',
-                full_content,
-                re.IGNORECASE | re.DOTALL
-            )
-            if thought_match:
-                thought = thought_match.group(1).strip()
-
-            # Legacy: Action: Search[...] / Finish[...] / Reason[...]
-            action_match = re.search(
-                r'Action:\s*(Search\[.*?\]|Finish\[.*?\]|Reason\[.*?\]|Reason)',
-                full_content,
-                re.IGNORECASE | re.DOTALL
-            )
-            if action_match:
-                action = action_match.group(1).strip()
-                if 'Search' in action:
-                    action_type = 'search'
-                elif 'Finish' in action:
-                    action_type = 'finish'
-                else:
-                    action_type = 'reason'
-
-            # Legacy: Documents:
-            obs_match = re.search(
-                r'Documents:\s*(.+?)$',
-                full_content,
-                re.IGNORECASE | re.DOTALL
-            )
-            if obs_match:
-                documents = obs_match.group(1).strip()
-
-        # If still no action, check step attributes
-        if not action:
-            action_type = getattr(step, 'action_type', '') or ''
-            if hasattr(action_type, 'value'):
-                action_type = action_type.value
-            action = action_type.capitalize() if action_type else 'Unknown'
-
-        # If think is empty but we have thought from step attribute
-        if not thought:
-            thought = getattr(step, 'think', '') or getattr(step, 'thought', '') or ''
-
-        # Get documents from step attribute if not found
+        # Fallback to step attributes if XML not found
+        if not think:
+            think = getattr(step, 'think', '') or getattr(step, 'thought', '') or ''
         if not documents:
             documents = getattr(step, 'observation', '') or getattr(step, 'documents', '') or ''
 
         return {
-            'thought': thought,
-            'action': action,
-            'action_type': action_type,
+            'think': think,
+            'search': search,
+            'answer': answer,
             'documents': documents,
+            'action_type': action_type,
         }
 
     def _build_whole_trajectory_prompt(self, trajectory: Trajectory) -> str:
@@ -214,37 +169,17 @@ class JudgeLabeler(BaseLabeler):
             step_text = f"## Step {i}\n"
 
             # Think (reasoning)
-            if sections['thought']:
-                step_text += f"<think>{sections['thought']}</think>\n"
+            if sections['think']:
+                step_text += f"<think>{sections['think']}</think>\n"
 
             # Action (search or answer)
-            action = sections.get('action', '')
-            action_type = sections.get('action_type', '')
-
-            if action_type == 'search' or 'Search' in action:
-                # Extract query from Search[query] format
-                query = action
-                if 'Search[' in action:
-                    import re
-                    match = re.search(r'Search\[(.+?)\]', action)
-                    if match:
-                        query = match.group(1)
-                step_text += f"<search>{query}</search>\n"
-            elif action_type == 'finish' or 'Finish' in action:
-                # Extract answer from Finish[answer] format
-                answer = action
-                if 'Finish[' in action:
-                    import re
-                    match = re.search(r'Finish\[(.+?)\]', action)
-                    if match:
-                        answer = match.group(1)
-                step_text += f"<answer>{answer}</answer>\n"
-            elif action:
-                # Reason or other - just include think
-                pass
+            if sections['action_type'] == 'search' and sections['search']:
+                step_text += f"<search>{sections['search']}</search>\n"
+            elif sections['action_type'] == 'answer' and sections['answer']:
+                step_text += f"<answer>{sections['answer']}</answer>\n"
 
             # Documents (retrieved passages)
-            if sections['documents'] and sections['documents'].strip():
+            if sections['documents']:
                 step_text += f"<documents>{sections['documents']}</documents>\n"
 
             interaction_history.append(step_text)

@@ -4,6 +4,7 @@ This module implements trajectory generation without MC rollouts:
 - Generate steps based on model's explicit actions (Search/Finish)
 - Labels come from Judge model instead of RPE
 - Supports efficient batch processing with vLLM
+- Uses XML tag format: <think>, <search>, <answer>, <documents>
 """
 
 from dataclasses import dataclass, field
@@ -11,12 +12,6 @@ from typing import List, Dict, Any, Optional, Tuple
 from enum import Enum
 import re
 from tqdm import tqdm
-
-from .step_forcing import (
-    ForcedStep,
-    StepForcingPrompt,
-    StepParser,
-)
 
 
 class StepType(str, Enum):
@@ -31,12 +26,10 @@ class AdaptiveStep:
     """A step in an adaptive MC-CoT + RAG trajectory.
 
     This includes MC values before/after for monitoring.
-    Uses step forcing format: "Step N: {content}"
     """
     step_id: int
     step_type: StepType
-    text: str                           # The reasoning/retrieval text (with "Step N:" prefix)
-    content: str                        # Just the content (without "Step N:" prefix)
+    text: str                           # The full step content
     used_passages: List[Dict[str, Any]] # Retrieved passages (if RAG)
     mc_before: float                    # MC(s_{t-1})
     mc_after: float                     # MC(s_t)
@@ -49,11 +42,7 @@ class AdaptiveStep:
             'step_id': self.step_id,
             'step_type': self.step_type.value,
             'text': self.text,
-            'content': self.content,
             'used_passages': self.used_passages,
-            'mc_before': self.mc_before,
-            'mc_after': self.mc_after,
-            'rpe': self.rpe,
             'metadata': self.metadata,
         }
 
@@ -125,9 +114,6 @@ class SimpleTrajectoryGenerator:
         self.top_k_passages = config.get('top_k_passages', 5)
         self.temperature = config.get('temperature', 0.7)
 
-        self.step_forcing_prompt = StepForcingPrompt()
-        self.step_parser = StepParser()
-
     def generate_trajectory(
         self,
         question: str,
@@ -152,30 +138,29 @@ class SimpleTrajectoryGenerator:
 
         steps = []
         context = ""  # Accumulated retrieved passages
-        forced_steps = []  # Track ForcedStep objects for continuation prompt
+        previous_contents = []  # Track step contents for continuation prompt
 
         for step_num in range(1, self.max_steps + 1):
             # Build prompt
             if step_num == 1:
                 prompt = self._build_initial_prompt(question)
             else:
-                prompt = self._build_continuation_prompt(question, forced_steps, context)
+                prompt = self._build_continuation_prompt(question, previous_contents)
 
-            # Generate step
+            # Generate step (stop before <documents> to prevent hallucination)
             response = self.policy_model.generate_with_chat_template(
                 user_message=prompt,
                 max_tokens=800,
                 temperature=self.temperature,
                 top_p=0.95,
-                stop_sequences=["\nStep"],
+                stop_sequences=["<documents>", "\n<documents>"],
             )
 
             # Parse response
             step_content = self._parse_step_response(response, step_num)
-            step_text = f"Step {step_num}: {step_content}"
 
             # Track for continuation
-            forced_steps.append(ForcedStep(step_number=step_num, content=step_content))
+            previous_contents.append(step_content)
 
             # Detect action
             action_type, action_input = self._parse_action(step_content)
@@ -185,8 +170,7 @@ class SimpleTrajectoryGenerator:
                 step = AdaptiveStep(
                     step_id=step_num,
                     step_type=StepType.ANSWER,
-                    text=step_text,
-                    content=step_content,
+                    text=step_content,
                     used_passages=[],
                     mc_before=0.0,  # Placeholder - Judge will provide labels
                     mc_after=0.0,
@@ -201,15 +185,14 @@ class SimpleTrajectoryGenerator:
                 query = action_input or question
                 passages = self.retriever.retrieve(query, top_k=self.top_k_passages)
 
-                # Format observation
+                # Format observation as XML <documents>
                 observation = self._format_observation(passages)
-                full_content = f"{step_content}\n\nObservation:\n{observation}"
+                full_content = f"{step_content}\n{observation}"
 
                 step = AdaptiveStep(
                     step_id=step_num,
                     step_type=StepType.RAG,
-                    text=f"Step {step_num}: {full_content}",
-                    content=full_content,
+                    text=full_content,
                     used_passages=passages,
                     mc_before=0.0,
                     mc_after=0.0,
@@ -220,16 +203,15 @@ class SimpleTrajectoryGenerator:
 
                 # Update context for next step
                 context = observation
-                # Update forced step with observation
-                forced_steps[-1] = ForcedStep(step_number=step_num, content=full_content)
+                # Update previous content with observation
+                previous_contents[-1] = full_content
 
             else:
                 # Pure reasoning step (no action detected)
                 step = AdaptiveStep(
                     step_id=step_num,
                     step_type=StepType.COT,
-                    text=step_text,
-                    content=step_content,
+                    text=step_content,
                     used_passages=[],
                     mc_before=0.0,
                     mc_after=0.0,
@@ -258,27 +240,21 @@ class SimpleTrajectoryGenerator:
 
     def _build_initial_prompt(self, question: str) -> str:
         """Build prompt for first step (instruction은 system prompt에서 처리)."""
-        return f"""Question: {question}
-
-Generate Step 1."""
+        return f"Question: {question}"
 
     def _build_continuation_prompt(
         self,
         question: str,
-        previous_steps: List[ForcedStep],
-        context: str = ""
+        previous_contents: List[str],
     ) -> str:
-        """Build prompt for continuation (instruction은 system prompt에서 처리)."""
-        steps_text = "\n".join(str(step) for step in previous_steps)
-        next_step_num = len(previous_steps) + 1
+        """Build prompt for continuation with previous steps.
 
-        prompt = f"""Question: {question}
-
-{steps_text}
-
-Continue with Step {next_step_num}."""
-
-        return prompt
+        Args:
+            question: The question being answered
+            previous_contents: List of previous step contents (including observations)
+        """
+        steps_text = "\n\n".join(previous_contents)
+        return f"Question: {question}\n\n{steps_text}"
 
     def _parse_step_response(self, response: str, step_num: int) -> str:
         """Parse step content from response."""
@@ -299,16 +275,35 @@ Continue with Step {next_step_num}."""
     def _parse_action(self, content: str) -> Tuple[Optional[str], Optional[str]]:
         """Parse action from step content.
 
-        Expected format (no markdown):
+        Supports both XML format and legacy format:
+
+        XML format (preferred):
+        - <search>query</search>
+        - <answer>final answer</answer>
+
+        Legacy format (backward compatible):
         - Action: Finish[answer="..."]
         - Action: Search[query="..."]
-        - Action: Reason[content="..."]
 
         Returns:
             Tuple of (action_type, action_input)
             action_type: 'search', 'finish', 'reason', or None
         """
         import re
+
+        # === XML format (preferred) ===
+
+        # Check for <answer>...</answer> tag
+        answer_match = re.search(r'<answer>(.+?)</answer>', content, re.DOTALL)
+        if answer_match:
+            return ('finish', answer_match.group(1).strip())
+
+        # Check for <search>...</search> tag
+        search_match = re.search(r'<search>(.+?)</search>', content, re.DOTALL)
+        if search_match:
+            return ('search', search_match.group(1).strip())
+
+        # === Legacy format (backward compatible) ===
 
         # Check for Finish action
         finish_match = re.search(
@@ -344,13 +339,13 @@ Continue with Step {next_step_num}."""
         return (None, None)
 
     def _format_observation(self, passages: List[Dict[str, Any]]) -> str:
-        """Format retrieved passages as observation."""
+        """Format retrieved passages as XML <documents> tag."""
         obs_parts = []
         for i, p in enumerate(passages, 1):
             title = p.get('title', 'Unknown')
             text = p.get('text', p.get('content', ''))[:500]
             obs_parts.append(f"[{i}] {title}: {text}")
-        return "\n".join(obs_parts)
+        return "<documents>\n" + "\n".join(obs_parts) + "\n</documents>"
 
     def _extract_final_answer(self, steps: List[AdaptiveStep]) -> str:
         """Extract final answer from trajectory."""
@@ -360,9 +355,14 @@ Continue with Step {next_step_num}."""
             return ""
 
         # Check last step for Finish action
-        last_content = steps[-1].content
+        last_content = steps[-1].text
 
-        # Try Finish[answer="..."] pattern
+        # Try XML <answer>...</answer> pattern (preferred)
+        answer_match = re.search(r'<answer>(.+?)</answer>', last_content, re.DOTALL)
+        if answer_match:
+            return answer_match.group(1).strip()
+
+        # Try Finish[answer="..."] pattern (legacy)
         finish_match = re.search(
             r'Finish\[answer=["\']?(.+?)["\']?\]',
             last_content,
@@ -434,8 +434,7 @@ Continue with Step {next_step_num}."""
                     'sample_idx': sample_idx,
                     'trajectory_id': f"{question_id}_sample_{sample_idx}",
                     'steps': [],
-                    'forced_steps': [],
-                    'context': '',
+                    'previous_contents': [],  # Track step contents for continuation
                     'finished': False,
                     'current_step': 1,
                 })
@@ -460,16 +459,16 @@ Continue with Step {next_step_num}."""
                 else:
                     user_msg = self._build_continuation_prompt(
                         state['question'],
-                        state['forced_steps'],
-                        state['context']
+                        state['previous_contents']
                     )
                 user_messages.append(user_msg)
 
             # Format with chat template and batch generate with vLLM
+            # Stop before <documents> to prevent model from hallucinating observations
             formatted_prompts = [
                 self.policy_model.format_prompt_for_qwen(msg) for msg in user_messages
             ]
-            stop_sequences = ["\nStep", "\nObservation:", "Observation:"]
+            stop_sequences = ["<documents>", "\n<documents>"]
             responses = self.policy_model.batch_generate(
                 prompts=formatted_prompts,
                 max_tokens=800,
@@ -490,7 +489,7 @@ Continue with Step {next_step_num}."""
                 step_content = self._parse_step_response(response, step_num)
 
                 # Track for continuation
-                state['forced_steps'].append(ForcedStep(step_number=step_num, content=step_content))
+                state['previous_contents'].append(step_content)
 
                 # Detect action
                 action_type, action_input = self._parse_action(step_content)
@@ -500,6 +499,19 @@ Continue with Step {next_step_num}."""
                 if action_type == "search":
                     query = action_input or state['question']
                     search_actions.append((len(parsed_results) - 1, idx, query))
+
+            # Debug: count action types
+            action_counts = {'search': 0, 'finish': 0, 'reason': 0, 'none': 0}
+            for _, _, action_type, _ in parsed_results:
+                if action_type == 'search':
+                    action_counts['search'] += 1
+                elif action_type == 'finish':
+                    action_counts['finish'] += 1
+                elif action_type == 'reason':
+                    action_counts['reason'] += 1
+                else:
+                    action_counts['none'] += 1
+            print(f"    Actions: search={action_counts['search']}, finish={action_counts['finish']}, reason={action_counts['reason']}, none={action_counts['none']}")
 
             # Phase 2: Batch retrieval for all Search actions
             all_passages = {}  # result_idx -> passages
@@ -519,14 +531,13 @@ Continue with Step {next_step_num}."""
             # Phase 3: Build steps with retrieved passages
             for result_idx, (idx, step_content, action_type, action_input) in enumerate(parsed_results):
                 state = states[idx]
-                step_text = f"Step {step_num}: {step_content}"
 
                 if action_type == "finish":
                     # Final answer step
                     step = AdaptiveStep(
                         step_id=step_num,
                         step_type=StepType.ANSWER,
-                        text=step_text,
+                        text=step_content,
                         content=step_content,
                         used_passages=[],
                         mc_before=0.0,
@@ -542,14 +553,14 @@ Continue with Step {next_step_num}."""
                     query = action_input or state['question']
                     passages = all_passages.get(result_idx, [])
 
-                    # Format observation
+                    # Format observation as XML <documents>
                     observation = self._format_observation(passages)
-                    full_content = f"{step_content}\n\nObservation:\n{observation}"
+                    full_content = f"{step_content}\n{observation}"
 
                     step = AdaptiveStep(
                         step_id=step_num,
                         step_type=StepType.RAG,
-                        text=f"Step {step_num}: {full_content}",
+                        text=full_content,
                         content=full_content,
                         used_passages=passages,
                         mc_before=0.0,
@@ -559,16 +570,15 @@ Continue with Step {next_step_num}."""
                     )
                     state['steps'].append(step)
 
-                    # Update context for next step
-                    state['context'] = observation
-                    state['forced_steps'][-1] = ForcedStep(step_number=step_num, content=full_content)
+                    # Update previous content with observation
+                    state['previous_contents'][-1] = full_content
 
                 else:
                     # Pure reasoning step
                     step = AdaptiveStep(
                         step_id=step_num,
                         step_type=StepType.COT,
-                        text=step_text,
+                        text=step_content,
                         content=step_content,
                         used_passages=[],
                         mc_before=0.0,

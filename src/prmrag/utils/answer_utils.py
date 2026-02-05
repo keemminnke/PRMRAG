@@ -302,17 +302,25 @@ def extract_answer_from_text(text: str) -> str:
     """Extract the most plausible answer span from model output.
 
     Priority:
-    1) Finish[answer="..."] pattern (ReAct format with explicit answer)
-    2) After explicit "Final Answer:" marker (supports multiline)
-    3) Common answer phrasings ("the answer is", "therefore, the answer is", etc.)
-    4) First non-empty line that is not an intermediate/next-query marker
+    1) XML <answer>...</answer> tag (preferred)
+    2) Finish[answer="..."] pattern (ReAct format, legacy)
+    3) After explicit "Final Answer:" marker (supports multiline)
+    4) Common answer phrasings ("the answer is", "therefore, the answer is", etc.)
+    5) First non-empty line that is not an intermediate/next-query marker
     """
     if not text:
         return ""
 
     text = text.strip()
 
-    # 1) Finish[answer="..."] pattern
+    # 1) XML <answer>...</answer> tag (preferred)
+    xml_answer_match = re.search(r'<answer>(.+?)</answer>', text, flags=re.DOTALL)
+    if xml_answer_match:
+        candidate = _clean_answer_span(xml_answer_match.group(1))
+        if candidate:
+            return candidate
+
+    # 2) Finish[answer="..."] pattern (legacy)
     # Support both double and single quotes, and handle quotes within the answer
     # Match: Finish[answer="..."] or Finish[answer='...'] (greedy until closing bracket)
     finish_match = re.search(r'(?:Action:\s*)?Finish\[answer\s*=\s*["\'](.+?)["\']\]', text, flags=re.IGNORECASE | re.DOTALL)
