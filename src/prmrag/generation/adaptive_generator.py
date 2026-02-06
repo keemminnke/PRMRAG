@@ -332,7 +332,12 @@ class SimpleTrajectoryGenerator:
         if reason_match:
             return ('reason', reason_match.group(1).strip())
 
-        # Fallback: Check for simple finish markers
+        # If <think> exists but no action tag, it's a reason step
+        think_match = re.search(r'<think>(.+?)</think>', content, re.DOTALL)
+        if think_match:
+            return ('reason', think_match.group(1).strip())
+
+        # Fallback: Check for simple finish markers (only if no <think> tag)
         if any(marker in content.lower() for marker in ['final answer:', 'the answer is', 'therefore, the answer']):
             return ('finish', None)
 

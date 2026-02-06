@@ -31,7 +31,8 @@ class BGERetriever:
         max_length: int = 512,
         device: Optional[str] = None,
         embedding_cache_path: Optional[str] = None,
-        use_gpu: bool = True,
+        use_gpu: bool = False,  # CPU FAISS (GPU FAISS uses too much memory with large corpus)
+        faiss_batch_size: int = 256,  # Batch size for FAISS search
     ):
         """Initialize BGE retriever with FAISS-GPU.
 
@@ -50,6 +51,7 @@ class BGERetriever:
         self.model_name = model_name
         self.embedding_cache_path = embedding_cache_path
         self.use_gpu = use_gpu and FAISS_AVAILABLE and torch.cuda.is_available()
+        self.faiss_batch_size = faiss_batch_size  # Batch size for FAISS search
 
         # Auto-detect device
         if device is None:
@@ -82,6 +84,13 @@ class BGERetriever:
 
         # Build FAISS index
         self._build_faiss_index()
+
+        # Free raw embeddings after FAISS index is built (saves ~24GB RAM)
+        if self.faiss_index is not None:
+            del self.doc_embeddings
+            self.doc_embeddings = None
+            import gc; gc.collect()
+            print("  ✓ Freed raw embeddings (FAISS index holds normalized copy)")
 
     def _build_faiss_index(self):
         """Build FAISS index for fast similarity search."""
@@ -231,8 +240,21 @@ class BGERetriever:
         faiss.normalize_L2(query_embeddings)
 
         if self.faiss_index is not None:
-            # FAISS batch search (GPU accelerated)
-            scores_matrix, indices_matrix = self.faiss_index.search(query_embeddings, top_k)
+            # FAISS batch search (GPU accelerated) - process in smaller batches to avoid CUBLAS errors
+            num_queries = len(query_embeddings)
+            if num_queries <= self.faiss_batch_size:
+                scores_matrix, indices_matrix = self.faiss_index.search(query_embeddings, top_k)
+            else:
+                # Process in batches
+                all_scores = []
+                all_indices = []
+                for i in range(0, num_queries, self.faiss_batch_size):
+                    batch = query_embeddings[i:i + self.faiss_batch_size]
+                    scores, indices = self.faiss_index.search(batch, top_k)
+                    all_scores.append(scores)
+                    all_indices.append(indices)
+                scores_matrix = np.vstack(all_scores)
+                indices_matrix = np.vstack(all_indices)
         else:
             # Fallback to numpy (slow)
             doc_norms = np.linalg.norm(self.doc_embeddings, axis=1, keepdims=True)

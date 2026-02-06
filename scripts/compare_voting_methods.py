@@ -97,7 +97,7 @@ def build_critic_prompt_xml(tokenizer, question: str, steps: List[Dict], step_id
         "You are a step-level critic for evaluating reasoning quality in multi-hop question answering. "
         "The trajectory uses XML tags: <think> for reasoning, <search> for queries, <answer> for final answers, <documents> for retrieved passages. "
         "Analyze each step's logical soundness and evidence grounding. "
-        "First think step by step inside <think> tags, then output a label (1=good, 0=bad)."
+        "First explain your reasoning inside [REASONING] tags, then output a label (1=good, 0=bad)."
     )
 
     input_parts = [f"Question: {question}", ""]
@@ -131,7 +131,7 @@ def build_critic_prompt_xml(tokenizer, question: str, steps: List[Dict], step_id
     if parsed['documents']:
         input_parts.append(f"<documents>{parsed['documents'][:500]}</documents>")
     input_parts.append("")
-    input_parts.append("Task: Evaluate the quality of the Current Step. Think step by step in <think> tags, then provide a label (1=good, 0=bad).")
+    input_parts.append("Task: Evaluate the quality of the Current Step. Explain your reasoning in [REASONING] tags, then provide a label (1=good, 0=bad).")
 
     user_content = "\n".join(input_parts)
 

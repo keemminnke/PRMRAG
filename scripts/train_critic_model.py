@@ -90,8 +90,20 @@ def main():
     parser.add_argument(
         "--learning-rate",
         type=float,
-        default=2e-4,
+        default=1e-5,
         help="Learning rate"
+    )
+    parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=0.01,
+        help="Weight decay for regularization"
+    )
+    parser.add_argument(
+        "--warmup-ratio",
+        type=float,
+        default=0.1,
+        help="Warmup ratio"
     )
     parser.add_argument(
         "--max-length",
@@ -110,8 +122,8 @@ def main():
     parser.add_argument(
         "--lora-alpha",
         type=int,
-        default=32,
-        help="LoRA alpha"
+        default=16,
+        help="LoRA alpha (lower = smaller updates, less overfitting)"
     )
     parser.add_argument(
         "--lora-dropout",
@@ -126,6 +138,25 @@ def main():
         type=int,
         default=100,
         help="Interval (steps) for sample prediction debugging"
+    )
+
+    # Wandb
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default="prmrag-critic",
+        help="Wandb project name"
+    )
+    parser.add_argument(
+        "--wandb-run-name",
+        type=str,
+        default=None,
+        help="Wandb run name (auto-generated if not specified)"
+    )
+    parser.add_argument(
+        "--no-wandb",
+        action="store_true",
+        help="Disable wandb logging"
     )
 
     args = parser.parse_args()
@@ -144,6 +175,8 @@ def main():
         print(f"Eval data:      {args.eval_data}")
     print(f"Model:          {args.model_name}")
     print(f"Output dir:     {args.output_dir}")
+    print(f"Learning rate:  {args.learning_rate}")
+    print(f"Wandb:          {'Disabled' if args.no_wandb else f'{args.wandb_project}'}")
     print()
 
     # Create config (unused, using create_critic_trainer instead)
@@ -157,10 +190,15 @@ def main():
         per_device_train_batch_size=args.batch_size,
         gradient_accumulation_steps=args.gradient_accumulation,
         learning_rate=args.learning_rate,
+        weight_decay=args.weight_decay,
+        warmup_ratio=args.warmup_ratio,
         max_length=args.max_length,
         lora_r=args.lora_r,
         lora_alpha=args.lora_alpha,
         lora_dropout=args.lora_dropout,
+        use_wandb=not args.no_wandb,
+        wandb_project=args.wandb_project,
+        wandb_run_name=args.wandb_run_name,
     )
 
     # Prepare data

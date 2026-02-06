@@ -252,7 +252,10 @@ def main():
         else:
             print(f"Reranking: Enabled")
     else:
-        print(f"Retriever: Dense (BGE-M3 + Reranker) - Fully GPU accelerated")
+        if args.no_rerank:
+            print(f"Retriever: Dense (BGE-M3 only) - No Reranker")
+        else:
+            print(f"Retriever: Dense (BGE-M3 + Reranker) - Fully GPU accelerated")
     print("=" * 70)
 
     # Load questions
@@ -294,31 +297,49 @@ def main():
         else:
             print(f"  ✓ Reranking disabled (BM25 only)")
     else:
-        # KILT mode: Dense (BGE + Reranker, fully GPU)
-        print(f"\n[2/4] Initializing Dense retriever (BGE-M3 + Reranker)...")
+        # KILT mode: Dense (BGE, optionally with Reranker)
+        if args.no_rerank:
+            print(f"\n[2/4] Initializing Dense retriever (BGE-M3 only)...")
+        else:
+            print(f"\n[2/4] Initializing Dense retriever (BGE-M3 + Reranker)...")
 
         # BGE retriever
         embedding_cache = data_dir / "embeddings" / "kilt_wikipedia_bge_m3.npy"
         print(f"  [2.1] Initializing BGE-M3 retriever...")
+        # When no_rerank, use CPU for BGE-M3 to avoid CUDA context conflict with vLLM
+        bge_device = "cpu" if args.no_rerank else None  # None = auto-detect (cuda)
         bge_retriever = BGERetriever(
             corpus=corpus,
             batch_size=64,
-            embedding_cache_path=str(embedding_cache)
+            embedding_cache_path=str(embedding_cache),
+            device=bge_device,
         )
 
-        # BGE Reranker
-        print(f"  [2.2] Initializing BGE Reranker...")
-        reranker = BGEReranker(device="cuda", batch_size=64)
+        if args.no_rerank:
+            # Use BGE retriever directly without reranker
+            retriever = bge_retriever
+            print(f"  ✓ Reranking disabled (BGE-M3 on CPU, no CUDA conflict)")
+        else:
+            # BGE Reranker
+            print(f"  [2.2] Initializing BGE Reranker...")
+            reranker = BGEReranker(device="cuda", batch_size=64)
 
-        # Combine BGE + Reranker (fully GPU accelerated)
-        print(f"  [2.3] Combining BGE + Reranker...")
-        retriever = DenseRetrieverWithReranker(
-            bge_retriever=bge_retriever,
-            reranker=reranker,
-            top_k_candidates=args.rerank_top_n,
-        )
+            # Combine BGE + Reranker (fully GPU accelerated)
+            print(f"  [2.3] Combining BGE + Reranker...")
+            retriever = DenseRetrieverWithReranker(
+                bge_retriever=bge_retriever,
+                reranker=reranker,
+                top_k_candidates=args.rerank_top_n,
+            )
 
     # [3] Initialize policy model
+    # Clean up CUDA context before vLLM fork to avoid deadlock
+    import torch
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        print("  ✓ CUDA context cleaned before vLLM init")
+
     print(f"\n[3/4] Loading policy model...")
     policy_config = {
         'model_name': args.policy_model,

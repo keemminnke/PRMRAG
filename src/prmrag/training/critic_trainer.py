@@ -10,12 +10,20 @@ Key Features:
 
 import json
 import re
+import os
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
 import torch
+
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+    print("Warning: wandb not installed. Install with: pip install wandb")
 from datasets import Dataset
 from transformers import (
     AutoModelForCausalLM,
@@ -29,23 +37,22 @@ from trl import SFTTrainer, SFTConfig
 class DataCollatorForCompletionOnlyLM:
     """Custom Data Collator that masks input tokens and only computes loss on completion (assistant response).
 
-    This implementation:
-    1. Finds the response_template in the tokenized sequence
-    2. Sets labels to -100 for all tokens before the response (input masking)
-    3. Keeps labels for response tokens (both <think> reasoning and Label)
+    This implementation compares tokenization with/without assistant response to find
+    the exact boundary, which is more reliable than searching for template tokens.
     """
 
-    def __init__(self, response_template: str, tokenizer, mlm: bool = False):
+    def __init__(self, response_template: str, tokenizer, mlm: bool = False, debug: bool = True):
         self.response_template = response_template
         self.tokenizer = tokenizer
         self.mlm = mlm
+        self.debug = debug
+        self._debug_count = 0
 
-        # Tokenize response template to find its token IDs
-        self.response_template_ids = self.tokenizer.encode(
-            response_template, add_special_tokens=False
-        )
+        print(f"[DataCollator] Initialized (boundary detection mode)")
 
     def __call__(self, examples):
+        import torch
+
         # Batch tokenization
         batch = self.tokenizer.pad(
             examples,
@@ -57,36 +64,94 @@ class DataCollatorForCompletionOnlyLM:
         labels = batch["input_ids"].clone()
 
         # Mask padding tokens
-        labels[labels == self.tokenizer.pad_token_id] = -100
+        if self.tokenizer.pad_token_id is not None:
+            labels[labels == self.tokenizer.pad_token_id] = -100
 
-        # For each sequence, find response_template and mask everything before it
+        # We need the original messages to compute the boundary
+        # The examples should have 'messages' field from SFTTrainer
         for i in range(len(labels)):
-            input_ids = batch["input_ids"][i].tolist()
+            input_ids = batch["input_ids"][i]
 
-            # Find the start of the response template
-            response_start = self._find_template_start(input_ids)
+            # Default: mask everything (will be updated if we find boundary)
+            # We need to find where assistant content starts
+            # Look for the boundary by finding EOS token position and working backwards
+            # Or use the last segment of non-padding tokens
 
-            if response_start != -1:
-                # Mask all tokens before the response (including the template itself)
-                # We want to train on the content AFTER the template
-                response_content_start = response_start + len(self.response_template_ids)
-                labels[i, :response_content_start] = -100
+            # Simple approach: find the assistant response boundary by looking at token patterns
+            # For DeepSeek: <｜Assistant｜> token marks the start
+            # We want to supervise everything AFTER the LAST such token
+
+            boundary = self._find_assistant_boundary(input_ids.tolist())
+
+            if boundary > 0:
+                labels[i, :boundary] = -100
+
+                if self.debug and self._debug_count < 3:
+                    self._debug_count += 1
+                    non_masked = (labels[i] != -100).sum().item()
+                    total = (input_ids != self.tokenizer.pad_token_id).sum().item() if self.tokenizer.pad_token_id else len(input_ids)
+
+                    supervised_ids = input_ids[labels[i] != -100]
+                    supervised_text = self.tokenizer.decode(supervised_ids)
+
+                    print(f"\n[DataCollator Debug #{self._debug_count}]")
+                    print(f"  Boundary at token: {boundary}")
+                    print(f"  Supervised tokens: {non_masked}/{total}")
+                    print(f"  Supervised text: {supervised_text[:300]}...")
             else:
-                # If template not found, mask everything (no loss computed)
+                # Fallback: mask everything
                 labels[i, :] = -100
+                if self.debug and self._debug_count < 3:
+                    print(f"\n[DataCollator WARNING] Could not find boundary, masking all")
 
         batch["labels"] = labels
         return batch
 
-    def _find_template_start(self, input_ids: list) -> int:
-        """Find the starting index of the response template in input_ids."""
-        template_len = len(self.response_template_ids)
+    def _find_assistant_boundary(self, input_ids: list) -> int:
+        """Find where the assistant's response content starts.
 
-        for i in range(len(input_ids) - template_len + 1):
-            if input_ids[i:i + template_len] == self.response_template_ids:
-                return i
+        Strategy: Find the LAST occurrence of the assistant marker token,
+        then return the position right after it.
 
-        return -1
+        For DeepSeek models: <｜Assistant｜> is token 151670
+        """
+        # Known assistant marker tokens for different models
+        assistant_markers = {
+            151670,  # DeepSeek <｜Assistant｜>
+            151644,  # Qwen <|im_start|> (need to check for 'assistant' after)
+        }
+
+        # Find the LAST occurrence of any assistant marker
+        last_marker_pos = -1
+
+        for pos, token_id in enumerate(input_ids):
+            if token_id in assistant_markers:
+                last_marker_pos = pos
+
+        if last_marker_pos != -1:
+            # Return position AFTER the marker
+            return last_marker_pos + 1
+
+        # Fallback: try to find by decoding and searching for patterns
+        # This handles cases where the marker might be tokenized differently
+        full_text = self.tokenizer.decode(input_ids, skip_special_tokens=False)
+
+        # Look for common assistant patterns
+        patterns = ['<｜Assistant｜>', '<|im_start|>assistant', 'assistant\n']
+
+        best_pos = -1
+        for pattern in patterns:
+            # Find LAST occurrence
+            pos = full_text.rfind(pattern)
+            if pos != -1:
+                # Convert text position to token position
+                text_before = full_text[:pos + len(pattern)]
+                tokens_before = self.tokenizer.encode(text_before, add_special_tokens=False)
+                token_pos = len(tokens_before)
+                if token_pos > best_pos:
+                    best_pos = token_pos
+
+        return best_pos
 
 
 class DebugCallback(TrainerCallback):
@@ -237,7 +302,7 @@ class CriticTrainingConfig:
 
     # LoRA settings
     lora_r: int = 16
-    lora_alpha: int = 32
+    lora_alpha: int = 16  # alpha = r for balanced scaling
     lora_dropout: float = 0.05
     lora_target_modules: List[str] = field(default_factory=lambda: [
         "q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"
@@ -248,7 +313,8 @@ class CriticTrainingConfig:
     num_train_epochs: int = 1
     per_device_train_batch_size: int = 4
     gradient_accumulation_steps: int = 4
-    learning_rate: float = 2e-4
+    learning_rate: float = 1e-5
+    weight_decay: float = 0.01
     warmup_ratio: float = 0.1
     # DeepSeek-R1 generates long chains of thought, so we need a long context.
     max_length: int = 4096 
@@ -262,6 +328,11 @@ class CriticTrainingConfig:
     fp16: bool = False
     bf16: bool = True
     gradient_checkpointing: bool = True
+
+    # Wandb logging
+    use_wandb: bool = True
+    wandb_project: str = "prmrag-critic"
+    wandb_run_name: Optional[str] = None  # Auto-generated if None
 
 
 class CriticDataFormatter:
@@ -325,23 +396,25 @@ class CriticDataFormatter:
             input_parts.append(f"<documents>{current_step['documents']}</documents>")
 
         input_parts.append("")
-        input_parts.append("Task: Evaluate the quality of the Current Step. Think step by step in <think> tags, then provide a label (1=good, 0=bad).")
+        input_parts.append("Task: Evaluate the quality of the Current Step. Explain your reasoning in [REASONING] tags, then provide a label (1=good, 0=bad).")
 
         user_content = "\n".join(input_parts)
 
-        # 2. Build Assistant Response (DeepSeek-R1 style with <think> tags)
-        # Loss is computed on BOTH <think> reasoning AND Label
+        # 2. Build Assistant Response
+        # Loss is computed on BOTH reasoning AND Label
+        # NOTE: We use [REASONING] instead of <think> because <think> is a special token
+        # in DeepSeek models, which causes tokenization issues
         label = current_step.get('judge_label', 0)
         reasoning = current_step.get('judge_reasoning', '')
 
-        # DeepSeek-R1 style: <think>reasoning</think> followed by final answer
-        assistant_content = f"<think>{reasoning}</think>\nLabel: {label}"
+        # Use [REASONING] tags to avoid special token conflicts
+        assistant_content = f"[REASONING]\n{reasoning}\n[/REASONING]\nLabel: {label}"
 
         system_content = (
             "You are a step-level critic for evaluating reasoning quality in multi-hop question answering. "
             "The trajectory uses XML tags: <think> for reasoning, <search> for queries, <answer> for final answers, <documents> for retrieved passages. "
             "Analyze each step's logical soundness and evidence grounding. "
-            "First think step by step inside <think> tags, then output a label (1=good, 0=bad)."
+            "First explain your reasoning inside [REASONING] tags, then output a label (1=good, 0=bad)."
         )
 
         return [
@@ -416,40 +489,57 @@ class CriticTrainer:
 
     def _get_response_template(self) -> str:
         """
-        Dynamically detects the start token for the assistant's response.
-        Crucial for DataCollatorForCompletionOnlyLM to work correctly with different models.
-        """
-        # 1. Probe the tokenizer with a dummy message
-        dummy_messages = [
-            {"role": "user", "content": "TEST"},
-            {"role": "assistant", "content": ""} # Empty content to find the boundary
-        ]
-        
-        # Apply template but do not tokenize yet
-        try:
-            prompt_str = self.tokenizer.apply_chat_template(
-                dummy_messages, 
-                tokenize=False, 
-                add_generation_prompt=True 
-            )
-        except Exception as e:
-            print(f"Warning: Could not apply chat template automatically. Using default Qwen. Error: {e}")
-            return "<|im_start|>assistant\n"
+        Detect the correct response template based on model's chat template.
 
-        # 2. Check for known patterns
-        if "<|im_start|>assistant" in prompt_str:
-            print("Detected Template: Qwen/DeepSeek-Distill (<|im_start|>assistant)")
+        Different models use different assistant markers:
+        - Qwen: <|im_start|>assistant
+        - DeepSeek: <｜Assistant｜> or similar
+
+        We test by applying the chat template and looking for the pattern.
+        """
+        # Test with a simple message to detect the format
+        test_messages = [
+            {"role": "system", "content": "test"},
+            {"role": "user", "content": "test"},
+            {"role": "assistant", "content": "ASSISTANT_CONTENT_START"}
+        ]
+
+        try:
+            formatted = self.tokenizer.apply_chat_template(
+                test_messages, tokenize=False, add_generation_prompt=False
+            )
+
+            # Find where assistant content starts
+            marker_pos = formatted.find("ASSISTANT_CONTENT_START")
+            if marker_pos == -1:
+                print("[WARNING] Could not detect assistant marker, using fallback")
+                return "<|im_start|>assistant\n"
+
+            # Extract the template (text just before the content)
+            # Look backwards from marker to find the assistant start marker
+            search_region = formatted[max(0, marker_pos - 100):marker_pos]
+
+            # Common patterns to look for
+            patterns = [
+                "<|im_start|>assistant\n",  # Qwen style
+                "<｜Assistant｜>",           # DeepSeek style (full-width)
+                "<|Assistant|>",             # DeepSeek style (ASCII)
+                "assistant\n",               # Simple
+            ]
+
+            for pattern in patterns:
+                if pattern in search_region:
+                    print(f"[Response Template] Detected: {repr(pattern)}")
+                    return pattern
+
+            # Fallback: use the last 30 chars before content as template
+            fallback = search_region[-30:] if len(search_region) >= 30 else search_region
+            print(f"[Response Template] Using fallback: {repr(fallback)}")
+            return fallback
+
+        except Exception as e:
+            print(f"[WARNING] Template detection failed: {e}, using default")
             return "<|im_start|>assistant\n"
-        elif "<｜Assistant｜>" in prompt_str:
-            print("Detected Template: DeepSeek-R1 Original (<｜Assistant｜>)")
-            return "<｜Assistant｜>"
-        elif "Assistant:" in prompt_str:
-             print("Detected Template: Generic (Assistant:)")
-             return "Assistant:"
-        
-        # Default fallback
-        print(f"Warning: Unknown template structure. Ends with: {prompt_str[-20:]}")
-        return "<|im_start|>assistant\n"
 
     def prepare_data(self, train_file: Path, eval_file: Optional[Path] = None) -> tuple:
         print(f"\nPreparing training data from: {train_file}")
@@ -493,6 +583,73 @@ class CriticTrainer:
         self.model.print_trainable_parameters()
         print("✓ Model loaded with LoRA")
 
+    def _verify_masking(self, dataset: Dataset, collator: DataCollatorForCompletionOnlyLM, num_samples: int = 5):
+        """Verify that masking is working correctly before training."""
+        print(f"Checking {num_samples} samples for proper masking...")
+
+        total_tokens = 0
+        total_trained = 0
+        all_masked_count = 0
+
+        for i in range(min(num_samples, len(dataset))):
+            sample = dataset[i]
+            messages = sample['messages']
+
+            # Tokenize the sample
+            text = self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=False
+            )
+            tokenized = self.tokenizer(
+                text,
+                truncation=True,
+                max_length=self.config.max_length,
+                return_tensors="pt"
+            )
+
+            # Apply collator to get labels
+            batch = collator([{
+                'input_ids': tokenized['input_ids'][0].tolist(),
+                'attention_mask': tokenized['attention_mask'][0].tolist(),
+            }])
+
+            labels = batch['labels'][0]
+            num_tokens = len(labels)
+            num_trained = (labels != -100).sum().item()
+
+            total_tokens += num_tokens
+            total_trained += num_trained
+
+            if num_trained == 0:
+                all_masked_count += 1
+                print(f"  Sample {i+1}: ALL MASKED! ({num_tokens} tokens)")
+                # Show what we're looking for
+                print(f"    Text preview: {text[:200]}...")
+            else:
+                print(f"  Sample {i+1}: {num_trained}/{num_tokens} tokens trained ({100*num_trained/num_tokens:.1f}%)")
+
+        print(f"\nMasking Summary:")
+        print(f"  Total tokens: {total_tokens}")
+        print(f"  Trained tokens: {total_trained} ({100*total_trained/total_tokens:.1f}%)")
+        print(f"  Fully masked samples: {all_masked_count}/{num_samples}")
+
+        if all_masked_count == num_samples:
+            print("\n" + "!" * 70)
+            print("CRITICAL ERROR: ALL SAMPLES ARE FULLY MASKED!")
+            print("This means the response template is not being found.")
+            print("Training will result in 0 loss (nothing to learn).")
+            print("!" * 70)
+
+            # Show what the template looks like in actual data
+            sample_text = self.tokenizer.apply_chat_template(
+                dataset[0]['messages'], tokenize=False, add_generation_prompt=False
+            )
+            print(f"\nActual text structure:")
+            print(sample_text[:1000])
+            raise ValueError("Masking verification failed - response template not found in any sample")
+
+        if total_trained / total_tokens < 0.05:
+            print("\n[WARNING] Less than 5% of tokens are being trained. Check if this is expected.")
+
     def train(self, train_dataset: Dataset, eval_dataset: Optional[Dataset] = None, debug_interval: int = 100):
         if self.model is None:
             self.load_model()
@@ -507,13 +664,47 @@ class CriticTrainer:
             tokenizer=self.tokenizer,
         )
 
+        # Setup wandb logging
+        report_to = []
+        if self.config.use_wandb and WANDB_AVAILABLE:
+            report_to.append("wandb")
+            run_name = self.config.wandb_run_name or f"critic_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            wandb.init(
+                project=self.config.wandb_project,
+                name=run_name,
+                config={
+                    "model_name": self.config.model_name,
+                    "learning_rate": self.config.learning_rate,
+                    "weight_decay": self.config.weight_decay,
+                    "warmup_ratio": self.config.warmup_ratio,
+                    "lr_scheduler": "cosine",
+                    "batch_size": self.config.per_device_train_batch_size,
+                    "gradient_accumulation": self.config.gradient_accumulation_steps,
+                    "effective_batch_size": self.config.per_device_train_batch_size * self.config.gradient_accumulation_steps,
+                    "max_length": self.config.max_length,
+                    "lora_r": self.config.lora_r,
+                    "lora_alpha": self.config.lora_alpha,
+                    "lora_dropout": self.config.lora_dropout,
+                    "num_epochs": self.config.num_train_epochs,
+                    "num_train_samples": len(train_dataset),
+                },
+                tags=["critic", "prmrag", self.config.model_name.split("/")[-1]],
+            )
+            print(f"✓ Wandb initialized: {self.config.wandb_project}/{run_name}")
+        else:
+            report_to.append("tensorboard")
+            if self.config.use_wandb and not WANDB_AVAILABLE:
+                print("Warning: wandb requested but not available, using tensorboard")
+
         sft_config = SFTConfig(
             output_dir=self.config.output_dir,
             num_train_epochs=self.config.num_train_epochs,
             per_device_train_batch_size=self.config.per_device_train_batch_size,
             gradient_accumulation_steps=self.config.gradient_accumulation_steps,
             learning_rate=self.config.learning_rate,
+            weight_decay=self.config.weight_decay,
             warmup_ratio=self.config.warmup_ratio,
+            lr_scheduler_type="cosine",  # Cosine decay for smoother training
             logging_steps=self.config.logging_steps,
             save_steps=self.config.save_steps,
             eval_steps=self.config.eval_steps if eval_dataset else None,
@@ -523,7 +714,7 @@ class CriticTrainer:
             gradient_checkpointing=self.config.gradient_checkpointing,
             save_total_limit=2,
             max_length=self.config.max_length,
-            report_to="tensorboard",
+            report_to=report_to,
             remove_unused_columns=True,
         )
 
@@ -556,6 +747,10 @@ class CriticTrainer:
         print(f"Debug interval: {debug_interval} steps")
         print("=" * 70)
 
+        # CRITICAL: Verify masking is working correctly before training
+        print("\n[MASKING VERIFICATION]")
+        self._verify_masking(train_dataset, collator)
+
         trainer = SFTTrainer(
             model=self.model,
             args=sft_config,
@@ -579,6 +774,7 @@ class CriticTrainer:
                 'model_name': self.config.model_name,
                 'lora_r': self.config.lora_r,
                 'max_length': self.config.max_length,
+                'learning_rate': self.config.learning_rate,
             },
             'training': {
                 'completed_at': datetime.now().isoformat(),
@@ -587,6 +783,11 @@ class CriticTrainer:
         }
         with open(Path(self.config.output_dir) / "training_info.json", 'w') as f:
             json.dump(info, f, indent=2)
+
+        # Finish wandb run
+        if self.config.use_wandb and WANDB_AVAILABLE and wandb.run is not None:
+            wandb.finish()
+            print("✓ Wandb run finished")
 
 
 def create_critic_trainer(model_name: str, output_dir: str, **kwargs) -> CriticTrainer:
