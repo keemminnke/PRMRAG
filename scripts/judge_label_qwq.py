@@ -88,8 +88,22 @@ def load_trajectories(filepath: Path):
             # Convert to Trajectory schema
             steps = []
             for step_data in data['steps']:
-                # Get text content (XML format)
+                # Get text content - try 'text'/'content' first, then reconstruct from parsed fields
                 content = step_data.get('text', step_data.get('content', ''))
+
+                if not content:
+                    # Reconstruct XML from parsed fields (think, search, answer, documents)
+                    parts = []
+                    if step_data.get('think'):
+                        parts.append(f"<think>{step_data['think']}</think>")
+                    if step_data.get('search'):
+                        parts.append(f"<search>{step_data['search']}</search>")
+                    if step_data.get('answer'):
+                        parts.append(f"<answer>{step_data['answer']}</answer>")
+                    if step_data.get('documents'):
+                        parts.append(f"<documents>{step_data['documents']}</documents>")
+                    content = "\n".join(parts)
+
                 parsed = parse_content(content)
 
                 # Map action_type: search -> search, answer -> finish
@@ -100,7 +114,7 @@ def load_trajectories(filepath: Path):
                 step = TrajectoryStep(
                     step_id=step_data.get('step_id', 1) - 1,
                     action_type=action_type,
-                    action=content,  # Keep original XML content
+                    action=content,  # XML content (original or reconstructed)
                     observation=parsed['documents'],
                     passages=[parsed['documents']] if parsed['documents'] else [],
                 )
@@ -265,6 +279,16 @@ def main():
             for step_idx, (step, judge_label) in enumerate(zip(original_data['steps'], judge_labels)):
                 # Parse content to extract XML fields
                 content = step.get('text', step.get('content', ''))
+
+                if not content:
+                    # Reconstruct XML from parsed fields
+                    parts = []
+                    if step.get('think'): parts.append(f"<think>{step['think']}</think>")
+                    if step.get('search'): parts.append(f"<search>{step['search']}</search>")
+                    if step.get('answer'): parts.append(f"<answer>{step['answer']}</answer>")
+                    if step.get('documents'): parts.append(f"<documents>{step['documents']}</documents>")
+                    content = "\n".join(parts)
+
                 parsed = parse_content(content)
 
                 step_output = {

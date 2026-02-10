@@ -193,77 +193,82 @@ class JudgeLabeler(BaseLabeler):
             final_answer_section = f"## Model's Final Answer\n{trajectory.final_answer}"
 
         # 2. Strict Process Supervisor 프롬프트 (XML 태그 형식)
-        prompt = f"""You are a **Strict Process Supervisor** for an Active RAG (Retrieval-Augmented Generation) agent.
-Your goal is NOT just to check if the answer is correct, but to judge whether the agent's **search strategy**, **question grounding**, and **reliance on evidence** are flawless.
-You must penalize "lucky guesses" (correct answers without evidence) and reward "strategic resilience" (retrying after failure).
+        prompt = f"""You are a strict process supervisor for a multi-hop question answering agent that uses retrieval-augmented generation (RAG). Your task is to evaluate each step of the agent's trajectory and assign a binary label: GOOD or BAD.
 
-The trajectory uses these XML tags:
-- <think>reasoning</think> - Agent's internal reasoning
-- <search>query</search> - Search action with query
-- <answer>final answer</answer> - Final answer submission
-- <documents>passages</documents> - Retrieved documents from search
+The agent operates using four XML-tagged actions:
+- <think>...</think>  Internal reasoning
+- <search>...</search>  Retrieval query
+- <documents>...</documents>  Retrieved passages (system-provided)
+- <answer>...</answer>  Final answer submission
 
-# Key Rules (Non-negotiable)
-- You must NOT use your own world knowledge. Treat ANY factual claim not supported by <documents> as a hallucination.
-- A "successful search" means the <documents> contains information DIRECTLY relevant to the Question's entities and required relations.
-  If the <documents> is about a different entity (namesake, fictional character vs real person, wrong relation direction), it is NOT successful.
+---
 
-# Task
-You will be given a full interaction trajectory consisting of multiple steps.
-Evaluate EACH step independently (but you may use previous steps to determine whether search has succeeded) and assign GOOD or BAD.
+# Labeling Principles
 
-# Evaluation Criteria (Strict Process Supervision)
+1. The default label is BAD. Assign GOOD only when a step makes a clear, verifiable contribution toward answering the question.
+2. No information gain means BAD. Steps that restate the question, repeat prior reasoning, or produce generic plans without new insight are BAD.
+3. Do not use your own world knowledge. Any factual claim not grounded in <documents> is treated as hallucination.
 
-**Case 0: QUESTION MISINTERPRETATION (Entity/Relation Error)**
-- **BAD if:** The <think> assumes the wrong entity type/domain (e.g., fictional character vs real person), wrong relation direction (son vs father), or drifts to a namesake.
-- **GOOD if:** The step maintains correct entity grounding and relation direction consistent with the Question.
+---
 
-**Case 1: MISSING SEARCH (The 'Overconfidence' Error)**
-If the Agent uses <answer> with factual details WITHOUT any prior successful <search>:
-- **BAD** unless the question is truly trivial/general knowledge.
+# Evaluation Criteria
 
-**Case 2: Step has <search> tag**
-- **GOOD if:** The query is specific, grounded in the Question (correct entities/relations), and logically derived.
-  If previous search failed, the agent tries a meaningfully different strategy (synonyms, disambiguation terms, relation-focused query).
-- **BAD if:** Repeats the same failed query, is too vague, targets the wrong entity/domain, or ignores needed disambiguation.
-- **BAD if:** The query is derived from any unsupported assumption or hallucinated claim in <think> or prior steps.
+**R1. Entity and Relation Grounding**
+- BAD if <think> misidentifies an entity (e.g., fictional vs. real person), reverses a relation (e.g., son vs. father), or drifts to a namesake.
+- GOOD if the step maintains correct entity and relation grounding consistent with the question.
 
-**Case 3: Step has only <think> (Reasoning step)**
-- **GOOD if:** It only plans next actions or summarizes <documents> WITHOUT introducing new factual claims.
-- **BAD if:** It asserts any factual claim not explicitly supported by the <documents> (hallucination).
+**R2. Search Steps (<search>)**
+- GOOD if: (a) the query is specific and grounded in the question's entities and relations, (b) the returned <documents> contain information directly relevant to the question, and (c) if a prior search failed, the agent uses a meaningfully different strategy.
+- BAD if: the query repeats a failed attempt, is too vague, targets the wrong entity, is derived from a hallucinated claim, or the returned <documents> are empty or irrelevant.
 
-**Case 4: Step has <answer> tag (Final Answer)**
-- **BAD if any of the following:**
-  (a) The answer is "Uncertain", "Unknown", "None", "N/A", or empty (non-response).
-  (b) The <think> contains uncertainty phrases like "cannot determine", "not sure", "insufficient information".
-  (c) The answer is NOT logically derivable from the accumulated <documents> - the agent made a logical leap.
-  (d) The agent finishes despite having insufficient evidence in <documents> (premature conclusion).
-  (e) The answer contradicts information explicitly stated in <documents>.
-- **GOOD if and only if:** (1) The answer is specific and definitive, (2) there is sufficient evidence in <documents>, AND (3) the answer can be logically derived from the accumulated <documents>.
-- IMPORTANT: Evaluate ONLY whether the reasoning chain is logically sound. Do NOT directly compare the answer to the Ground Truth.
+**R3. Reasoning Steps (<think> only)**
+- GOOD if the step extracts new useful information from prior <documents> that advances toward the answer, or identifies a specific knowledge gap with a concrete next search plan.
+- BAD if the step merely restates the question, repeats prior reasoning, makes a generic plan, summarizes without new insight, or asserts unsupported factual claims.
 
-**Case 5: Handling Retrieval Failures**
-If the previous <documents> was IRRELEVANT or EMPTY:
-- **GOOD if:** The agent admits failure and performs another <search> immediately (with a changed strategy).
-- **BAD if:** The agent proceeds to <answer> as if the search succeeded.
+**R4. Answer Steps (<answer> or final step)**
+This rule applies to any step with <answer> and to the last step of the trajectory.
+- BAD if any of the following hold:
+  (a) The answer is empty, uncertain, or a non-response (e.g., "Unknown", "N/A").
+  (b) The reasoning expresses uncertainty (e.g., "cannot determine", "not sure").
+  (c) The answer requires a logical leap not supported by <documents>.
+  (d) The agent concludes despite insufficient evidence (premature termination).
+  (e) The answer contradicts information in <documents>.
+- GOOD if and only if: the answer is specific, logically derivable from the accumulated <documents>, and the reasoning chain is sound.
 
-# Input Data
+**R5. Recovery from Retrieval Failure**
+When the preceding <documents> were irrelevant or empty:
+- GOOD if the agent issues a new <search> with a meaningfully different query.
+- BAD if the agent proceeds to <answer> as if the search succeeded, or retries with the same query.
+
+**R6. Unsupported Answer (Overconfidence)**
+If the agent produces <answer> without any prior successful search:
+- BAD. Correct answers without evidence are penalized as lucky guesses.
+
+---
+
+# Input
+
 **Question:** {trajectory.question}
-**Ground Truth Answer (for reference only - do NOT use this to judge correctness):** {gold_answer}
-## Full Trajectory
+**Ground Truth Answer (for reference only - do NOT use this to directly judge correctness):** {gold_answer}
+
+## Trajectory
 {history_str}
 {final_answer_section}
 
-# Output Instructions
-Return a JSON list:
+---
+
+# Output Format
+
+Return a JSON array with one entry per step. Each entry must have "step" (integer), "label" ("GOOD" or "BAD"), and "reasoning" (string).
+
 ```json
 [
   {{"step": 1, "label": "GOOD", "reasoning": "..."}},
-  ...
+  {{"step": 2, "label": "BAD", "reasoning": "..."}}
 ]
 ```
 
-Evaluate all {len(trajectory.steps)} steps now."""
+Evaluate all {len(trajectory.steps)} steps."""
 
         return prompt
 
@@ -315,10 +320,11 @@ Evaluate all {len(trajectory.steps)} steps now."""
                     break
 
             if result:
-                label = result.get('label', 'BAD').upper()
-                if 'GOOD' in label:
+                raw = str(result.get('label', '')).strip().upper()
+                if raw == 'GOOD':
                     label = 'GOOD'
                 else:
+                    # "NOT GOOD", "BAD", "NEUTRAL", etc. → all BAD
                     label = 'BAD'
                 reasoning = result.get('reasoning', '')  # No truncation
             else:
@@ -357,9 +363,10 @@ Evaluate all {len(trajectory.steps)} steps now."""
                     time.sleep(self.retry_delay)
                 else:
                     print(f"All retries failed: {e}")
-                    # Return a default response on failure
-                    return """Reasoning: Unable to evaluate due to model error.
-Label: GOOD"""
+                    # Return a default response on failure (default BAD)
+                    return """```json
+[{"step": 1, "label": "BAD", "reasoning": "Unable to evaluate due to model error."}]
+```"""
 
     def _call_llm(self, prompt: str) -> str:
         """Call LLM using vLLM backend.

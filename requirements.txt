@@ -1,5 +1,5 @@
 # Core dependencies
-torch>=2.0.0
+# torch - pre-installed (NVIDIA custom build), do not install from PyPI
 transformers>=4.35.0
 numpy>=1.24.0,<2.0  # pyarrow compatibility
 pandas>=2.0.0
@@ -17,9 +17,8 @@ openai>=1.3.0
 anthropic>=0.8.0
 
 # Optional: Fast inference
-vllm>=0.2.0
-# guidance>=0.1.0
-flash-attn>=2.8.3
+# vllm - install separately: pip install vllm --no-deps, then install missing deps
+# flash-attn - install separately: pip install flash-attn --no-build-isolation
 
 # Evaluation & metrics
 scikit-learn>=1.3.0

@@ -142,16 +142,84 @@ def build_critic_prompt_xml(tokenizer, question: str, steps: List[Dict], step_id
     return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
 
+def _extract_soft_score(logprobs_list, token_id_1: int, token_id_0: int, binary_label: int) -> float:
+    """Extract soft score from logprobs at the label token position.
+
+    Searches from the end of logprobs for the position containing "1" or "0" token,
+    then computes P(good) = P("1") / (P("1") + P("0")) using softmax.
+    """
+    import math
+
+    # Search from the end for the position with label tokens
+    search_start = len(logprobs_list) - 1
+    search_end = max(len(logprobs_list) - 5, -1)
+
+    for i in range(search_start, search_end, -1):
+        if i < 0:
+            break
+        token_logprobs = logprobs_list[i]
+        if token_logprobs is None:
+            continue
+
+        logp_1 = None
+        logp_0 = None
+
+        for tid, lp in token_logprobs.items():
+            if tid == token_id_1:
+                logp_1 = lp.logprob
+            elif tid == token_id_0:
+                logp_0 = lp.logprob
+
+        if logp_1 is not None or logp_0 is not None:
+            if logp_1 is not None and logp_0 is not None:
+                # Both available - normalize between "1" and "0"
+                p_1 = math.exp(logp_1)
+                p_0 = math.exp(logp_0)
+                return p_1 / (p_1 + p_0)
+            elif logp_1 is not None:
+                # "0" not in top logprobs → very high confidence good
+                return 1.0 - 1e-6
+            elif logp_0 is not None:
+                # "1" not in top logprobs → very high confidence bad
+                return 1e-6
+
+    # Fallback to binary
+    return 1.0 if binary_label == 1 else (0.0 if binary_label == 0 else 0.5)
+
+
+def aggregate_step_scores(step_scores: List[float], method: str) -> float:
+    """Aggregate step-level scores into a trajectory-level score."""
+    if not step_scores:
+        return 0.0
+    if method == "min":
+        return min(step_scores)
+    elif method == "product":
+        score = 1.0
+        for s in step_scores:
+            score *= s
+        return score
+    else:  # "avg"
+        return sum(step_scores) / len(step_scores)
+
+
 def batch_evaluate_with_critic_vllm(
-    llm, tokenizer, lora_request, trajectories: List[Dict]
-) -> List[Tuple[List[int], float]]:
+    llm, tokenizer, lora_request, trajectories: List[Dict],
+    use_soft_scores: bool = True,
+) -> List[Tuple[List[int], List[float]]]:
     """Batch evaluate multiple trajectories with critic using vLLM.
 
     Returns:
-        List of (step_labels, trajectory_score) for each trajectory
-        Labels are now binary: 1=good, 0=bad
+        List of (step_labels, step_scores) for each trajectory.
+        step_scores are continuous (0~1) if use_soft_scores=True, else binary (0.0/1.0).
+        Caller should use aggregate_step_scores() to get trajectory-level scores.
     """
     from vllm import SamplingParams
+
+    # Get token IDs for soft scoring
+    if use_soft_scores:
+        token_id_1 = tokenizer.encode("1", add_special_tokens=False)[-1]
+        token_id_0 = tokenizer.encode("0", add_special_tokens=False)[-1]
+        print(f"  Soft scoring: token_id('1')={token_id_1}, token_id('0')={token_id_0}")
 
     # Collect all (traj_idx, step_idx, prompt) pairs
     all_prompts = []
@@ -166,13 +234,15 @@ def batch_evaluate_with_critic_vllm(
             prompt_info.append((traj_idx, step_idx))
 
     if not all_prompts:
-        return [([], 0.0) for _ in trajectories]
+        return [([], []) for _ in trajectories]
 
     # vLLM batch generate
     print(f"  Generating {len(all_prompts)} critic evaluations with vLLM...")
+    print(f"  Soft scores: {use_soft_scores}")
     sampling_params = SamplingParams(
         max_tokens=256,
         temperature=0,
+        logprobs=20 if use_soft_scores else None,
         stop=["Label: 1", "Label: 0", "Label:1", "Label:0"],
         include_stop_str_in_output=True,
     )
@@ -183,30 +253,52 @@ def batch_evaluate_with_critic_vllm(
         lora_request=lora_request,
     )
 
-    # Extract responses
-    all_responses = [output.outputs[0].text for output in outputs]
+    # Parse results
+    results = {i: {'labels': [], 'scores': []} for i in range(len(trajectories))}
+    soft_score_stats = []  # For diagnostics
 
-    # Parse labels (binary: 1=good, 0=bad)
-    results = {i: {'labels': [], 'good_count': 0, 'total': 0} for i in range(len(trajectories))}
+    for (traj_idx, step_idx), output_obj in zip(prompt_info, outputs):
+        response = output_obj.outputs[0]
+        text = response.text
 
-    for (traj_idx, step_idx), response in zip(prompt_info, all_responses):
-        label = -1  # Unknown
-        if "Label: 1" in response or "Label:1" in response or response.strip().endswith("1"):
+        # Determine binary label
+        label = -1
+        if "Label: 1" in text or "Label:1" in text or text.strip().endswith("1"):
             label = 1
-            results[traj_idx]['good_count'] += 1
-        elif "Label: 0" in response or "Label:0" in response or response.strip().endswith("0"):
+        elif "Label: 0" in text or "Label:0" in text or text.strip().endswith("0"):
             label = 0
-        results[traj_idx]['labels'].append(label)
-        results[traj_idx]['total'] += 1
 
-    # Build final results
+        # Calculate score
+        if use_soft_scores and response.logprobs:
+            score = _extract_soft_score(response.logprobs, token_id_1, token_id_0, label)
+            soft_score_stats.append(score)
+        else:
+            score = 1.0 if label == 1 else (0.0 if label == 0 else 0.5)
+
+        results[traj_idx]['labels'].append(label)
+        results[traj_idx]['scores'].append(score)
+
+    # Print soft score diagnostics
+    if use_soft_scores and soft_score_stats:
+        avg_soft = sum(soft_score_stats) / len(soft_score_stats)
+        std_soft = (sum((s - avg_soft) ** 2 for s in soft_score_stats) / len(soft_score_stats)) ** 0.5
+        print(f"\n  Soft score stats ({len(soft_score_stats)} steps):")
+        print(f"    Mean: {avg_soft:.4f}, Std: {std_soft:.4f}")
+        print(f"    Min: {min(soft_score_stats):.4f}, Max: {max(soft_score_stats):.4f}")
+        # Distribution buckets
+        buckets = {'[0.0-0.2)': 0, '[0.2-0.4)': 0, '[0.4-0.6)': 0, '[0.6-0.8)': 0, '[0.8-1.0]': 0}
+        for s in soft_score_stats:
+            if s < 0.2: buckets['[0.0-0.2)'] += 1
+            elif s < 0.4: buckets['[0.2-0.4)'] += 1
+            elif s < 0.6: buckets['[0.4-0.6)'] += 1
+            elif s < 0.8: buckets['[0.6-0.8)'] += 1
+            else: buckets['[0.8-1.0]'] += 1
+        print(f"    Distribution: {buckets}")
+
+    # Return step-level results (no aggregation here)
     final_results = []
     for i in range(len(trajectories)):
-        labels = results[i]['labels']
-        total = results[i]['total']
-        good = results[i]['good_count']
-        score = good / total if total > 0 else 0.0
-        final_results.append((labels, score))
+        final_results.append((results[i]['labels'], results[i]['scores']))
 
     return final_results
 
@@ -267,8 +359,13 @@ def load_versaprm(model_id: str = "UW-Madison-Lee-Lab/VersaPRM-Base-8B"):
 
 def batch_get_versaprm_scores(
     model, tokenizer, trajectories: List[Dict], device, batch_size: int = 8
-) -> List[float]:
-    """Batch get VersaPRM scores for multiple trajectories."""
+) -> List[List[float]]:
+    """Batch get VersaPRM step-level scores for multiple trajectories.
+
+    Returns:
+        List of step_scores lists, one per trajectory.
+        Caller should use aggregate_step_scores() to get trajectory-level scores.
+    """
     candidate_tokens = [12, 10]
     step_token_id = 23535
 
@@ -297,7 +394,7 @@ def batch_get_versaprm_scores(
         all_texts.append(input_text)
 
     # Batch process
-    all_scores = []
+    all_step_scores = []
     num_batches = (len(all_texts) + batch_size - 1) // batch_size
     for i in tqdm(range(0, len(all_texts), batch_size), total=num_batches, desc="VersaPRM eval"):
         batch_texts = all_texts[i:i+batch_size]
@@ -321,14 +418,13 @@ def batch_get_versaprm_scores(
                 step_mask = (input_ids == step_token_id)
                 if step_mask.sum() > 0:
                     step_scores = item_scores[step_mask].tolist()
-                    traj_score = min(step_scores) if step_scores else 0.0
                 else:
                     valid_len = inputs['attention_mask'][j].sum().item()
-                    traj_score = item_scores[valid_len - 1].item()
+                    step_scores = [item_scores[valid_len - 1].item()]
 
-                all_scores.append(traj_score)
+                all_step_scores.append(step_scores)
 
-    return all_scores
+    return all_step_scores
 
 
 # ============================================================
@@ -353,12 +449,15 @@ def group_trajectories_by_question(trajectories: List[Dict]) -> Dict[str, List[D
 
 
 def check_answer(predicted: str, gold: str) -> bool:
-    """Check if predicted answer matches gold."""
+    """Check if predicted answer matches gold (Cover Exact Match).
+
+    Cover EM: ground truth answer is contained in the predicted answer.
+    """
     if not predicted or not gold:
         return False
     pred_norm = predicted.strip().lower()
     gold_norm = gold.strip().lower()
-    return pred_norm == gold_norm or gold_norm in pred_norm or pred_norm in gold_norm
+    return gold_norm in pred_norm
 
 
 def main():
@@ -388,6 +487,12 @@ def main():
     parser.add_argument("--gpu-memory", type=float, default=0.4,
                         help="GPU memory utilization for vLLM")
 
+    # Soft scoring
+    parser.add_argument("--soft-scores", action="store_true", default=True,
+                        help="Use logprob soft scores instead of binary (default: True)")
+    parser.add_argument("--no-soft-scores", dest="soft_scores", action="store_false",
+                        help="Use binary scores (0 or 1)")
+
     args = parser.parse_args()
 
     # Load trajectories from file
@@ -412,18 +517,28 @@ def main():
             args.critic_model, args.critic_base, gpu_memory_utilization=args.gpu_memory
         )
 
+    # Scoring methods to evaluate
+    scoring_methods = ['avg', 'min']
+
     # Results
     results = {
         'config': {
             'trajectories_file': args.trajectories,
             'num_questions': len(groups),
             'total_trajectories': len(trajectories),
+            'scoring_methods': scoring_methods,
+            'soft_scores': args.soft_scores,
         },
         'majority_voting': {'correct': 0, 'total': 0},
-        'our_critic': {'correct': 0, 'total': 0},
-        'versaprm': {'correct': 0, 'total': 0},
         'details': [],
     }
+
+    # Initialize result slots for all method x scoring combinations
+    for scoring in scoring_methods:
+        results[f'critic_bon_{scoring}'] = {'correct': 0, 'total': 0}
+        results[f'critic_wmv_{scoring}'] = {'correct': 0, 'total': 0}
+        results[f'versaprm_bon_{scoring}'] = {'correct': 0, 'total': 0}
+        results[f'versaprm_wmv_{scoring}'] = {'correct': 0, 'total': 0}
 
     print(f"\n{'='*70}")
     print("COMPARING VOTING METHODS")
@@ -452,37 +567,66 @@ def main():
         if majority_correct:
             results['majority_voting']['correct'] += 1
 
-    # Method 2: Our Critic
-    critic_results = {}
+    # Method 2: Our Critic (inference once, aggregate both ways)
+    # Per-question step scores for reuse across scoring methods
+    critic_per_question = {}  # qid -> [(traj, step_scores), ...]
+
     if critic_llm:
         print(f"Evaluating with Critic (vLLM)... {len(all_trajs_flat)} trajectories")
-        critic_scores = batch_evaluate_with_critic_vllm(
-            critic_llm, critic_tokenizer, critic_lora_request, all_trajs_flat
+        critic_step_results = batch_evaluate_with_critic_vllm(
+            critic_llm, critic_tokenizer, critic_lora_request, all_trajs_flat,
+            use_soft_scores=args.soft_scores,
         )
 
+        # Group step scores by question
         score_idx = 0
         for qid in qid_list:
             trajs = groups[qid]
-            best_score = -1
-            best_traj = trajs[0]
+            critic_per_question[qid] = []
             for traj in trajs:
-                _, score = critic_scores[score_idx]
-                if score > best_score:
-                    best_score = score
-                    best_traj = traj
+                _, step_scores = critic_step_results[score_idx]
+                critic_per_question[qid].append((traj, step_scores))
                 score_idx += 1
 
-            gold_answer = trajs[0].get('gold_answer')
-            critic_answer = best_traj.get('final_answer', best_traj.get('predicted_answer', ''))
-            critic_correct = check_answer(critic_answer, gold_answer)
-            critic_results[qid] = {
-                'answer': critic_answer,
-                'score': best_score,
-                'correct': critic_correct,
-            }
-            results['our_critic']['total'] += 1
-            if critic_correct:
-                results['our_critic']['correct'] += 1
+        # Compute all scoring method combinations
+        for scoring in scoring_methods:
+            for qid in qid_list:
+                trajs_and_scores = critic_per_question[qid]
+                gold_answer = groups[qid][0].get('gold_answer')
+
+                # Aggregate step scores → trajectory scores
+                traj_scores = [aggregate_step_scores(ss, scoring) for _, ss in trajs_and_scores]
+
+                # BoN: select trajectory with highest score
+                best_idx = max(range(len(traj_scores)), key=lambda i: traj_scores[i])
+                best_traj = trajs_and_scores[best_idx][0]
+                bon_answer = best_traj.get('final_answer', best_traj.get('predicted_answer', ''))
+                bon_correct = check_answer(bon_answer, gold_answer)
+                results[f'critic_bon_{scoring}']['total'] += 1
+                if bon_correct:
+                    results[f'critic_bon_{scoring}']['correct'] += 1
+
+                # Weighted Majority Voting
+                weighted_votes = {}
+                original_answers = {}
+                for (traj, _), sc in zip(trajs_and_scores, traj_scores):
+                    ans = traj.get('final_answer', traj.get('predicted_answer', ''))
+                    if ans:
+                        key = ans.strip().lower()
+                        weighted_votes[key] = weighted_votes.get(key, 0.0) + sc
+                        if key not in original_answers:
+                            original_answers[key] = ans
+
+                if weighted_votes:
+                    best_key = max(weighted_votes, key=weighted_votes.get)
+                    wmv_answer = original_answers.get(best_key, best_key)
+                else:
+                    wmv_answer = ""
+
+                wmv_correct = check_answer(wmv_answer, gold_answer)
+                results[f'critic_wmv_{scoring}']['total'] += 1
+                if wmv_correct:
+                    results[f'critic_wmv_{scoring}']['correct'] += 1
 
     # Free GPU memory
     if critic_llm and not args.skip_versaprm:
@@ -495,37 +639,64 @@ def main():
         versaprm_model, versaprm_tokenizer = load_versaprm(args.versaprm)
         versaprm_device = next(versaprm_model.parameters()).device
 
-    # Method 3: VersaPRM
-    versaprm_results = {}
+    # Method 3: VersaPRM (inference once, aggregate both ways)
+    versaprm_per_question = {}  # qid -> [(traj, step_scores), ...]
+
     if versaprm_model:
         print(f"Evaluating with VersaPRM... {len(all_trajs_flat)} trajectories")
-        versaprm_scores = batch_get_versaprm_scores(
+        versaprm_step_scores = batch_get_versaprm_scores(
             versaprm_model, versaprm_tokenizer, all_trajs_flat, versaprm_device, batch_size=8
         )
 
+        # Group step scores by question
         score_idx = 0
         for qid in qid_list:
             trajs = groups[qid]
-            best_score = -1
-            best_traj = trajs[0]
+            versaprm_per_question[qid] = []
             for traj in trajs:
-                score = versaprm_scores[score_idx]
-                if score > best_score:
-                    best_score = score
-                    best_traj = traj
+                step_scores = versaprm_step_scores[score_idx]
+                versaprm_per_question[qid].append((traj, step_scores))
                 score_idx += 1
 
-            gold_answer = trajs[0].get('gold_answer')
-            versaprm_answer = best_traj.get('final_answer', best_traj.get('predicted_answer', ''))
-            versaprm_correct = check_answer(versaprm_answer, gold_answer)
-            versaprm_results[qid] = {
-                'answer': versaprm_answer,
-                'score': best_score,
-                'correct': versaprm_correct,
-            }
-            results['versaprm']['total'] += 1
-            if versaprm_correct:
-                results['versaprm']['correct'] += 1
+        # Compute all scoring method combinations
+        for scoring in scoring_methods:
+            for qid in qid_list:
+                trajs_and_scores = versaprm_per_question[qid]
+                gold_answer = groups[qid][0].get('gold_answer')
+
+                # Aggregate step scores → trajectory scores
+                traj_scores = [aggregate_step_scores(ss, scoring) for _, ss in trajs_and_scores]
+
+                # BoN
+                best_idx = max(range(len(traj_scores)), key=lambda i: traj_scores[i])
+                best_traj = trajs_and_scores[best_idx][0]
+                bon_answer = best_traj.get('final_answer', best_traj.get('predicted_answer', ''))
+                bon_correct = check_answer(bon_answer, gold_answer)
+                results[f'versaprm_bon_{scoring}']['total'] += 1
+                if bon_correct:
+                    results[f'versaprm_bon_{scoring}']['correct'] += 1
+
+                # Weighted Majority Voting
+                weighted_votes = {}
+                original_answers = {}
+                for (traj, _), sc in zip(trajs_and_scores, traj_scores):
+                    ans = traj.get('final_answer', traj.get('predicted_answer', ''))
+                    if ans:
+                        key = ans.strip().lower()
+                        weighted_votes[key] = weighted_votes.get(key, 0.0) + sc
+                        if key not in original_answers:
+                            original_answers[key] = ans
+
+                if weighted_votes:
+                    best_key = max(weighted_votes, key=weighted_votes.get)
+                    wmv_answer = original_answers.get(best_key, best_key)
+                else:
+                    wmv_answer = ""
+
+                wmv_correct = check_answer(wmv_answer, gold_answer)
+                results[f'versaprm_wmv_{scoring}']['total'] += 1
+                if wmv_correct:
+                    results[f'versaprm_wmv_{scoring}']['correct'] += 1
 
     # Build details
     for qid in qid_list:
@@ -537,10 +708,33 @@ def main():
             'num_trajectories': len(trajs),
             'majority': majority_results.get(qid, {}),
         }
-        if critic_results:
-            detail['critic'] = critic_results.get(qid, {})
-        if versaprm_results:
-            detail['versaprm'] = versaprm_results.get(qid, {})
+        # Add per-question critic step scores for analysis
+        if qid in critic_per_question:
+            for scoring in scoring_methods:
+                traj_scores = [aggregate_step_scores(ss, scoring) for _, ss in critic_per_question[qid]]
+                best_idx = max(range(len(traj_scores)), key=lambda i: traj_scores[i])
+                best_traj = critic_per_question[qid][best_idx][0]
+                detail[f'critic_{scoring}'] = {
+                    'answer': best_traj.get('final_answer', best_traj.get('predicted_answer', '')),
+                    'score': traj_scores[best_idx],
+                    'correct': check_answer(
+                        best_traj.get('final_answer', best_traj.get('predicted_answer', '')),
+                        trajs[0].get('gold_answer')
+                    ),
+                }
+        if qid in versaprm_per_question:
+            for scoring in scoring_methods:
+                traj_scores = [aggregate_step_scores(ss, scoring) for _, ss in versaprm_per_question[qid]]
+                best_idx = max(range(len(traj_scores)), key=lambda i: traj_scores[i])
+                best_traj = versaprm_per_question[qid][best_idx][0]
+                detail[f'versaprm_{scoring}'] = {
+                    'answer': best_traj.get('final_answer', best_traj.get('predicted_answer', '')),
+                    'score': traj_scores[best_idx],
+                    'correct': check_answer(
+                        best_traj.get('final_answer', best_traj.get('predicted_answer', '')),
+                        trajs[0].get('gold_answer')
+                    ),
+                }
         results['details'].append(detail)
 
     # Summary
@@ -548,11 +742,22 @@ def main():
     print("RESULTS")
     print(f"{'='*70}")
 
-    for method in ['majority_voting', 'our_critic', 'versaprm']:
-        data = results[method]
-        if data['total'] > 0:
-            acc = 100 * data['correct'] / data['total']
-            print(f"{method:20s}: {data['correct']}/{data['total']} ({acc:.1f}%)")
+    # Print majority first
+    data = results['majority_voting']
+    acc = 100 * data['correct'] / data['total']
+    print(f"{'Majority Voting':30s}: {data['correct']}/{data['total']} ({acc:.1f}%)")
+    print()
+
+    # Print Critic and VersaPRM side by side for each scoring method
+    for scoring in scoring_methods:
+        for method_prefix, label_prefix in [('critic', 'Critic'), ('versaprm', 'VersaPRM')]:
+            for strategy, strategy_label in [('bon', 'BoN'), ('wmv', 'Weighted MV')]:
+                key = f'{method_prefix}_{strategy}_{scoring}'
+                data = results[key]
+                if data['total'] > 0:
+                    acc = 100 * data['correct'] / data['total']
+                    label = f"{label_prefix} ({strategy_label}, {scoring})"
+                    print(f"{label:30s}: {data['correct']}/{data['total']} ({acc:.1f}%)")
 
     # Save results
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
