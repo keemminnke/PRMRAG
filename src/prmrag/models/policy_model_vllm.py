@@ -93,7 +93,7 @@ class PolicyModelVLLM:
             'tensor_parallel_size': tensor_parallel_size,
             'gpu_memory_utilization': gpu_memory_utilization,
             'trust_remote_code': True,
-            'enforce_eager': True,  # Required for vLLM dev versions with GH200
+            'enforce_eager': False,  # Use CUDA graphs for faster inference
             'disable_log_stats': True,  # Disable verbose logging
             'seed': seed,  # Set seed for vLLM sampling
             'download_dir': self.download_dir,  # Cache directory for model downloads

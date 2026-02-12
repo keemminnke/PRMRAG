@@ -33,7 +33,10 @@
       "Bash(for pid in 238139 236243 1159933 247059 50199 1115535 50034 306053)",
       "Bash(do echo \"=== PID $pid ===\" ps -p $pid -o pid,ppid,cmd --no-headers)",
       "Bash(echo \"Process not found\" cat /proc/$pid/cmdline)",
-      "Bash(done)"
+      "Bash(done)",
+      "Bash(nvcc:*)",
+      "Bash(wc:*)",
+      "Bash(pip index:*)"
     ]
   }
 }

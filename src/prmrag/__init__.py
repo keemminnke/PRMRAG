@@ -8,6 +8,6 @@ through consensus-based filtering.
 
 __version__ = "0.1.0"
 
-from . import config, data, labeling, models, utils
+from . import config, data, labeling, models, utils, regeneration
 
-__all__ = ["config", "data", "labeling", "models", "utils"]
+__all__ = ["config", "data", "labeling", "models", "utils", "regeneration"]
