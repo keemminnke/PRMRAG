@@ -68,7 +68,7 @@ def load_critic_model_vllm(critic_path: str, base_model: str, gpu_memory_utiliza
         enable_lora=True,
         max_lora_rank=64,
         gpu_memory_utilization=gpu_memory_utilization,
-        max_model_len=4096,
+        max_model_len=16384,
         trust_remote_code=True,
         download_dir=download_dir,
     )
@@ -102,34 +102,34 @@ def build_critic_prompt_xml(tokenizer, question: str, steps: List[Dict], step_id
 
     input_parts = [f"Question: {question}", ""]
 
-    # Previous steps
+    # Previous steps (NO truncation — match training format)
     if step_idx > 0:
         input_parts.append("Previous Steps:")
         for j, prev in enumerate(steps[:step_idx]):
             parsed = parse_step_content_xml(prev)
             input_parts.append(f"## Step {j+1}")
             if parsed['think']:
-                input_parts.append(f"<think>{parsed['think'][:300]}</think>")
+                input_parts.append(f"<think>{parsed['think']}</think>")
             if parsed['search']:
                 input_parts.append(f"<search>{parsed['search']}</search>")
             elif parsed['answer']:
                 input_parts.append(f"<answer>{parsed['answer']}</answer>")
             if parsed['documents']:
-                input_parts.append(f"<documents>{parsed['documents'][:300]}</documents>")
+                input_parts.append(f"<documents>{parsed['documents']}</documents>")
             input_parts.append("")
 
-    # Current step
+    # Current step (NO truncation — match training format)
     parsed = parse_step_content_xml(steps[step_idx])
     input_parts.append("Current Step to Evaluate:")
     input_parts.append(f"## Step {step_idx + 1}")
     if parsed['think']:
-        input_parts.append(f"<think>{parsed['think'][:500]}</think>")
+        input_parts.append(f"<think>{parsed['think']}</think>")
     if parsed['search']:
         input_parts.append(f"<search>{parsed['search']}</search>")
     elif parsed['answer']:
         input_parts.append(f"<answer>{parsed['answer']}</answer>")
     if parsed['documents']:
-        input_parts.append(f"<documents>{parsed['documents'][:500]}</documents>")
+        input_parts.append(f"<documents>{parsed['documents']}</documents>")
     input_parts.append("")
     input_parts.append("Task: Evaluate the quality of the Current Step. Explain your reasoning in [REASONING] tags, then provide a label (1=good, 0=bad).")
 
@@ -240,7 +240,7 @@ def batch_evaluate_with_critic_vllm(
     print(f"  Generating {len(all_prompts)} critic evaluations with vLLM...")
     print(f"  Soft scores: {use_soft_scores}")
     sampling_params = SamplingParams(
-        max_tokens=256,
+        max_tokens=512,
         temperature=0,
         logprobs=20 if use_soft_scores else None,
         stop=["Label: 1", "Label: 0", "Label:1", "Label:0"],
@@ -578,15 +578,32 @@ def main():
             use_soft_scores=args.soft_scores,
         )
 
-        # Group step scores by question
+        # Group step scores by question + save per-trajectory JSONL
         score_idx = 0
+        jsonl_path = args.output.replace('.json', '_per_trajectory.jsonl')
+        jsonl_f = open(jsonl_path, 'w')
         for qid in qid_list:
             trajs = groups[qid]
             critic_per_question[qid] = []
             for traj in trajs:
-                _, step_scores = critic_step_results[score_idx]
+                step_labels, step_scores = critic_step_results[score_idx]
                 critic_per_question[qid].append((traj, step_scores))
+                # Save per-trajectory JSONL
+                jsonl_rec = {
+                    'trajectory_id': traj.get('trajectory_id', ''),
+                    'question': traj.get('question', ''),
+                    'gold_answer': traj.get('gold_answer', ''),
+                    'predicted_answer': traj.get('final_answer', traj.get('predicted_answer', '')),
+                    'is_correct': traj.get('is_correct', False),
+                    'critic_step_labels': step_labels,
+                    'critic_step_scores': step_scores,
+                    'critic_min': min(step_scores) if step_scores else 0.0,
+                    'steps': [{'step_id': i+1, 'critic_label': l, 'critic_score': s} for i, (l, s) in enumerate(zip(step_labels, step_scores))],
+                }
+                jsonl_f.write(json.dumps(jsonl_rec, ensure_ascii=False) + '\n')
                 score_idx += 1
+        jsonl_f.close()
+        print(f"  ✓ Saved per-trajectory scores: {jsonl_path}")
 
         # Compute all scoring method combinations
         for scoring in scoring_methods:

@@ -1,8 +1,12 @@
 """Critic-guided trajectory regenerator.
 
-Takes a truncated trajectory (good steps) and generates a continuation
-from the truncation point, using the policy model with the same action
-space (search/answer) as SimpleTrajectoryGenerator.
+Uses multi-turn chat format (GenPRM pattern):
+  Turn 1 (user): Question
+  Turn 2 (assistant): Full original trajectory (all steps)
+  Turn 3 (user): Critic feedback pointing out bad step + reasoning
+
+This keeps the feedback in-distribution for the model since it's a natural
+multi-turn conversation pattern (user corrects the assistant).
 """
 
 import re
@@ -10,9 +14,47 @@ from typing import List, Dict, Any, Optional, Tuple
 
 from .truncator import TruncationResult
 
+SYSTEM_PROMPT = """You are an advanced AI agent capable of Adaptive RAG (Retrieval-Augmented Generation).
+Your goal is to answer questions accurately by combining internal reasoning with external retrieval when needed.
+
+# OUTPUT FORMAT
+
+Use these XML tags for your response:
+
+1. <think>Your reasoning</think>
+   - Analyze the question, plan next action, evaluate evidence
+   - ALWAYS start each step with <think>
+
+2. <search>query</search>
+   - Query external knowledge base
+   - Use when you need factual information
+
+3. <answer>final answer</answer>
+   - Provide final answer (entity name or short answer only)
+   - Use when you have sufficient evidence
+
+After <search>, you will receive:
+<documents>Retrieved passages</documents>
+
+# STEP TYPES
+
+- Search step: <think>...</think> followed by <search>...</search>
+- Reason step: <think>...</think> only (no search or answer)
+- Finish step: <think>...</think> followed by <answer>...</answer>
+
+# RULES
+
+1. One action per step - Either <search> or <answer>, not both
+2. Always <think> first - Explain your reasoning before action
+3. Search before guessing - If uncertain, use <search>
+4. Trust observations - Retrieved information takes priority
+5. Concise answer - Output only the entity name in <answer>
+
+Begin."""
+
 
 class CriticGuidedRegenerator:
-    """Regenerate trajectories from truncation point."""
+    """Regenerate trajectories using multi-turn critic feedback (GenPRM pattern)."""
 
     def __init__(
         self,
@@ -22,58 +64,14 @@ class CriticGuidedRegenerator:
         top_k_passages: int = 5,
         temperature: float = 0.7,
     ):
-        """Initialize regenerator.
-
-        Args:
-            policy_model: PolicyModelVLLM instance
-            retriever: Retriever with .retrieve() method
-            max_steps: Maximum total steps (including good steps)
-            top_k_passages: Number of passages to retrieve per search
-            temperature: Sampling temperature for generation
-        """
         self.policy_model = policy_model
         self.retriever = retriever
         self.max_steps = max_steps
         self.top_k_passages = top_k_passages
         self.temperature = temperature
 
-    def build_regeneration_prompt(self, truncation_result: TruncationResult) -> str:
-        """Build the user message for regeneration.
-
-        Structure:
-            Question: {question}
-            {good steps reconstructed as XML}
-            [Critic Feedback] Your Step N was incorrect.
-            Continue solving from Step N.
-
-        Args:
-            truncation_result: Result from TrajectoryTruncator
-
-        Returns:
-            User message string (to be wrapped with format_prompt_for_qwen)
-        """
-        parts = [f"Question: {truncation_result.question}"]
-
-        # Reconstruct good steps as they appeared in the original trajectory
-        for step in truncation_result.good_steps:
-            step_text = self._reconstruct_step_text(step)
-            parts.append(step_text)
-
-        # Add critic feedback (simple: step N was incorrect)
-        bad_step_id = truncation_result.bad_step_id
-        parts.append(
-            f"\n[Critic Feedback] Your Step {bad_step_id} was incorrect.\n\n"
-            f"Continue solving from Step {bad_step_id}."
-        )
-
-        return "\n\n".join(parts)
-
     def _reconstruct_step_text(self, step: Dict[str, Any]) -> str:
-        """Reconstruct a step's text from its parsed fields.
-
-        Steps have fields: think, search, answer, documents.
-        We reconstruct the XML format that the model originally produced.
-        """
+        """Reconstruct a step's text from its parsed fields."""
         parts = []
         if step.get('think'):
             parts.append(f"<think>{step['think']}</think>")
@@ -85,38 +83,97 @@ class CriticGuidedRegenerator:
             parts.append(f"<answer>{step['answer']}</answer>")
         return "\n".join(parts)
 
+    def _build_multi_turn_prompt(self, truncation_result: TruncationResult) -> str:
+        """Build multi-turn prompt with full original trajectory (documents preserved)
+        + feedback with query rewriting guidance.
+
+        Messages:
+          system: Adaptive RAG system prompt
+          user: Question
+          assistant: Full original trajectory (all steps WITH documents)
+          user: Critic feedback + re-read docs instruction + query rewriting guidance
+
+        Returns:
+            Formatted prompt string ready for model.generate()
+        """
+        # Include ALL original steps with documents in assistant turn
+        # So the model can re-read the retrieved information
+        all_step_texts = []
+        original_queries = []
+        for step in truncation_result.all_original_steps:
+            all_step_texts.append(self._reconstruct_step_text(step))
+            if step.get('search'):
+                original_queries.append(step['search'])
+        full_trajectory = "\n\n".join(all_step_texts)
+
+        # Build feedback with:
+        # 1. What went wrong (bad step + critic reasoning)
+        # 2. Re-read instruction for existing documents
+        # 3. Query rewriting guidance (don't repeat same queries)
+        bad_step_text = self._reconstruct_step_text(truncation_result.bad_step)
+        reasoning = truncation_result.critic_reasoning
+
+        feedback_parts = [
+            "Your answer was incorrect. This step had a problem:",
+            f">{bad_step_text}",
+        ]
+        if reasoning:
+            feedback_parts.append(f"\nReason: {reasoning}")
+
+        feedback_parts.append(
+            "\nPlease re-read the retrieved documents above carefully. "
+            "The correct answer might already be in the documents you retrieved."
+        )
+
+        if original_queries:
+            queries_str = ", ".join(f'"{q}"' for q in original_queries)
+            feedback_parts.append(
+                f"\nIf you need to search again, do NOT repeat these queries: {queries_str}. "
+                "Use a DIFFERENT search query with alternative keywords or phrasing."
+            )
+
+        feedback_parts.append(
+            "\nNow try again with <think> and either <search> (different query) or <answer>."
+        )
+        critic_content = "\n".join(feedback_parts)
+
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f"Question: {truncation_result.question}"},
+            {"role": "assistant", "content": full_trajectory},
+            {"role": "user", "content": critic_content},
+        ]
+
+        return self.policy_model.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+
     def regenerate_single(
         self,
         truncation_result: TruncationResult,
     ) -> Dict[str, Any]:
-        """Regenerate a single trajectory from truncation point.
+        """Regenerate a single trajectory using multi-turn critic feedback.
 
-        Uses the same generation loop as SimpleTrajectoryGenerator:
-        generate → parse action → if search: retrieve → next step → until finish or max_steps.
-
-        Args:
-            truncation_result: Truncated trajectory
-
-        Returns:
-            Dict with regenerated trajectory data
+        1. Build multi-turn prompt (user→assistant→user feedback)
+        2. Generate new steps iteratively (search→retrieve→continue)
+        3. Return combined trajectory
         """
-        # Build the initial prompt with good steps + feedback
-        user_message = self.build_regeneration_prompt(truncation_result)
+        # Build base prompt with multi-turn format
+        base_prompt = self._build_multi_turn_prompt(truncation_result)
 
-        # Track accumulated content for continuation prompts
-        accumulated_content = user_message
-
-        # Generate new steps from truncation point
+        # Generate new steps from the feedback point
         new_steps = []
+        accumulated_response = ""
         remaining_steps = self.max_steps - len(truncation_result.good_steps)
 
         for step_offset in range(remaining_steps):
             step_num = truncation_result.bad_step_id + step_offset
 
-            # Format prompt and generate
-            formatted_prompt = self.policy_model.format_prompt_for_qwen(accumulated_content)
+            # Current prompt = base + accumulated new content
+            current_prompt = base_prompt + accumulated_response
+
             response = self.policy_model.generate(
-                prompt=formatted_prompt,
+                prompt=current_prompt,
                 max_tokens=800,
                 temperature=self.temperature,
                 top_p=0.95,
@@ -133,7 +190,7 @@ class CriticGuidedRegenerator:
                     'text': step_content,
                     **self._parse_step_fields(step_content),
                 })
-                accumulated_content += "\n\n" + step_content
+                accumulated_response += step_content
                 break
 
             elif action_type == "search":
@@ -148,19 +205,18 @@ class CriticGuidedRegenerator:
                     'text': full_content,
                     **self._parse_step_fields(full_content),
                 })
-                accumulated_content += "\n\n" + full_content
+                accumulated_response += full_content + "\n\n"
 
             else:
-                # Reason step (no action)
                 new_steps.append({
                     'step_id': step_num,
                     'step_type': 'reason',
                     'text': step_content,
                     **self._parse_step_fields(step_content),
                 })
-                accumulated_content += "\n\n" + step_content
+                accumulated_response += step_content + "\n\n"
 
-        # Extract final answer from new steps
+        # Extract final answer
         final_answer = self._extract_final_answer(new_steps)
         is_correct = self._check_answer(final_answer, truncation_result.gold_answer)
 
@@ -196,44 +252,11 @@ class CriticGuidedRegenerator:
                 'num_new_steps': len(new_steps),
                 'num_total_steps': len(all_steps),
                 'original_predicted_answer': truncation_result.original_predicted_answer,
+                'critic_reasoning': truncation_result.critic_reasoning[:200],
             },
         }
 
-    def regenerate_batch(
-        self,
-        truncation_results: List[TruncationResult],
-        show_progress: bool = True,
-    ) -> List[Dict[str, Any]]:
-        """Regenerate multiple trajectories sequentially.
-
-        Sequential processing is necessary because each trajectory has a different
-        prefix length, making batching impractical.
-
-        Args:
-            truncation_results: List of truncated trajectories
-            show_progress: Whether to print progress
-
-        Returns:
-            List of regenerated trajectory dicts
-        """
-        results = []
-        for i, tr in enumerate(truncation_results):
-            if show_progress:
-                print(f"  Regenerating {i+1}/{len(truncation_results)}: "
-                      f"{tr.question_id} (truncated at step {tr.bad_step_id}, "
-                      f"{len(tr.good_steps)} good steps)")
-            result = self.regenerate_single(tr)
-            results.append(result)
-
-            if show_progress and (i + 1) % 10 == 0:
-                correct = sum(1 for r in results if r['is_correct'])
-                print(f"    Progress: {i+1}/{len(truncation_results)}, "
-                      f"correct so far: {correct}/{len(results)} "
-                      f"({correct/len(results)*100:.1f}%)")
-
-        return results
-
-    # === Helper methods (replicated from SimpleTrajectoryGenerator) ===
+    # === Helper methods ===
 
     def _parse_step_response(self, response: str, step_num: int) -> str:
         """Parse step content from response, removing future steps."""
@@ -319,7 +342,6 @@ class CriticGuidedRegenerator:
         if answer_match:
             return answer_match.group(1).strip()
 
-        # Check parsed answer field
         if steps[-1].get('answer'):
             return steps[-1]['answer']
 
@@ -341,9 +363,15 @@ class CriticGuidedRegenerator:
         return ""
 
     def _check_answer(self, predicted: str, gold: str) -> bool:
-        """Check if predicted answer matches gold (cover EM)."""
+        """Check if predicted answer matches gold (cover EM with quote normalization)."""
         if not predicted or not gold:
             return False
         pred_norm = predicted.strip().lower()
         gold_norm = gold.strip().lower()
-        return pred_norm == gold_norm or gold_norm in pred_norm or pred_norm in gold_norm
+        # Basic cover EM
+        if pred_norm == gold_norm or gold_norm in pred_norm or pred_norm in gold_norm:
+            return True
+        # Strip quotes and retry (handles: Levon "Fred" Agabashian vs Fred Agabashian)
+        pred_clean = pred_norm.replace('"', '').replace("'", '').replace('\u201c', '').replace('\u201d', '')
+        gold_clean = gold_norm.replace('"', '').replace("'", '').replace('\u201c', '').replace('\u201d', '')
+        return pred_clean == gold_clean or gold_clean in pred_clean or pred_clean in gold_clean

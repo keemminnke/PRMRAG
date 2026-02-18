@@ -61,3 +61,5 @@ temp/
 *.key
 *_secret*
 credentials.json
+.claude/settings.local.json
+.claude/settings.local.json

@@ -23,7 +23,8 @@ class ScoredTrajectory:
     predicted_answer: str
     is_correct: bool
     critic_min: float
-    critic_step_scores: List[float]
+    critic_step_scores: List[float]  # soft scores (for ranking/voting)
+    critic_step_labels: List[int]  # binary labels 0/1 (for BAD step detection)
     steps: List[Dict[str, Any]]  # from original trajectories (has think, search, documents)
 
 
@@ -42,6 +43,20 @@ class ClassifiedQuestion:
 
 class QuestionClassifier:
     """Classify questions into Case A (has correct) vs Case B (all wrong)."""
+
+    @staticmethod
+    def _check_answer(predicted: str, gold: str) -> bool:
+        """Cover EM with quote normalization (same as regenerator)."""
+        if not predicted or not gold:
+            return False
+        pred_norm = predicted.strip().lower()
+        gold_norm = gold.strip().lower()
+        if pred_norm == gold_norm or gold_norm in pred_norm or pred_norm in gold_norm:
+            return True
+        # Strip quotes and retry
+        pred_clean = pred_norm.replace('"', '').replace("'", '').replace('\u201c', '').replace('\u201d', '')
+        gold_clean = gold_norm.replace('"', '').replace("'", '').replace('\u201c', '').replace('\u201d', '')
+        return pred_clean == gold_clean or gold_clean in pred_clean or pred_clean in gold_clean
 
     @staticmethod
     def load_and_merge(
@@ -87,6 +102,12 @@ class QuestionClassifier:
             else:
                 question_id = traj_id
 
+            # Binary labels: from JSONL if present, else derive from scores (threshold 0.5)
+            if 'critic_step_labels' in critic:
+                step_labels = critic['critic_step_labels']
+            else:
+                step_labels = [1 if s > 0.5 else 0 for s in critic['critic_step_scores']]
+
             merged.append(ScoredTrajectory(
                 trajectory_id=traj_id,
                 question_id=question_id,
@@ -96,6 +117,7 @@ class QuestionClassifier:
                 is_correct=traj['is_correct'],
                 critic_min=critic['critic_min'],
                 critic_step_scores=critic['critic_step_scores'],
+                critic_step_labels=step_labels,
                 steps=traj['steps'],
             ))
 
@@ -129,9 +151,12 @@ class QuestionClassifier:
         case_b_count = 0
 
         for qid, trajs in sorted(by_question.items()):
+            # Re-check correctness with quote normalization
+            gold_answer = trajs[0].gold_answer
+            for t in trajs:
+                t.is_correct = QuestionClassifier._check_answer(t.predicted_answer, gold_answer)
             correct_trajs = [t for t in trajs if t.is_correct]
             question = trajs[0].question
-            gold_answer = trajs[0].gold_answer
 
             if correct_trajs:
                 # Case A: pick correct trajectory with highest critic_min

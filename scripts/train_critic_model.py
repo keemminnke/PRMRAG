@@ -132,6 +132,13 @@ def main():
         help="LoRA dropout"
     )
 
+    # Data processing
+    parser.add_argument(
+        "--truncate-after-bad",
+        action="store_true",
+        help="Discard steps after first BAD step (PRM-style training)"
+    )
+
     # Debug
     parser.add_argument(
         "--debug-interval",
@@ -205,6 +212,7 @@ def main():
     train_dataset, eval_dataset = trainer.prepare_data(
         train_file=args.train_data,
         eval_file=args.eval_data,
+        truncate_after_bad=args.truncate_after_bad,
     )
 
     print("\n" + "=" * 70)

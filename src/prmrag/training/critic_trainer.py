@@ -423,11 +423,14 @@ class CriticDataFormatter:
             {"role": "assistant", "content": assistant_content}
         ]
 
-    def prepare_training_data(self, data_file: Path) -> List[Dict[str, Any]]:
+    def prepare_training_data(self, data_file: Path, truncate_after_bad: bool = False) -> List[Dict[str, Any]]:
         training_samples = []
         label_counts = {1: 0, 0: 0}  # 1=good, 0=bad
+        truncated_steps = 0
 
         print(f"Reading data from {data_file}...")
+        if truncate_after_bad:
+            print(f"  [truncate_after_bad=True] Discarding steps after first BAD step")
         with open(data_file) as f:
             for line in f:
                 try:
@@ -444,6 +447,25 @@ class CriticDataFormatter:
                             label = 0
                         else:
                             continue  # Skip invalid labels
+
+                        # If truncate_after_bad: include the first BAD step, skip everything after
+                        if truncate_after_bad and label == 0:
+                            # Include this BAD step as training sample
+                            step_with_label = {**step, 'judge_label': label}
+                            messages = self.format_step_for_training(
+                                question=question,
+                                previous_steps=steps[:idx],
+                                current_step=step_with_label,
+                            )
+                            training_samples.append({
+                                'messages': messages,
+                                'question_id': trajectory.get('question_id', trajectory.get('trajectory_id')),
+                                'step_num': step.get('step_id', idx + 1),
+                                'label': label,
+                            })
+                            label_counts[label] += 1
+                            truncated_steps += len(steps) - idx - 1
+                            break  # Stop processing this trajectory
 
                         # Update step with numeric label for formatting
                         step_with_label = {**step, 'judge_label': label}
@@ -465,6 +487,8 @@ class CriticDataFormatter:
                     continue
 
         print(f"  Data Stats: 1(good)={label_counts[1]}, 0(bad)={label_counts[0]}")
+        if truncate_after_bad:
+            print(f"  Truncated steps (discarded after first BAD): {truncated_steps}")
         return training_samples
 
 
@@ -541,16 +565,16 @@ class CriticTrainer:
             print(f"[WARNING] Template detection failed: {e}, using default")
             return "<|im_start|>assistant\n"
 
-    def prepare_data(self, train_file: Path, eval_file: Optional[Path] = None) -> tuple:
+    def prepare_data(self, train_file: Path, eval_file: Optional[Path] = None, truncate_after_bad: bool = False) -> tuple:
         print(f"\nPreparing training data from: {train_file}")
-        train_samples = self.formatter.prepare_training_data(train_file)
+        train_samples = self.formatter.prepare_training_data(train_file, truncate_after_bad=truncate_after_bad)
         print(f"✓ Prepared {len(train_samples)} training samples")
         train_dataset = Dataset.from_list(train_samples)
 
         eval_dataset = None
         if eval_file and eval_file.exists():
             print(f"\nPreparing eval data from: {eval_file}")
-            eval_samples = self.formatter.prepare_training_data(eval_file)
+            eval_samples = self.formatter.prepare_training_data(eval_file, truncate_after_bad=truncate_after_bad)
             print(f"✓ Prepared {len(eval_samples)} eval samples")
             eval_dataset = Dataset.from_list(eval_samples)
 
@@ -761,7 +785,15 @@ class CriticTrainer:
             callbacks=[debug_callback],  # 디버깅 callback 추가
         )
 
-        trainer.train()
+        # Check for resume from checkpoint
+        resume_checkpoint = None
+        checkpoint_dir = Path(self.config.output_dir)
+        checkpoints = sorted(checkpoint_dir.glob("checkpoint-*"), key=lambda x: int(x.name.split("-")[1]))
+        if checkpoints:
+            resume_checkpoint = str(checkpoints[-1])
+            print(f"\n✓ Resuming from checkpoint: {resume_checkpoint}")
+
+        trainer.train(resume_from_checkpoint=resume_checkpoint)
 
         # Save Final Model
         final_path = Path(self.config.output_dir) / "final_model"
