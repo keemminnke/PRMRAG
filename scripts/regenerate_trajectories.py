@@ -22,6 +22,7 @@ import sys
 import os
 import re
 import json
+import pickle
 import argparse
 import gc
 from pathlib import Path
@@ -35,7 +36,17 @@ from prmrag.regeneration.regenerator import CriticGuidedRegenerator
 
 
 def load_kilt_corpus(corpus_file: str, limit: int = None) -> List[Dict[str, Any]]:
-    """Load KILT Wikipedia corpus."""
+    """Load KILT Wikipedia corpus. Supports both raw and pre-processed formats."""
+    corpus_file = Path(corpus_file)
+    cache_path = corpus_file.parent / (corpus_file.stem + "_parsed.pkl")
+
+    if cache_path.exists() and limit is None:
+        print(f"  Loading cached corpus from {cache_path}...")
+        with open(cache_path, 'rb') as f:
+            corpus = pickle.load(f)
+        print(f"  ✓ Loaded {len(corpus):,} documents from cache")
+        return corpus
+
     print(f"  Loading KILT corpus from {corpus_file}...")
 
     corpus = []
@@ -46,6 +57,14 @@ def load_kilt_corpus(corpus_file: str, limit: int = None) -> List[Dict[str, Any]
 
             doc = json.loads(line)
 
+            # Support both raw format (_id/wikipedia_title) and pre-processed format (id/title)
+            if 'id' in doc:
+                doc_id = doc['id']
+                title = doc['title']
+            else:
+                doc_id = doc['_id']
+                title = doc['wikipedia_title']
+
             if isinstance(doc['text'], list):
                 text = ' '.join(doc['text'])
                 if len(text) > 1200:
@@ -54,8 +73,8 @@ def load_kilt_corpus(corpus_file: str, limit: int = None) -> List[Dict[str, Any]
                 text = doc['text'][:1200]
 
             corpus.append({
-                'id': doc['_id'],
-                'title': doc['wikipedia_title'],
+                'id': doc_id,
+                'title': title,
                 'text': text,
             })
 
@@ -63,6 +82,13 @@ def load_kilt_corpus(corpus_file: str, limit: int = None) -> List[Dict[str, Any]
                 print(f"    Loaded {i+1:,} documents...")
 
     print(f"  Loaded {len(corpus):,} documents")
+
+    if limit is None:
+        print(f"  Saving corpus cache to {cache_path}...")
+        with open(cache_path, 'wb') as f:
+            pickle.dump(corpus, f, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"  ✓ Corpus cache saved")
+
     return corpus
 
 
@@ -165,7 +191,7 @@ def generate_critic_reasonings(
         model=args.critic_base_model,
         enable_lora=True,
         max_lora_rank=64,
-        gpu_memory_utilization=0.4,
+        gpu_memory_utilization=0.9,
         max_model_len=8192,
         trust_remote_code=True,
         download_dir=download_dir,
@@ -418,11 +444,13 @@ def main():
 
     from prmrag.retrieval.bge_retriever import BGERetriever
     print("  Initializing BGE-M3 retriever...")
+    faiss_index_cache = str(data_dir / "indexes" / "kilt_wikipedia_bge_m3.faiss")
     retriever = BGERetriever(
         corpus=corpus,
         batch_size=64,
         embedding_cache_path=embedding_cache,
         device="cpu",
+        faiss_index_path=faiss_index_cache,
     )
 
     # Clean up CUDA context before vLLM fork

@@ -61,5 +61,8 @@ temp/
 *.key
 *_secret*
 credentials.json
-.claude/settings.local.json
-.claude/settings.local.json
+.claude/
+.omc/
+node_modules/
+package.json
+package-lock.json

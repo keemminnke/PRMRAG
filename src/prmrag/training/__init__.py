@@ -33,6 +33,17 @@ from .critic_trainer import (
     CriticDataFormatter,
     create_critic_trainer,
 )
+from .kto_trainer import (
+    KTODataPreparer,
+    StepLevelKTOTrainer,
+    StepAnnotation,
+    KTODebugCallback,
+)
+from .dpo_trainer import (
+    DPODataPreparer,
+    StepLevelDPOTrainer,
+    DPODebugCallback,
+)
 
 __all__ = [
     # Data sampling
@@ -57,4 +68,13 @@ __all__ = [
     "ScalingPoint",
     "plot_scaling_curve",
     "plot_difficulty_breakdown",
+    # KTO training
+    "KTODataPreparer",
+    "StepLevelKTOTrainer",
+    "StepAnnotation",
+    "KTODebugCallback",
+    # DPO training
+    "DPODataPreparer",
+    "StepLevelDPOTrainer",
+    "DPODebugCallback",
 ]

@@ -24,6 +24,7 @@ Usage:
 import sys
 import os
 import json
+import pickle
 import argparse
 from pathlib import Path
 from typing import List, Dict, Any
@@ -107,7 +108,18 @@ def get_truncated_text(doc_text_list, max_chars=1200):
 
 
 def load_kilt_corpus(corpus_file: Path, limit: int = None) -> List[Dict[str, Any]]:
-    """Load KILT Wikipedia corpus with smart truncation."""
+    """Load KILT Wikipedia corpus with smart truncation. Caches parsed corpus as pickle."""
+    corpus_file = Path(corpus_file)
+    cache_path = corpus_file.parent / (corpus_file.stem + "_parsed.pkl")
+
+    # Try loading from pickle cache first (much faster than parsing 35GB JSONL)
+    if cache_path.exists() and limit is None:
+        print(f"Loading cached corpus from {cache_path}...")
+        with open(cache_path, 'rb') as f:
+            corpus = pickle.load(f)
+        print(f"✓ Loaded {len(corpus):,} documents from cache")
+        return corpus
+
     print(f"Loading KILT corpus from {corpus_file}...")
 
     corpus = []
@@ -118,14 +130,22 @@ def load_kilt_corpus(corpus_file: Path, limit: int = None) -> List[Dict[str, Any
 
             doc = json.loads(line)
 
+            # Support both raw format (_id/wikipedia_title) and pre-processed format (id/title)
+            if 'id' in doc:
+                doc_id = doc['id']
+                title = doc['title']
+            else:
+                doc_id = doc['_id']
+                title = doc['wikipedia_title']
+
             if isinstance(doc['text'], list):
                 text = get_truncated_text(doc['text'], max_chars=1200)
             else:
                 text = doc['text'][:1200] + (" [TRUNCATED]" if len(doc['text']) > 1200 else "")
 
             corpus.append({
-                'id': doc['_id'],
-                'title': doc['wikipedia_title'],
+                'id': doc_id,
+                'title': title,
                 'text': text,
             })
 
@@ -133,6 +153,14 @@ def load_kilt_corpus(corpus_file: Path, limit: int = None) -> List[Dict[str, Any
                 print(f"  Loaded {i+1:,} documents...")
 
     print(f"✓ Loaded {len(corpus):,} documents")
+
+    # Save pickle cache for future runs (only when loading full corpus)
+    if limit is None:
+        print(f"Saving corpus cache to {cache_path}...")
+        with open(cache_path, 'wb') as f:
+            pickle.dump(corpus, f, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"✓ Corpus cache saved")
+
     return corpus
 
 
@@ -217,6 +245,8 @@ def main():
                         help='Sampling temperature')
     parser.add_argument('--max_steps', type=int, default=10,
                         help='Maximum steps per trajectory')
+    parser.add_argument('--max_tokens_per_step', type=int, default=4096,
+                        help='Maximum tokens to generate per step (default: 4096)')
 
     # Retriever settings
     parser.add_argument('--corpus_limit', type=int, default=None,
@@ -229,6 +259,10 @@ def main():
                         help='Use HotpotQA context as corpus instead of KILT')
     parser.add_argument('--no_rerank', action='store_true',
                         help='Disable reranking (use BM25 only for HotpotQA)')
+
+    # LoRA adapter
+    parser.add_argument('--lora_adapter', type=str, default=None,
+                        help='Path to LoRA adapter (e.g., outputs/kto_policy_v1/final_model)')
 
     # GPU settings
     parser.add_argument('--gpu_memory_utilization', type=float, default=0.88,
@@ -306,13 +340,14 @@ def main():
         # BGE retriever
         embedding_cache = data_dir / "embeddings" / "kilt_wikipedia_bge_m3.npy"
         print(f"  [2.1] Initializing BGE-M3 retriever...")
-        # When no_rerank, use CPU for BGE-M3 to avoid CUDA context conflict with vLLM
-        bge_device = "cpu" if args.no_rerank else None  # None = auto-detect (cuda)
+        bge_device = None  # None = auto-detect (cuda)
+        faiss_index_cache = data_dir / "indexes" / "kilt_wikipedia_bge_m3.faiss"
         bge_retriever = BGERetriever(
             corpus=corpus,
             batch_size=64,
             embedding_cache_path=str(embedding_cache),
             device=bge_device,
+            faiss_index_path=str(faiss_index_cache),
         )
 
         if args.no_rerank:
@@ -347,6 +382,9 @@ def main():
         'gpu_memory_utilization': args.gpu_memory_utilization,
         'max_model_len': args.max_model_len,
     }
+    if args.lora_adapter:
+        policy_config['lora_adapter'] = args.lora_adapter
+        print(f"  LoRA adapter: {args.lora_adapter}")
     policy_model = load_policy_model(policy_config)
     print("✓ Model loaded")
 
@@ -355,6 +393,7 @@ def main():
         'max_steps': args.max_steps,
         'top_k_passages': args.top_k,
         'temperature': args.temperature,
+        'max_tokens_per_step': args.max_tokens_per_step,
     }
     generator = SimpleTrajectoryGenerator(policy_model, retriever, generator_config)
 

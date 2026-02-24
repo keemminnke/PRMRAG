@@ -113,6 +113,7 @@ class SimpleTrajectoryGenerator:
         self.max_steps = config.get('max_steps', 10)
         self.top_k_passages = config.get('top_k_passages', 5)
         self.temperature = config.get('temperature', 0.7)
+        self.max_tokens_per_step = config.get('max_tokens_per_step', 4096)
 
     def generate_trajectory(
         self,
@@ -150,7 +151,7 @@ class SimpleTrajectoryGenerator:
             # Generate step (stop before <documents> to prevent hallucination)
             response = self.policy_model.generate_with_chat_template(
                 user_message=prompt,
-                max_tokens=800,
+                max_tokens=self.max_tokens_per_step,
                 temperature=self.temperature,
                 top_p=0.95,
                 stop_sequences=["<documents>", "\n<documents>"],
@@ -337,6 +338,7 @@ class SimpleTrajectoryGenerator:
         if think_match:
             return ('reason', think_match.group(1).strip())
 
+
         # Fallback: Check for simple finish markers (only if no <think> tag)
         if any(marker in content.lower() for marker in ['final answer:', 'the answer is', 'therefore, the answer']):
             return ('finish', None)
@@ -476,7 +478,7 @@ class SimpleTrajectoryGenerator:
             stop_sequences = ["<documents>", "\n<documents>"]
             responses = self.policy_model.batch_generate(
                 prompts=formatted_prompts,
-                max_tokens=800,
+                max_tokens=self.max_tokens_per_step,
                 temperature=self.temperature,
                 top_p=0.95,
                 stop_sequences=stop_sequences,

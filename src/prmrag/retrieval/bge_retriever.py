@@ -33,6 +33,7 @@ class BGERetriever:
         embedding_cache_path: Optional[str] = None,
         use_gpu: bool = False,  # CPU FAISS (GPU FAISS uses too much memory with large corpus)
         faiss_batch_size: int = 256,  # Batch size for FAISS search
+        faiss_index_path: Optional[str] = None,  # Path to save/load FAISS index
     ):
         """Initialize BGE retriever with FAISS-GPU.
 
@@ -52,6 +53,7 @@ class BGERetriever:
         self.embedding_cache_path = embedding_cache_path
         self.use_gpu = use_gpu and FAISS_AVAILABLE and torch.cuda.is_available()
         self.faiss_batch_size = faiss_batch_size  # Batch size for FAISS search
+        self.faiss_index_path = faiss_index_path
 
         # Auto-detect device
         if device is None:
@@ -64,33 +66,46 @@ class BGERetriever:
 
         self.model = BGEM3FlagModel(
             model_name,
-            use_fp16=(self.device == "cuda")
+            use_fp16=(self.device == "cuda"),
+            devices=self.device,
         )
         print("✓ BGE-M3 model loaded")
 
-        # Load or build embeddings
-        if embedding_cache_path and Path(embedding_cache_path).exists():
-            print(f"Loading cached embeddings from {embedding_cache_path}...")
-            self.doc_embeddings = self._load_embeddings(embedding_cache_path)
-            print(f"✓ Loaded {len(self.doc_embeddings)} cached embeddings")
-        else:
-            print(f"Building dense embeddings for {len(corpus)} documents...")
-            self.doc_embeddings = self._encode_corpus()
-            print("✓ Dense embeddings built!")
-
-            if embedding_cache_path:
-                self._save_embeddings(embedding_cache_path)
-                print(f"✓ Saved embeddings to {embedding_cache_path}")
-
-        # Build FAISS index
-        self._build_faiss_index()
-
-        # Free raw embeddings after FAISS index is built (saves ~24GB RAM)
-        if self.faiss_index is not None:
-            del self.doc_embeddings
+        # Try loading saved FAISS index first (fastest path)
+        if faiss_index_path and Path(faiss_index_path).exists() and FAISS_AVAILABLE:
+            print(f"Loading saved FAISS index from {faiss_index_path}...")
+            self.faiss_index = faiss.read_index(faiss_index_path)
             self.doc_embeddings = None
-            import gc; gc.collect()
-            print("  ✓ Freed raw embeddings (FAISS index holds normalized copy)")
+            print(f"✓ FAISS index loaded ({self.faiss_index.ntotal} vectors)")
+        else:
+            # Load or build embeddings
+            if embedding_cache_path and Path(embedding_cache_path).exists():
+                print(f"Loading cached embeddings from {embedding_cache_path}...")
+                self.doc_embeddings = self._load_embeddings(embedding_cache_path)
+                print(f"✓ Loaded {len(self.doc_embeddings)} cached embeddings")
+            else:
+                print(f"Building dense embeddings for {len(corpus)} documents...")
+                self.doc_embeddings = self._encode_corpus()
+                print("✓ Dense embeddings built!")
+
+                if embedding_cache_path:
+                    self._save_embeddings(embedding_cache_path)
+                    print(f"✓ Saved embeddings to {embedding_cache_path}")
+
+            # Build FAISS index
+            self._build_faiss_index()
+
+            # Save FAISS index to disk for fast reloading next time
+            if faiss_index_path and self.faiss_index is not None:
+                faiss.write_index(self.faiss_index, faiss_index_path)
+                print(f"✓ Saved FAISS index to {faiss_index_path}")
+
+            # Free raw embeddings after FAISS index is built (saves ~24GB RAM)
+            if self.faiss_index is not None:
+                del self.doc_embeddings
+                self.doc_embeddings = None
+                import gc; gc.collect()
+                print("  ✓ Freed raw embeddings (FAISS index holds normalized copy)")
 
     def _build_faiss_index(self):
         """Build FAISS index for fast similarity search."""

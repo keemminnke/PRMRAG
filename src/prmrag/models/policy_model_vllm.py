@@ -48,6 +48,7 @@ class PolicyModelVLLM:
         max_model_len: int = None,  # Max model context length (default: use model's default)
         device: str = "cuda",  # Ignored, for compatibility with PolicyModel
         torch_dtype=None,  # Ignored, vLLM handles this automatically
+        lora_adapter: str = None,  # Path to LoRA adapter
     ):
         """Initialize policy model with vLLM.
 
@@ -62,6 +63,7 @@ class PolicyModelVLLM:
             max_model_len: Max model context length (default: None, use model's default)
             device: Ignored (for compatibility with PolicyModel)
             torch_dtype: Ignored (vLLM handles dtype automatically)
+            lora_adapter: Path to LoRA adapter directory (default: None)
         """
         if not VLLM_AVAILABLE:
             raise ImportError(
@@ -104,7 +106,22 @@ class PolicyModelVLLM:
             vllm_kwargs['max_model_len'] = max_model_len
             print(f"  Setting max_model_len={max_model_len}")
 
+        # Enable LoRA if adapter path is provided
+        self.lora_adapter = lora_adapter
+        if lora_adapter:
+            vllm_kwargs['enable_lora'] = True
+            vllm_kwargs['max_lora_rank'] = 64
+            print(f"  LoRA adapter: {lora_adapter}")
+
         self.llm = LLM(**vllm_kwargs)
+
+        # Load LoRA adapter as a LoRA request
+        if lora_adapter:
+            from vllm.lora.request import LoRARequest
+            self._lora_request = LoRARequest("kto_adapter", 1, lora_adapter)
+            print(f"  ✓ LoRA adapter loaded")
+        else:
+            self._lora_request = None
 
         self.model_name = model_name
         self.device = device
@@ -148,7 +165,10 @@ class PolicyModelVLLM:
         )
 
         # Generate with vLLM (use_tqdm=False to suppress progress bar)
-        outputs = self.llm.generate([prompt], sampling_params, use_tqdm=False)
+        generate_kwargs = dict(use_tqdm=False)
+        if self._lora_request:
+            generate_kwargs['lora_request'] = self._lora_request
+        outputs = self.llm.generate([prompt], sampling_params, **generate_kwargs)
 
         # Extract result - return string only (compatible with PolicyModel)
         output = outputs[0].outputs[0]
@@ -190,7 +210,10 @@ class PolicyModelVLLM:
         )
 
         # Batch generate with vLLM (automatically optimized, use_tqdm=False to suppress progress bar)
-        outputs = self.llm.generate(prompts, sampling_params, use_tqdm=False)
+        generate_kwargs = dict(use_tqdm=False)
+        if self._lora_request:
+            generate_kwargs['lora_request'] = self._lora_request
+        outputs = self.llm.generate(prompts, sampling_params, **generate_kwargs)
 
         # Extract results - return strings only (compatible with PolicyModel)
         results = []
@@ -326,7 +349,7 @@ Begin."""
 
         if not allow_observation:
             # Add stop sequences to prevent model from writing <documents>
-            stop_sequences.extend(["<documents>", "\n<documents>"])
+            stop_sequences.extend(["\n<documents>"])
 
         return self.generate(prompt, max_tokens, temperature, top_p, stop_sequences)
 

@@ -41,7 +41,7 @@ from tqdm import tqdm
 # Method 1: Our Critic Model (vLLM) - XML format + binary labels
 # ============================================================
 
-def load_critic_model_vllm(critic_path: str, base_model: str, gpu_memory_utilization: float = 0.4):
+def load_critic_model_vllm(critic_path: str, base_model: str, gpu_memory_utilization: float = 0.9):
     """Load our trained critic model with vLLM for fast inference."""
     from vllm import LLM
     from vllm.lora.request import LoRARequest
@@ -205,13 +205,13 @@ def aggregate_step_scores(step_scores: List[float], method: str) -> float:
 def batch_evaluate_with_critic_vllm(
     llm, tokenizer, lora_request, trajectories: List[Dict],
     use_soft_scores: bool = True,
-) -> List[Tuple[List[int], List[float]]]:
-    """Batch evaluate multiple trajectories with critic using vLLM.
-
-    Returns:
-        List of (step_labels, step_scores) for each trajectory.
-        step_scores are continuous (0~1) if use_soft_scores=True, else binary (0.0/1.0).
-        Caller should use aggregate_step_scores() to get trajectory-level scores.
+    batch_size: int = 500,
+    output_jsonl_path: str = None,
+) -> List[Tuple[List[int], List[float], List[str]]]:
+    """Batch evaluate multiple trajectories with critic using vLLM in chunks.
+    
+    If output_jsonl_path is provided, it will resume from existing results and save 
+    new results incrementally.
     """
     from vllm import SamplingParams
 
@@ -221,24 +221,37 @@ def batch_evaluate_with_critic_vllm(
         token_id_0 = tokenizer.encode("0", add_special_tokens=False)[-1]
         print(f"  Soft scoring: token_id('1')={token_id_1}, token_id('0')={token_id_0}")
 
-    # Collect all (traj_idx, step_idx, prompt) pairs
-    all_prompts = []
-    prompt_info = []  # (traj_idx, step_idx)
+    # Load existing results for resuming
+    existing_results = {}
+    if output_jsonl_path and Path(output_jsonl_path).exists():
+        print(f"  Resuming from existing results: {output_jsonl_path}")
+        with open(output_jsonl_path, 'r') as f:
+            for line in f:
+                if line.strip():
+                    rec = json.loads(line)
+                    existing_results[rec['trajectory_id']] = rec
 
-    for traj_idx, traj in enumerate(trajectories):
-        question = traj['question']
-        steps = traj.get('steps', [])
-        for step_idx in range(len(steps)):
-            prompt = build_critic_prompt_xml(tokenizer, question, steps, step_idx)
-            all_prompts.append(prompt)
-            prompt_info.append((traj_idx, step_idx))
+    # Final results storage
+    final_results = [None] * len(trajectories)
+    
+    # Collect indices of trajectories that need processing
+    indices_to_process = []
+    for idx, traj in enumerate(trajectories):
+        tid = traj.get('trajectory_id', '')
+        if tid in existing_results:
+            rec = existing_results[tid]
+            final_results[idx] = (rec['critic_step_labels'], rec['critic_step_scores'], [s.get('critic_reasoning', '') for s in rec.get('steps', [])])
+        else:
+            indices_to_process.append(idx)
 
-    if not all_prompts:
-        return [([], []) for _ in trajectories]
+    print(f"  Total trajectories: {len(trajectories)}")
+    print(f"  Already processed: {len(existing_results)}")
+    print(f"  Remaining to process: {len(indices_to_process)}")
+
+    if not indices_to_process:
+        return final_results
 
     # vLLM batch generate
-    print(f"  Generating {len(all_prompts)} critic evaluations with vLLM...")
-    print(f"  Soft scores: {use_soft_scores}")
     sampling_params = SamplingParams(
         max_tokens=512,
         temperature=0,
@@ -247,59 +260,103 @@ def batch_evaluate_with_critic_vllm(
         include_stop_str_in_output=True,
     )
 
-    outputs = llm.generate(
-        all_prompts,
-        sampling_params,
-        lora_request=lora_request,
-    )
+    # Process in chunks
+    pbar = tqdm(total=len(indices_to_process), desc="Critic eval")
+    
+    # Open file for incremental writing
+    jsonl_f = open(output_jsonl_path, 'a' if existing_results else 'w')
 
-    # Parse results
-    results = {i: {'labels': [], 'scores': []} for i in range(len(trajectories))}
-    soft_score_stats = []  # For diagnostics
+    for i in range(0, len(indices_to_process), batch_size):
+        chunk_indices = indices_to_process[i:i + batch_size]
+        chunk_prompts = []
+        chunk_info = [] # (idx, step_idx)
 
-    for (traj_idx, step_idx), output_obj in zip(prompt_info, outputs):
-        response = output_obj.outputs[0]
-        text = response.text
+        for idx in chunk_indices:
+            traj = trajectories[idx]
+            question = traj['question']
+            steps = traj.get('steps', [])
+            for step_idx in range(len(steps)):
+                prompt = build_critic_prompt_xml(tokenizer, question, steps, step_idx)
+                chunk_prompts.append(prompt)
+                chunk_info.append((idx, step_idx))
 
-        # Determine binary label
-        label = -1
-        if "Label: 1" in text or "Label:1" in text or text.strip().endswith("1"):
-            label = 1
-        elif "Label: 0" in text or "Label:0" in text or text.strip().endswith("0"):
-            label = 0
+        if not chunk_prompts:
+            pbar.update(len(chunk_indices))
+            continue
 
-        # Calculate score
-        if use_soft_scores and response.logprobs:
-            score = _extract_soft_score(response.logprobs, token_id_1, token_id_0, label)
-            soft_score_stats.append(score)
-        else:
-            score = 1.0 if label == 1 else (0.0 if label == 0 else 0.5)
+        outputs = llm.generate(
+            chunk_prompts,
+            sampling_params,
+            lora_request=lora_request,
+            use_tqdm=False
+        )
 
-        results[traj_idx]['labels'].append(label)
-        results[traj_idx]['scores'].append(score)
+        # Temporary storage for this chunk's step-level results
+        chunk_results = {idx: {'labels': [], 'scores': [], 'reasonings': []} for idx in chunk_indices}
+        
+        for (idx, step_idx), output_obj in zip(chunk_info, outputs):
+            response = output_obj.outputs[0]
+            text = response.text
 
-    # Print soft score diagnostics
-    if use_soft_scores and soft_score_stats:
-        avg_soft = sum(soft_score_stats) / len(soft_score_stats)
-        std_soft = (sum((s - avg_soft) ** 2 for s in soft_score_stats) / len(soft_score_stats)) ** 0.5
-        print(f"\n  Soft score stats ({len(soft_score_stats)} steps):")
-        print(f"    Mean: {avg_soft:.4f}, Std: {std_soft:.4f}")
-        print(f"    Min: {min(soft_score_stats):.4f}, Max: {max(soft_score_stats):.4f}")
-        # Distribution buckets
-        buckets = {'[0.0-0.2)': 0, '[0.2-0.4)': 0, '[0.4-0.6)': 0, '[0.6-0.8)': 0, '[0.8-1.0]': 0}
-        for s in soft_score_stats:
-            if s < 0.2: buckets['[0.0-0.2)'] += 1
-            elif s < 0.4: buckets['[0.2-0.4)'] += 1
-            elif s < 0.6: buckets['[0.4-0.6)'] += 1
-            elif s < 0.8: buckets['[0.6-0.8)'] += 1
-            else: buckets['[0.8-1.0]'] += 1
-        print(f"    Distribution: {buckets}")
+            label = -1
+            if "Label: 1" in text or "Label:1" in text or text.strip().endswith("1"):
+                label = 1
+            elif "Label: 0" in text or "Label:0" in text or text.strip().endswith("0"):
+                label = 0
 
-    # Return step-level results (no aggregation here)
-    final_results = []
-    for i in range(len(trajectories)):
-        final_results.append((results[i]['labels'], results[i]['scores']))
+            if use_soft_scores and response.logprobs:
+                score = _extract_soft_score(response.logprobs, token_id_1, token_id_0, label)
+            else:
+                score = 1.0 if label == 1 else (0.0 if label == 0 else 0.5)
 
+            clean_reasoning = text
+            if "[REASONING]" in clean_reasoning and "[/REASONING]" in clean_reasoning:
+                clean_reasoning = clean_reasoning.split("[REASONING]")[1].split("[/REASONING]")[0]
+            else:
+                clean_reasoning = clean_reasoning.replace("[REASONING]", "").replace("[/REASONING]", "")
+                if "Label:" in clean_reasoning:
+                    clean_reasoning = clean_reasoning.split("Label:")[0]
+            clean_reasoning = clean_reasoning.strip()
+
+            chunk_results[idx]['labels'].append(label)
+            chunk_results[idx]['scores'].append(score)
+            chunk_results[idx]['reasonings'].append(clean_reasoning)
+
+        # Save and update final_results
+        for idx in chunk_indices:
+            traj = trajectories[idx]
+            labels = chunk_results[idx]['labels']
+            scores = chunk_results[idx]['scores']
+            reasonings = chunk_results[idx]['reasonings']
+            
+            final_results[idx] = (labels, scores, reasonings)
+            
+            # Save incremental JSONL
+            merged_steps = []
+            for j, (l, s, r) in enumerate(zip(labels, scores, reasonings)):
+                if j < len(traj.get('steps', [])):
+                    new_step = traj['steps'][j].copy()
+                    new_step.update({'critic_label': l, 'critic_score': s, 'critic_reasoning': r})
+                    merged_steps.append(new_step)
+            
+            jsonl_rec = {
+                'trajectory_id': traj.get('trajectory_id', ''),
+                'question': traj.get('question', ''),
+                'gold_answer': traj.get('gold_answer', ''),
+                'predicted_answer': traj.get('final_answer', traj.get('predicted_answer', '')),
+                'is_correct': traj.get('is_correct', False),
+                'critic_step_labels': labels,
+                'critic_step_scores': scores,
+                'critic_min': min(scores) if scores else 0.0,
+                'steps': merged_steps,
+            }
+            jsonl_f.write(json.dumps(jsonl_rec, ensure_ascii=False) + '\n')
+            jsonl_f.flush() # Ensure it's saved to disk
+            
+        pbar.update(len(chunk_indices))
+
+    jsonl_f.close()
+    pbar.close()
     return final_results
 
 
@@ -484,7 +541,7 @@ def main():
                         help="Skip critic evaluation")
     parser.add_argument("--skip-versaprm", action="store_true",
                         help="Skip VersaPRM evaluation")
-    parser.add_argument("--gpu-memory", type=float, default=0.4,
+    parser.add_argument("--gpu-memory", type=float, default=0.9,
                         help="GPU memory utilization for vLLM")
 
     # Soft scoring
@@ -573,37 +630,34 @@ def main():
 
     if critic_llm:
         print(f"Evaluating with Critic (vLLM)... {len(all_trajs_flat)} trajectories")
+        # Define output path for incremental saving
+        jsonl_path = args.output.replace('.json', '_per_trajectory.jsonl')
+        
         critic_step_results = batch_evaluate_with_critic_vllm(
             critic_llm, critic_tokenizer, critic_lora_request, all_trajs_flat,
             use_soft_scores=args.soft_scores,
+            output_jsonl_path=jsonl_path
         )
 
-        # Group step scores by question + save per-trajectory JSONL
-        score_idx = 0
-        jsonl_path = args.output.replace('.json', '_per_trajectory.jsonl')
-        jsonl_f = open(jsonl_path, 'w')
+        # Group results by question
+        for idx, (qid, trajs) in enumerate(groups.items()):
+            # Find trajectories for this question in the flattened list
+            # We need to map them correctly based on the original order in all_trajs_flat
+            pass # We'll re-calculate mapping below
+        
+        # Simplified mapping back to groups
+        flat_idx = 0
         for qid in qid_list:
             trajs = groups[qid]
             critic_per_question[qid] = []
             for traj in trajs:
-                step_labels, step_scores = critic_step_results[score_idx]
-                critic_per_question[qid].append((traj, step_scores))
-                # Save per-trajectory JSONL
-                jsonl_rec = {
-                    'trajectory_id': traj.get('trajectory_id', ''),
-                    'question': traj.get('question', ''),
-                    'gold_answer': traj.get('gold_answer', ''),
-                    'predicted_answer': traj.get('final_answer', traj.get('predicted_answer', '')),
-                    'is_correct': traj.get('is_correct', False),
-                    'critic_step_labels': step_labels,
-                    'critic_step_scores': step_scores,
-                    'critic_min': min(step_scores) if step_scores else 0.0,
-                    'steps': [{'step_id': i+1, 'critic_label': l, 'critic_score': s} for i, (l, s) in enumerate(zip(step_labels, step_scores))],
-                }
-                jsonl_f.write(json.dumps(jsonl_rec, ensure_ascii=False) + '\n')
-                score_idx += 1
-        jsonl_f.close()
-        print(f"  ✓ Saved per-trajectory scores: {jsonl_path}")
+                res = critic_step_results[flat_idx]
+                if res:
+                    step_labels, step_scores, step_reasonings = res
+                    critic_per_question[qid].append((traj, step_scores))
+                flat_idx += 1
+        
+        print(f"  ✓ Processed critic results for {len(critic_per_question)} questions")
 
         # Compute all scoring method combinations
         for scoring in scoring_methods:
@@ -784,4 +838,5 @@ def main():
 
 
 if __name__ == "__main__":
+    print(">>> SCRIPT STARTING...")
     main()
