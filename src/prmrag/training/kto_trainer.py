@@ -4,9 +4,7 @@ Implements KTO (Kahneman-Tversky Optimization) with step-level PRM loss.
 Key features:
 1. Step-level loss: Each step in a trajectory gets its own KTO loss
 2. Document masking: <documents>...</documents> tokens excluded from loss
-3. Dynamic lambda_U: BAD steps weighted by exp(-critic_score)
-
-Reference: ReARTeR (KTO Loss + dynamic lambda_U + document masking)
+3. Fixed lambda_U/lambda_D for GOOD/BAD ratio balancing (λD*nD ≈ λU*nU)
 """
 
 import json
@@ -34,56 +32,7 @@ except ImportError:
 
 
 # System prompt from policy_model_vllm.py
-SYSTEM_PROMPT = """You are an advanced AI agent capable of Adaptive RAG (Retrieval-Augmented Generation).
-Your goal is to answer questions accurately by combining internal reasoning with external retrieval when needed.
-
-# OUTPUT FORMAT
-
-Use these XML tags for your response:
-
-1. <think>Your reasoning</think>
-   - Analyze the question, plan next action, evaluate evidence
-   - ALWAYS start each step with <think>
-
-2. <search>query</search>
-   - Query external knowledge base
-   - Use when you need factual information
-
-3. <answer>final answer</answer>
-   - Provide final answer (entity name or short answer only)
-   - Use when you have sufficient evidence
-
-After <search>, you will receive:
-<documents>Retrieved passages</documents>
-
-# STEP TYPES
-
-- Search step: <think>...</think> followed by <search>...</search>
-- Reason step: <think>...</think> only (no search)
-- Finish step: <think>...</think> followed by <answer>...</answer>
-
-# EXAMPLE
-
-Question: Who directed the movie that won Best Picture at the 2020 Oscars?
-
-<think>I need to find which movie won Best Picture at the 2020 Oscars, then identify its director.</think>
-<search>Best Picture winner 2020 Oscars</search>
-<documents>
-[1] 92nd Academy Awards: "Parasite" won Best Picture at the 92nd Academy Awards (2020)...
-[2] Parasite (2019 film): Directed by Bong Joon-ho, the film also won Best Director...
-</documents>
-<think>The observation states "Parasite" won and was directed by Bong Joon-ho. I have sufficient evidence.</think>
-<answer>Bong Joon-ho</answer>
-
-# RULES
-
-1. One action per step - Either <search> or <answer>, not both
-2. Always <think> first - Explain your reasoning before action
-3. Search before guessing - If uncertain, use <search>
-4. Trust observations - Retrieved information takes priority
-5. Concise answer - Output only the entity name in <answer>
-
-Begin."""
+SYSTEM_PROMPT = """You are a helpful assistant that answers questions through multi-step retrieval. To answer a question, you must first reason through available information using <think> and </think>. If you need external knowledge, issue a search using <search> query </search> — the system will return relevant passages enclosed in <documents> and </documents>. You may search multiple times as needed. Once you have sufficient evidence, provide a concise final answer using <answer> and </answer>."""
 
 
 @dataclass
@@ -93,7 +42,7 @@ class StepAnnotation:
     step_end_token: int     # completion 내 step 끝 token idx
     doc_mask: List[bool]    # True = mask out (documents region)
     label: bool             # True=GOOD, False=BAD
-    critic_score: float     # soft score for dynamic lambda_U
+    critic_score: float     # critic model score (used for label thresholding)
 
 
 class KTODataPreparer:
@@ -160,6 +109,7 @@ class KTODataPreparer:
         self,
         input_paths: List[str],
         truncate_after_bad: bool = False,
+        filter_no_gold_in_docs: bool = False,
         limit: Optional[int] = None,
     ) -> Dataset:
         """Convert combined-format JSONL files into KTO training dataset.
@@ -180,6 +130,7 @@ class KTODataPreparer:
             Dataset with prompt, completion, step_annotations (serialized)
         """
         traj_dicts = []
+        filtered_count = 0
 
         for path in input_paths:
             count = 0
@@ -188,6 +139,27 @@ class KTODataPreparer:
                     if not line.strip():
                         continue
                     record = json.loads(line)
+
+                    # Filter: skip trajectories where gold answer not in any document
+                    if filter_no_gold_in_docs:
+                        gold = record.get('gold_answer', '')
+                        if gold:
+                            gold_norm = re.sub(r'[^a-z0-9\s]', ' ',
+                                               gold.lower().strip())
+                            gold_norm = re.sub(r'\s+', ' ', gold_norm).strip()
+                            has_gold = False
+                            for step in record.get('steps', []):
+                                docs = step.get('documents', '')
+                                if docs:
+                                    docs_norm = re.sub(r'[^a-z0-9\s]', ' ',
+                                                       docs.lower().strip())
+                                    docs_norm = re.sub(r'\s+', ' ', docs_norm).strip()
+                                    if gold_norm in docs_norm:
+                                        has_gold = True
+                                        break
+                            if not has_gold:
+                                filtered_count += 1
+                                continue
 
                     steps = record.get('steps', [])
                     # Get trajectory-level labels/scores (preferred)
@@ -211,6 +183,8 @@ class KTODataPreparer:
                     count += 1
             print(f"  Loaded {count} trajectories from {path}")
 
+        if filter_no_gold_in_docs:
+            print(f"  Filtered out {filtered_count} trajectories (gold not in docs)")
         print(f"  Total: {len(traj_dicts)} trajectories from {len(input_paths)} files")
 
         if limit:
@@ -612,9 +586,8 @@ class StepLevelKTOTrainer(Trainer):
             for param in self.ref_model.parameters():
                 param.requires_grad = False
 
-        # Running KL estimate
-        self._kl_sum = 0.0
-        self._kl_count = 0
+        # Last batch KL for logging
+        self._last_batch_kl = 0.0
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """Compute step-level KTO loss.
@@ -622,13 +595,11 @@ class StepLevelKTOTrainer(Trainer):
         Steps:
         1. Forward pass through model and ref_model
         2. Compute token-level log probs
-        3. Aggregate to step level with document masking
-        4. Apply KTO loss per step (GOOD=chosen, BAD=rejected)
-        5. Dynamic lambda_U for BAD steps
+        3. Pre-compute batch-level KL (reference point)
+        4. Apply KTO loss per step with document masking
         """
         input_ids = inputs["input_ids"]
         attention_mask = inputs["attention_mask"]
-        labels = inputs["labels"]
         step_annotations_json = inputs["step_annotations_json"]
         prompt_lengths = inputs["prompt_length"]
 
@@ -644,81 +615,91 @@ class StepLevelKTOTrainer(Trainer):
             ref_outputs = self.ref_model(input_ids=input_ids, attention_mask=attention_mask)
             ref_token_logps = _get_per_token_logps(ref_outputs.logits, input_ids)
 
-        total_loss = torch.tensor(0.0, device=device, requires_grad=True)
+        # --- Phase 1: Compute batch-level KL (reference point z0) ---
+        batch_kl_sum = 0.0
+        batch_kl_steps = 0
+
+        with torch.no_grad():
+            for b in range(batch_size):
+                prompt_len = prompt_lengths[b].item()
+                annotations = KTODataPreparer.deserialize_annotations(
+                    step_annotations_json[b]
+                )
+                logps_offset = prompt_len - 1
+
+                for ann in annotations:
+                    start = max(logps_offset + ann.step_start_token, 0)
+                    end = min(logps_offset + ann.step_end_token, token_logps.shape[1])
+                    if start >= end:
+                        continue
+
+                    doc_mask_tensor = torch.tensor(
+                        ann.doc_mask[:end - start], dtype=torch.bool, device=device
+                    )
+                    keep_mask = ~doc_mask_tensor
+                    if keep_mask.sum() == 0:
+                        continue
+
+                    kl = (token_logps[b, start:end][keep_mask] -
+                          ref_token_logps[b, start:end][keep_mask]).sum().item()
+                    batch_kl_sum += kl
+                    batch_kl_steps += 1
+
+        batch_kl = (batch_kl_sum / batch_kl_steps) if batch_kl_steps > 0 else 0.0
+        self._last_batch_kl = batch_kl
+
+        # --- Phase 2: Compute KTO loss per step ---
+        total_loss = 0.0  # plain float; becomes grad tensor on first addition
         total_steps = 0
         good_loss_sum = 0.0
         bad_loss_sum = 0.0
         good_count = 0
         bad_count = 0
-        kl_sum = 0.0
 
         for b in range(batch_size):
             prompt_len = prompt_lengths[b].item()
             annotations = KTODataPreparer.deserialize_annotations(
                 step_annotations_json[b]
             )
-
-            # Token logps are shifted by 1 (logps[t] = log P(token[t+1]|...))
-            # So for completion starting at prompt_len, logps start at prompt_len - 1
-            # Offset: completion token at position p has logps at index p-1
             logps_offset = prompt_len - 1
 
             for ann in annotations:
-                start = logps_offset + ann.step_start_token
-                end = logps_offset + ann.step_end_token
-
-                # Clamp to valid range
-                start = max(start, 0)
-                end = min(end, token_logps.shape[1])
-
+                start = max(logps_offset + ann.step_start_token, 0)
+                end = min(logps_offset + ann.step_end_token, token_logps.shape[1])
                 if start >= end:
                     continue
 
-                # Get step token logps
-                step_logps = token_logps[b, start:end]
-                step_ref_logps = ref_token_logps[b, start:end]
-
-                # Apply document mask
                 doc_mask_tensor = torch.tensor(
                     ann.doc_mask[:end - start], dtype=torch.bool, device=device
                 )
-                # Keep non-masked tokens
                 keep_mask = ~doc_mask_tensor
-
                 if keep_mask.sum() == 0:
-                    continue  # All tokens are documents, skip
+                    continue
 
-                step_logps_masked = step_logps[keep_mask].sum()
-                step_ref_logps_masked = step_ref_logps[keep_mask].sum()
-
+                step_logps_masked = token_logps[b, start:end][keep_mask].sum()
+                step_ref_logps_masked = ref_token_logps[b, start:end][keep_mask].sum()
                 logratio = step_logps_masked - step_ref_logps_masked
-
-                # Update running KL estimate
-                with torch.no_grad():
-                    kl_sample = (step_logps_masked - step_ref_logps_masked).item()
-                    kl_sum += kl_sample
 
                 total_steps += 1
 
                 if ann.label:
                     # GOOD step: chosen loss
-                    step_loss = 1.0 - torch.sigmoid(self.beta * (logratio - self._get_kl()))
+                    step_loss = 1.0 - torch.sigmoid(self.beta * (logratio - batch_kl))
                     total_loss = total_loss + self.desirable_weight * step_loss
                     good_loss_sum += step_loss.item()
                     good_count += 1
                 else:
-                    # BAD step: rejected loss with fixed lambda_U (lambda0)
-                    lambda_u = self.lambda0
-                    step_loss = 1.0 - torch.sigmoid(self.beta * (self._get_kl() - logratio))
-                    total_loss = total_loss + lambda_u * step_loss
+                    # BAD step: rejected loss
+                    step_loss = 1.0 - torch.sigmoid(self.beta * (batch_kl - logratio))
+                    total_loss = total_loss + self.lambda0 * step_loss
                     bad_loss_sum += step_loss.item()
                     bad_count += 1
 
-        # Update running KL
         if total_steps > 0:
-            self._kl_sum += kl_sum
-            self._kl_count += total_steps
             total_loss = total_loss / total_steps
+        else:
+            # No valid steps in this batch — return dummy zero loss
+            total_loss = (outputs.logits * 0).sum()
 
         # Log custom metrics
         if self.state.global_step % self.args.logging_steps == 0:
@@ -728,12 +709,6 @@ class StepLevelKTOTrainer(Trainer):
             return total_loss, outputs
         return total_loss
 
-    def _get_kl(self) -> float:
-        """Get running average KL divergence estimate."""
-        if self._kl_count == 0:
-            return 0.0
-        return self._kl_sum / self._kl_count
-
     def _log_custom_metrics(self, good_loss, bad_loss, good_count, bad_count):
         """Log KTO-specific metrics."""
         metrics = {}
@@ -741,7 +716,7 @@ class StepLevelKTOTrainer(Trainer):
             metrics["kto/good_loss"] = good_loss / good_count
         if bad_count > 0:
             metrics["kto/bad_loss"] = bad_loss / bad_count
-        metrics["kto/kl"] = self._get_kl()
+        metrics["kto/kl"] = self._last_batch_kl
         metrics["kto/good_count"] = good_count
         metrics["kto/bad_count"] = bad_count
         metrics["kto/lambda_u_base"] = self.lambda0
@@ -761,39 +736,54 @@ class StepLevelKTOTrainer(Trainer):
         )
 
     def _collate_fn(self, examples: List[Dict]) -> Dict[str, Any]:
-        """Custom collator that tokenizes prompt+completion and tracks positions."""
+        """Custom collator: combine token IDs directly to preserve exact boundaries.
+
+        Tokenizes prompt and completion separately, then concatenates IDs
+        to avoid tokenizer merging across the boundary (safe for any tokenizer).
+        """
         prompts = [ex["prompt"] for ex in examples]
         completions = [ex["completion"] for ex in examples]
         step_annotations_json = [ex["step_annotations_json"] for ex in examples]
 
-        # Tokenize prompts to get their lengths
         prompt_ids_list = [
             self._tokenizer.encode(p, add_special_tokens=False) for p in prompts
         ]
+        completion_ids_list = [
+            self._tokenizer.encode(c, add_special_tokens=False) for c in completions
+        ]
         prompt_lengths = [len(ids) for ids in prompt_ids_list]
 
-        # Tokenize full sequences (prompt + completion)
-        full_texts = [p + c for p, c in zip(prompts, completions)]
-        tokenized = self._tokenizer(
-            full_texts,
-            padding=True,
-            truncation=True,
-            max_length=self.max_length,
-            return_tensors="pt",
-        )
+        # Concatenate IDs directly (no re-tokenization)
+        input_ids_list = [p + c for p, c in zip(prompt_ids_list, completion_ids_list)]
 
-        # Labels: mask prompt tokens with -100
-        labels = tokenized["input_ids"].clone()
-        for i, plen in enumerate(prompt_lengths):
-            labels[i, :plen] = -100
-        # Mask padding
-        if self._tokenizer.pad_token_id is not None:
-            labels[labels == self._tokenizer.pad_token_id] = -100
+        # Manual padding and truncation
+        max_len = min(max(len(ids) for ids in input_ids_list), self.max_length)
+        pad_id = self._tokenizer.pad_token_id if self._tokenizer.pad_token_id is not None else 0
+
+        batch_input_ids = []
+        batch_attention_mask = []
+        batch_labels = []
+
+        for p_len, ids in zip(prompt_lengths, input_ids_list):
+            ids = ids[:max_len]
+            pad_len = max_len - len(ids)
+
+            padded_ids = ids + [pad_id] * pad_len
+            attn_mask = [1] * len(ids) + [0] * pad_len
+
+            labels = list(padded_ids)
+            labels[:p_len] = [-100] * min(p_len, max_len)
+            if pad_len > 0:
+                labels[-pad_len:] = [-100] * pad_len
+
+            batch_input_ids.append(padded_ids)
+            batch_attention_mask.append(attn_mask)
+            batch_labels.append(labels)
 
         return {
-            "input_ids": tokenized["input_ids"],
-            "attention_mask": tokenized["attention_mask"],
-            "labels": labels,
+            "input_ids": torch.tensor(batch_input_ids, dtype=torch.long),
+            "attention_mask": torch.tensor(batch_attention_mask, dtype=torch.long),
+            "labels": torch.tensor(batch_labels, dtype=torch.long),
             "step_annotations_json": step_annotations_json,
             "prompt_length": torch.tensor(prompt_lengths, dtype=torch.long),
         }

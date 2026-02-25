@@ -123,6 +123,10 @@ def parse_args():
         "--best-of-n", action="store_true",
         help="Use only best trajectory per question (highest critic_min)",
     )
+    parser.add_argument(
+        "--filter-no-gold", action="store_true",
+        help="Remove trajectories where gold answer not found in any retrieved document",
+    )
 
     # Wandb
     parser.add_argument("--wandb-project", type=str, default="prmrag-kto", help="Wandb project")
@@ -184,6 +188,7 @@ def main():
     print(f"Learning rate:   {args.learning_rate}")
     print(f"LoRA:            r={args.lora_r}, alpha={args.lora_alpha}")
     print(f"Truncate BAD:    {args.truncate_after_bad}")
+    print(f"Filter no-gold:  {args.filter_no_gold}")
     print(f"Best-of-N:       {args.best_of_n}")
     print(f"Wandb:           {'Disabled' if args.no_wandb else args.wandb_project}")
     if args.limit:
@@ -211,6 +216,7 @@ def main():
         dataset = preparer.prepare_dataset_combined(
             input_paths=[str(p) for p in args.input],
             truncate_after_bad=args.truncate_after_bad,
+            filter_no_gold_in_docs=args.filter_no_gold,
             limit=args.limit,
         )
     else:

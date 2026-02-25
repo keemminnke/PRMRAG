@@ -142,15 +142,19 @@ class SimpleTrajectoryGenerator:
         previous_contents = []  # Track step contents for continuation prompt
 
         for step_num in range(1, self.max_steps + 1):
-            # Build prompt
+            # Build prompt — previous steps go into the assistant turn (matches training format)
             if step_num == 1:
-                prompt = self._build_initial_prompt(question)
+                prompt = self.policy_model.format_prompt_for_qwen(
+                    self._build_initial_prompt(question)
+                )
             else:
-                prompt = self._build_continuation_prompt(question, previous_contents)
+                prompt = self.policy_model.format_continuation_prompt_for_qwen(
+                    question, previous_contents
+                )
 
             # Generate step (stop before <documents> to prevent hallucination)
-            response = self.policy_model.generate_with_chat_template(
-                user_message=prompt,
+            response = self.policy_model.generate(
+                prompt=prompt,
                 max_tokens=self.max_tokens_per_step,
                 temperature=self.temperature,
                 top_p=0.95,
@@ -457,24 +461,23 @@ class SimpleTrajectoryGenerator:
             if show_progress:
                 print(f"  Step {step_num}: {len(active_indices)} active trajectories")
 
-            # Build prompts for all active trajectories
-            user_messages = []
+            # Build prompts — previous steps go into the assistant turn (matches training format)
+            formatted_prompts = []
             for idx in active_indices:
                 state = states[idx]
                 if step_num == 1:
-                    user_msg = self._build_initial_prompt(state['question'])
-                else:
-                    user_msg = self._build_continuation_prompt(
-                        state['question'],
-                        state['previous_contents']
+                    formatted_prompts.append(
+                        self.policy_model.format_prompt_for_qwen(
+                            self._build_initial_prompt(state['question'])
+                        )
                     )
-                user_messages.append(user_msg)
-
-            # Format with chat template and batch generate with vLLM
-            # Stop before <documents> to prevent model from hallucinating observations
-            formatted_prompts = [
-                self.policy_model.format_prompt_for_qwen(msg) for msg in user_messages
-            ]
+                else:
+                    formatted_prompts.append(
+                        self.policy_model.format_continuation_prompt_for_qwen(
+                            state['question'],
+                            state['previous_contents']
+                        )
+                    )
             stop_sequences = ["<documents>", "\n<documents>"]
             responses = self.policy_model.batch_generate(
                 prompts=formatted_prompts,

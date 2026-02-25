@@ -238,6 +238,42 @@ class PolicyModelVLLM:
         # Use the same system prompt as main generation for consistent behavior
         return self.format_prompt_for_qwen(user_message)
 
+    def format_continuation_prompt_for_qwen(self, question: str, previous_contents: List[str]) -> str:
+        """Format continuation prompt with previous steps in the assistant turn.
+
+        Matches training format where all steps (including <documents>) are
+        in the assistant turn, not the user turn. This prevents the model from
+        generating <documents> at the start of the next step.
+
+        Prompt structure:
+            [system] ...
+            [user]   Question: X
+            [assistant] <think>...</think><search>...</search><documents>...</documents>
+                        <- model continues from here ->
+        """
+        system_prompt = """You are a helpful assistant that answers questions through multi-step retrieval. To answer a question, you must first reason through available information using <think> and </think>. If you need external knowledge, issue a search using <search> query </search> — the system will return relevant passages enclosed in <documents> and </documents>. You may search multiple times as needed. Once you have sufficient evidence, provide a concise final answer using <answer> and </answer>."""
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Question: {question}"},
+        ]
+
+        if hasattr(self.tokenizer, 'apply_chat_template'):
+            base = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        else:
+            base = (
+                f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
+                f"<|im_start|>user\nQuestion: {question}<|im_end|>\n"
+                f"<|im_start|>assistant\n"
+            )
+
+        previous_text = "\n".join(previous_contents)
+        return base + previous_text + "\n"
+
     def format_prompt_for_qwen(self, user_message: str) -> str:
         """Format prompt for Qwen2.5 with Adaptive RAG strategy using XML tags.
 
@@ -247,56 +283,7 @@ class PolicyModelVLLM:
         3. Prevents hallucination by requiring Search for uncertain facts
         """
 
-        system_prompt = """You are an advanced AI agent capable of Adaptive RAG (Retrieval-Augmented Generation).
-Your goal is to answer questions accurately by combining internal reasoning with external retrieval when needed.
-
-# OUTPUT FORMAT 
-
-Use these XML tags for your response:
-
-1. <think>Your reasoning</think>
-   - Analyze the question, plan next action, evaluate evidence
-   - ALWAYS start each step with <think>
-
-2. <search>query</search>
-   - Query external knowledge base
-   - Use when you need factual information
-
-3. <answer>final answer</answer>
-   - Provide final answer (entity name or short answer only)
-   - Use when you have sufficient evidence
-
-After <search>, you will receive:
-<documents>Retrieved passages</documents>
-
-# STEP TYPES
-
-- Search step: <think>...</think> followed by <search>...</search>
-- Reason step: <think>...</think> only (no search or answer)
-- Finish step: <think>...</think> followed by <answer>...</answer>
-
-# EXAMPLE
-
-Question: Who directed the movie that won Best Picture at the 2020 Oscars?
-
-<think>I need to find which movie won Best Picture at the 2020 Oscars, then identify its director.</think>
-<search>Best Picture winner 2020 Oscars</search>
-<documents>
-[1] 92nd Academy Awards: "Parasite" won Best Picture at the 92nd Academy Awards (2020)...
-[2] Parasite (2019 film): Directed by Bong Joon-ho, the film also won Best Director...
-</documents>
-<think>The observation states "Parasite" won and was directed by Bong Joon-ho. I have sufficient evidence.</think>
-<answer>Bong Joon-ho</answer>
-
-# RULES
-
-1. One action per step - Either <search> or <answer>, not both
-2. Always <think> first - Explain your reasoning before action
-3. Search before guessing - If uncertain, use <search>
-4. Trust observations - Retrieved information takes priority
-5. Concise answer - Output only the entity name in <answer>
-
-Begin."""
+        system_prompt = """You are a helpful assistant that answers questions through multi-step retrieval. To answer a question, you must first reason through available information using <think> and </think>. If you need external knowledge, issue a search using <search> query </search> — the system will return relevant passages enclosed in <documents> and </documents>. You may search multiple times as needed. Once you have sufficient evidence, provide a concise final answer using <answer> and </answer>."""
 
         if hasattr(self.tokenizer, 'apply_chat_template'):
             messages = [
