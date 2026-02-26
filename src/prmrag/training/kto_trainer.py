@@ -531,6 +531,81 @@ class KTODataPreparer:
         ]
 
 
+class EarlyCollapseCallback(TrainerCallback):
+    """Collapse detection callback — stops training early if KTO diverges.
+
+    Collapse criteria (checked after warmup_steps):
+    - bad_loss < bad_loss_threshold  : BAD steps get no gradient (sigmoid saturated)
+    - kl < kl_threshold              : model worse than ref across all steps
+    """
+
+    def __init__(
+        self,
+        bad_loss_threshold: float = 0.05,
+        kl_threshold: float = -5.0,
+        warmup_steps: int = 30,
+    ):
+        self.bad_loss_threshold = bad_loss_threshold
+        self.kl_threshold = kl_threshold
+        self.warmup_steps = warmup_steps
+
+        self.collapsed = False
+        self.collapse_step: Optional[int] = None
+        self.collapse_reason: Optional[str] = None
+        self.metric_history: List[Dict] = []
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if not logs:
+            return
+
+        bad_loss = logs.get("kto/bad_loss")
+        kl = logs.get("kto/kl")
+        good_loss = logs.get("kto/good_loss")
+
+        if bad_loss is not None and kl is not None:
+            self.metric_history.append({
+                "step": state.global_step,
+                "bad_loss": bad_loss,
+                "kl": kl,
+                "good_loss": good_loss,
+            })
+
+        if state.global_step < self.warmup_steps:
+            return
+
+        if bad_loss is not None and bad_loss < self.bad_loss_threshold:
+            self.collapsed = True
+            self.collapse_step = state.global_step
+            self.collapse_reason = f"bad_loss={bad_loss:.4f} < {self.bad_loss_threshold}"
+            print(f"\n{'!'*60}")
+            print(f"[COLLAPSE @ step {state.global_step}] {self.collapse_reason}")
+            print(f"{'!'*60}")
+            control.should_training_stop = True
+
+        elif kl is not None and kl < self.kl_threshold:
+            self.collapsed = True
+            self.collapse_step = state.global_step
+            self.collapse_reason = f"KL={kl:.4f} < {self.kl_threshold}"
+            print(f"\n{'!'*60}")
+            print(f"[COLLAPSE @ step {state.global_step}] {self.collapse_reason}")
+            print(f"{'!'*60}")
+            control.should_training_stop = True
+
+    def summary(self) -> Dict:
+        """Return summary dict for sweep result file."""
+        last = self.metric_history[-1] if self.metric_history else {}
+        return {
+            "collapsed": self.collapsed,
+            "collapse_step": self.collapse_step,
+            "collapse_reason": self.collapse_reason,
+            "final_step": last.get("step"),
+            "final_bad_loss": last.get("bad_loss"),
+            "final_good_loss": last.get("good_loss"),
+            "final_kl": last.get("kl"),
+            "metric_history": self.metric_history,
+        }
+
+
 class KTODebugCallback(TrainerCallback):
     """Callback for monitoring KTO training metrics."""
 
@@ -553,7 +628,7 @@ class KTODebugCallback(TrainerCallback):
             if bad_loss is not None:
                 self.bad_loss_history.append(bad_loss)
 
-            if torch.cuda.is_available():
+            if torch.cuda.is_available() and args.local_rank in (-1, 0):
                 allocated = torch.cuda.memory_allocated() / 1024**3
                 reserved = torch.cuda.memory_reserved() / 1024**3
 
@@ -566,6 +641,9 @@ class KTODebugCallback(TrainerCallback):
                 kl = logs.get("kto/kl")
                 if kl is not None:
                     print(f"  KL: {kl:.4f}")
+                z0 = logs.get("kto/z0")
+                if z0 is not None:
+                    print(f"  z0: {z0:.4f}")
                 print(f"  GPU: {allocated:.2f}GB / {reserved:.2f}GB")
                 print(f"{'='*60}")
 
@@ -635,8 +713,11 @@ class StepLevelKTOTrainer(Trainer):
             for param in self.ref_model.parameters():
                 param.requires_grad = False
 
-        # Last batch KL for logging
-        self._last_batch_kl = 0.0
+        # Running KL estimate (EMA across batches) for logging
+        self._running_kl = 0.0
+        self._running_kl_alpha = 0.1  # EMA decay
+        self._current_z0 = 0.0        # z0 used in last compute_loss call (for logging)
+        self._last_logged_step = -1   # Prevent duplicate logs per optimizer step
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """Compute step-level KTO loss.
@@ -664,9 +745,12 @@ class StepLevelKTOTrainer(Trainer):
             ref_outputs = self.ref_model(input_ids=input_ids, attention_mask=attention_mask)
             ref_token_logps = _get_per_token_logps(ref_outputs.logits, input_ids)
 
-        # --- Phase 1: Compute batch-level KL (reference point z0) ---
-        batch_kl_sum = 0.0
-        batch_kl_steps = 0
+        # --- Phase 1: Compute batch-level z0 (KTO 논문 수식) ---
+        # 논문: z0 = max(0, (1/m) * Σ log(π_θ(yj|xi) / π_ref(yj|xi)))
+        # 논문은 mismatched pair (xi, yj)를 쓰지만 추가 forward pass가 필요하므로
+        # matched pair로 근사. max(0,...) 클램핑은 논문과 동일하게 적용.
+        # z0는 Python float — backprop 없음.
+        all_step_logratios = []
 
         with torch.no_grad():
             for b in range(batch_size):
@@ -686,16 +770,26 @@ class StepLevelKTOTrainer(Trainer):
                         ann.doc_mask[:end - start], dtype=torch.bool, device=device
                     )
                     keep_mask = ~doc_mask_tensor
-                    if keep_mask.sum() == 0:
+                    n_tokens = keep_mask.sum().item()
+                    if n_tokens == 0:
                         continue
 
+                    # Per-token mean logratio (scale-invariant)
                     kl = (token_logps[b, start:end][keep_mask] -
-                          ref_token_logps[b, start:end][keep_mask]).sum().item()
-                    batch_kl_sum += kl
-                    batch_kl_steps += 1
+                          ref_token_logps[b, start:end][keep_mask]).sum().item() / n_tokens
+                    all_step_logratios.append(kl)
 
-        batch_kl = (batch_kl_sum / batch_kl_steps) if batch_kl_steps > 0 else 0.0
-        self._last_batch_kl = batch_kl
+        if all_step_logratios:
+            batch_kl = sum(all_step_logratios) / len(all_step_logratios)
+            # EMA: 로깅용
+            self._running_kl = (1 - self._running_kl_alpha) * self._running_kl + \
+                                self._running_kl_alpha * batch_kl
+            # z0 = max(0, batch KL) — 논문과 동일한 clamped estimate
+            z0 = max(0.0, batch_kl)
+        else:
+            z0 = 0.0
+
+        self._current_z0 = z0
 
         # --- Phase 2: Compute KTO loss per step ---
         total_loss = 0.0  # plain float; becomes grad tensor on first addition
@@ -725,21 +819,25 @@ class StepLevelKTOTrainer(Trainer):
                 if keep_mask.sum() == 0:
                     continue
 
-                step_logps_masked = token_logps[b, start:end][keep_mask].sum()
-                step_ref_logps_masked = ref_token_logps[b, start:end][keep_mask].sum()
+                n_tokens = keep_mask.sum()
+                # Per-token mean logratio (matches z0 scale)
+                step_logps_masked = token_logps[b, start:end][keep_mask].sum() / n_tokens
+                step_ref_logps_masked = ref_token_logps[b, start:end][keep_mask].sum() / n_tokens
                 logratio = step_logps_masked - step_ref_logps_masked
+                # Clip to prevent over-optimization (runaway logratio → collapse)
+                logratio = logratio.clamp(-10.0, 10.0)
 
                 total_steps += 1
 
                 if ann.label:
                     # GOOD step: chosen loss
-                    step_loss = 1.0 - torch.sigmoid(self.beta * (logratio - batch_kl))
+                    step_loss = 1.0 - torch.sigmoid(self.beta * (logratio - z0))
                     total_loss = total_loss + self.desirable_weight * step_loss
                     good_loss_sum += step_loss.item()
                     good_count += 1
                 else:
                     # BAD step: rejected loss
-                    step_loss = 1.0 - torch.sigmoid(self.beta * (batch_kl - logratio))
+                    step_loss = 1.0 - torch.sigmoid(self.beta * (z0 - logratio))
                     total_loss = total_loss + self.lambda0 * step_loss
                     bad_loss_sum += step_loss.item()
                     bad_count += 1
@@ -750,8 +848,10 @@ class StepLevelKTOTrainer(Trainer):
             # No valid steps in this batch — return dummy zero loss
             total_loss = (outputs.logits * 0).sum()
 
-        # Log custom metrics
-        if self.state.global_step % self.args.logging_steps == 0:
+        # Log custom metrics — only once per optimizer step (not per micro-batch)
+        if (self.state.global_step % self.args.logging_steps == 0
+                and self.state.global_step != self._last_logged_step):
+            self._last_logged_step = self.state.global_step
             self._log_custom_metrics(good_loss_sum, bad_loss_sum, good_count, bad_count)
 
         if return_outputs:
@@ -759,13 +859,16 @@ class StepLevelKTOTrainer(Trainer):
         return total_loss
 
     def _log_custom_metrics(self, good_loss, bad_loss, good_count, bad_count):
-        """Log KTO-specific metrics."""
+        """Log KTO-specific metrics (rank 0 only in DDP)."""
+        if self.args.local_rank not in (-1, 0):
+            return
         metrics = {}
         if good_count > 0:
             metrics["kto/good_loss"] = good_loss / good_count
         if bad_count > 0:
             metrics["kto/bad_loss"] = bad_loss / bad_count
-        metrics["kto/kl"] = self._last_batch_kl
+        metrics["kto/kl"] = self._running_kl
+        metrics["kto/z0"] = self._current_z0
         metrics["kto/good_count"] = good_count
         metrics["kto/bad_count"] = bad_count
         metrics["kto/lambda_u_base"] = self.lambda0
@@ -774,11 +877,26 @@ class StepLevelKTOTrainer(Trainer):
             self.log(metrics)
 
     def get_train_dataloader(self):
-        """Override to use custom collator."""
+        """Override to use custom collator with DDP-aware DistributedSampler."""
+        if self.args.local_rank != -1:
+            # DDP mode: each process sees a disjoint subset of data
+            from torch.utils.data.distributed import DistributedSampler
+            sampler = DistributedSampler(
+                self.train_dataset,
+                num_replicas=self.args.world_size,
+                rank=self.args.process_index,
+                shuffle=True,
+            )
+            shuffle = False
+        else:
+            sampler = None
+            shuffle = True
+
         return torch.utils.data.DataLoader(
             self.train_dataset,
             batch_size=self.args.per_device_train_batch_size,
-            shuffle=True,
+            shuffle=shuffle,
+            sampler=sampler,
             collate_fn=self._collate_fn,
             num_workers=0,
             pin_memory=True,

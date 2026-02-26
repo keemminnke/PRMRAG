@@ -32,3 +32,30 @@ Traceback (most recent call last):
   File "/usr/lib/python3.10/codecs.py", line 319, in decode
     def decode(self, input, final=False):
 KeyboardInterrupt
+============================================================
+kto_policy_v3 Pipeline 시작: Thu Feb 26 00:23:03 KST 2026
+============================================================
+
+[Step 1] MusiQue trajectory 채점 시작: Thu Feb 26 00:23:03 KST 2026
+>>> SCRIPT STARTING...
+Loading trajectories from outputs/musique_trajectories_merged_1000q.jsonl...
+✓ Loaded 16000 trajectories
+✓ 1000 unique questions
+Loading Critic model with vLLM...
+  Base model: deepseek-ai/DeepSeek-R1-0528-Qwen3-8B
+  LoRA adapter: outputs/critic_model_v8_2000q/final_model
+INFO 02-26 00:23:13 [utils.py:263] non-default args: {'trust_remote_code': True, 'download_dir': '/home/work/.conda/storage/MINKEON_KIM/external_cache/huggingface', 'max_model_len': 16384, 'disable_log_stats': True, 'enable_lora': True, 'max_lora_rank': 64, 'model': 'deepseek-ai/DeepSeek-R1-0528-Qwen3-8B'}
+The argument `trust_remote_code` is to be used with Auto classes. It has no effect here and is ignored.
+The argument `trust_remote_code` is to be used with Auto classes. It has no effect here and is ignored.
+Unrecognized keys in `rope_scaling` for 'rope_type'='yarn': {'attn_factor'}
+INFO 02-26 00:23:24 [model.py:530] Resolved architecture: Qwen3ForCausalLM
+INFO 02-26 00:23:24 [model.py:1545] Using max model len 16384
+INFO 02-26 00:23:25 [scheduler.py:229] Chunked prefill is enabled with max_num_batched_tokens=8192.
+INFO 02-26 00:23:25 [vllm.py:630] Asynchronous scheduling is enabled.
+INFO 02-26 00:23:25 [vllm.py:637] Disabling NCCL for DP synchronization when using async scheduling.
+The argument `trust_remote_code` is to be used with Auto classes. It has no effect here and is ignored.
+Unrecognized keys in `rope_scaling` for 'rope_type'='yarn': {'attn_factor'}
+[0;36m(EngineCore_DP0 pid=22885)[0;0m INFO 02-26 00:23:28 [core.py:97] Initializing a V1 LLM engine (v0.14.0) with config: model='deepseek-ai/DeepSeek-R1-0528-Qwen3-8B', speculative_config=None, tokenizer='deepseek-ai/DeepSeek-R1-0528-Qwen3-8B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=True, dtype=torch.bfloat16, max_seq_len=16384, download_dir='/home/work/.conda/storage/MINKEON_KIM/external_cache/huggingface', load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=deepseek-ai/DeepSeek-R1-0528-Qwen3-8B, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'level': None, 'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['none'], 'splitting_ops': ['vllm::unified_attention', 'vllm::unified_attention_with_output', 'vllm::unified_mla_attention', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::linear_attention', 'vllm::plamo2_mamba_mixer', 'vllm::gdn_attention_core', 'vllm::kda_attention', 'vllm::sparse_attn_indexer'], 'compile_mm_encoder': False, 'compile_sizes': [], 'compile_ranges_split_points': [8192], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2, 1)>, 'cudagraph_num_of_warmups': 1, 'cudagraph_capture_sizes': [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 272, 288, 304, 320, 336, 352, 368, 384, 400, 416, 432, 448, 464, 480, 496, 512], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': False, 'fuse_act_quant': False, 'fuse_attn_quant': False, 'eliminate_noops': True, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False}, 'max_cudagraph_capture_size': 512, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': True}, 'local_cache_dir': None}
+[0;36m(EngineCore_DP0 pid=22885)[0;0m INFO 02-26 00:23:28 [parallel_state.py:1214] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://172.16.0.3:46887 backend=nccl
+[0;36m(EngineCore_DP0 pid=22885)[0;0m INFO 02-26 00:23:38 [parallel_state.py:1425] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A
+[0;36m(EngineCore_DP0 pid=22885)[0;0m INFO 02-26 00:23:39 [gpu_model_runner.py:3808] Starting to load model deepseek-ai/DeepSeek-R1-0528-Qwen3-8B...

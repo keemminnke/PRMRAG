@@ -58,6 +58,7 @@ from prmrag.training.kto_trainer import (
     KTODataPreparer,
     StepLevelKTOTrainer,
     KTODebugCallback,
+    EarlyCollapseCallback,
 )
 
 HF_CACHE_DIR = "/home/work/.conda/storage/MINKEON_KIM/external_cache/huggingface"
@@ -96,8 +97,8 @@ def parse_args():
     )
 
     # KTO hyperparameters (KTO paper recommendations)
-    parser.add_argument("--beta", type=float, default=0.05, help="KTO temperature ([0.01,0.10] for SFT'd model)")
-    parser.add_argument("--lambda0", type=float, default=2.42, help="Weight (lambda_U) for BAD steps")
+    parser.add_argument("--beta", type=float, default=0.3, help="KTO temperature ([0.10,1.00] for non-SFT model)")
+    parser.add_argument("--lambda0", type=float, default=10.9, help="Weight (lambda_U) for BAD steps; set s.t. λD*nD/(λU*nU)∈[1,1.5]")
     parser.add_argument("--desirable-weight", type=float, default=1.0, help="Weight (lambda_D) for GOOD step loss")
 
     # Training
@@ -133,10 +134,13 @@ def parse_args():
     parser.add_argument("--wandb-run-name", type=str, default=None, help="Wandb run name")
     parser.add_argument("--no-wandb", action="store_true", help="Disable wandb")
 
-    # Debug
+    # Debug / Sweep
     parser.add_argument("--limit", type=int, default=None, help="Limit data for debugging")
     parser.add_argument("--logging-steps", type=int, default=10, help="Log every N steps")
     parser.add_argument("--save-steps", type=int, default=500, help="Save checkpoint every N steps")
+    parser.add_argument("--max-steps", type=int, default=-1, help="Stop after N optimizer steps (-1=full training)")
+    parser.add_argument("--sweep-result-file", type=str, default=None,
+                        help="If set, write sweep result JSON here and skip model saving")
 
     return parser.parse_args()
 
@@ -167,33 +171,41 @@ def main():
             print(f"Error: Critic scores not found: {args.critic_scores}")
             sys.exit(1)
 
-    print("=" * 70)
-    print("KTO POLICY TRAINING (Step-level PRM Loss)")
-    print("=" * 70)
-    print()
-    if use_combined:
-        print(f"Data mode:       Combined ({len(args.input)} files)")
-        for p in args.input:
-            print(f"  Input:         {p}")
-    else:
-        print(f"Data mode:       Legacy (two files)")
-        print(f"  Trajectories:  {args.trajectories}")
-        print(f"  Critic scores: {args.critic_scores}")
-    print(f"Model:           {args.model_name}")
-    print(f"Output dir:      {args.output_dir}")
-    print(f"Beta:            {args.beta}")
-    print(f"Lambda0:         {args.lambda0}")
-    print(f"Max length:      {args.max_length}")
-    print(f"Batch size:      {args.batch_size} x {args.gradient_accumulation} accum")
-    print(f"Learning rate:   {args.learning_rate}")
-    print(f"LoRA:            r={args.lora_r}, alpha={args.lora_alpha}")
-    print(f"Truncate BAD:    {args.truncate_after_bad}")
-    print(f"Filter no-gold:  {args.filter_no_gold}")
-    print(f"Best-of-N:       {args.best_of_n}")
-    print(f"Wandb:           {'Disabled' if args.no_wandb else args.wandb_project}")
-    if args.limit:
-        print(f"Limit:           {args.limit}")
-    print()
+    # DDP: determine local rank from environment (set by torchrun)
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    is_main_process = local_rank in (-1, 0)
+
+    if is_main_process:
+        print("=" * 70)
+        print("KTO POLICY TRAINING (Step-level PRM Loss)")
+        print("=" * 70)
+        print()
+    if is_main_process:
+        if use_combined:
+            print(f"Data mode:       Combined ({len(args.input)} files)")
+            for p in args.input:
+                print(f"  Input:         {p}")
+        else:
+            print(f"Data mode:       Legacy (two files)")
+            print(f"  Trajectories:  {args.trajectories}")
+            print(f"  Critic scores: {args.critic_scores}")
+        print(f"Model:           {args.model_name}")
+        print(f"Output dir:      {args.output_dir}")
+        print(f"Beta:            {args.beta}")
+        print(f"Lambda0:         {args.lambda0}")
+        print(f"Max length:      {args.max_length}")
+        num_gpus = int(os.environ.get("WORLD_SIZE", 1))
+        eff_batch = args.batch_size * args.gradient_accumulation * num_gpus
+        print(f"Batch size:      {args.batch_size} x {args.gradient_accumulation} accum x {num_gpus} GPUs = {eff_batch} eff")
+        print(f"Learning rate:   {args.learning_rate}")
+        print(f"LoRA:            r={args.lora_r}, alpha={args.lora_alpha}")
+        print(f"Truncate BAD:    {args.truncate_after_bad}")
+        print(f"Filter no-gold:  {args.filter_no_gold}")
+        print(f"Best-of-N:       {args.best_of_n}")
+        print(f"Wandb:           {'Disabled' if args.no_wandb else args.wandb_project}")
+        if args.limit:
+            print(f"Limit:           {args.limit}")
+        print()
 
     # =========================================================================
     # 1. Load tokenizer
@@ -270,10 +282,15 @@ def main():
     # =========================================================================
     # 3. Load models
     # =========================================================================
-    print("Loading policy model (with LoRA)...")
+    # DDP: load each model directly onto this process's GPU
+    # device_map={"": local_rank} → GPU:local_rank (GPU:0 if single-GPU)
+    gpu_id = max(local_rank, 0)
+
+    if is_main_process:
+        print("Loading policy model (with LoRA)...")
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name,
-        device_map="auto",
+        device_map={"": gpu_id},
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
         attn_implementation="flash_attention_2",
@@ -297,12 +314,14 @@ def main():
         ],
     )
     model = get_peft_model(model, lora_config)
-    model.print_trainable_parameters()
+    if is_main_process:
+        model.print_trainable_parameters()
 
-    print("\nLoading reference model (frozen)...")
+    if is_main_process:
+        print("\nLoading reference model (frozen)...")
     ref_model = AutoModelForCausalLM.from_pretrained(
         args.model_name,
-        device_map="auto",
+        device_map={"": gpu_id},
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
         attn_implementation="flash_attention_2",
@@ -314,7 +333,7 @@ def main():
     # 4. Setup training
     # =========================================================================
     report_to = []
-    if not args.no_wandb and WANDB_AVAILABLE:
+    if not args.no_wandb and WANDB_AVAILABLE and is_main_process:
         report_to.append("wandb")
         run_name = args.wandb_run_name or f"kto_policy_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         wandb.init(
@@ -342,6 +361,8 @@ def main():
     else:
         report_to.append("tensorboard")
 
+    sweep_mode = args.sweep_result_file is not None
+
     training_args = TrainingArguments(
         output_dir=args.output_dir,
         num_train_epochs=args.num_epochs,
@@ -352,10 +373,11 @@ def main():
         warmup_ratio=args.warmup_ratio,
         lr_scheduler_type="cosine",
         logging_steps=args.logging_steps,
-        save_steps=args.save_steps,
+        save_steps=args.save_steps if not sweep_mode else 99999,
+        max_steps=args.max_steps,
         bf16=True,
         gradient_checkpointing=True,
-        save_total_limit=2,
+        save_total_limit=2 if not sweep_mode else 0,
         report_to=report_to,
         remove_unused_columns=False,  # We need custom columns
         dataloader_pin_memory=True,
@@ -365,6 +387,11 @@ def main():
     # 5. Train
     # =========================================================================
     debug_callback = KTODebugCallback()
+    collapse_callback = EarlyCollapseCallback(
+        bad_loss_threshold=0.05,
+        kl_threshold=-5.0,
+        warmup_steps=30,
+    )
 
     trainer = StepLevelKTOTrainer(
         model=model,
@@ -376,7 +403,7 @@ def main():
         max_length=args.max_length,
         args=training_args,
         train_dataset=dataset,
-        callbacks=[debug_callback],
+        callbacks=[debug_callback, collapse_callback],
     )
 
     # Check for checkpoint resume
@@ -400,43 +427,60 @@ def main():
     # =========================================================================
     # 6. Save
     # =========================================================================
-    final_path = Path(args.output_dir) / "final_model"
-    trainer.save_model(str(final_path))
-    tokenizer.save_pretrained(str(final_path))
+    if sweep_mode:
+        # Sweep mode: write result JSON, skip model saving
+        result = {
+            "config": {
+                "beta": args.beta,
+                "lambda0": args.lambda0,
+                "learning_rate": args.learning_rate,
+                "desirable_weight": args.desirable_weight,
+            },
+            **collapse_callback.summary(),
+        }
+        with open(args.sweep_result_file, "w") as f:
+            json.dump(result, f, indent=2)
+        print(f"\n[Sweep] Result written to: {args.sweep_result_file}")
+        print(f"[Sweep] collapsed={result['collapsed']}, "
+              f"final_bad_loss={result.get('final_bad_loss')}, "
+              f"final_kl={result.get('final_kl')}")
+    else:
+        final_path = Path(args.output_dir) / "final_model"
+        trainer.save_model(str(final_path))
+        tokenizer.save_pretrained(str(final_path))
 
-    # Save training info
-    info = {
-        "model_name": args.model_name,
-        "beta": args.beta,
-        "lambda0": args.lambda0,
-        "desirable_weight": args.desirable_weight,
-        "learning_rate": args.learning_rate,
-        "lora_r": args.lora_r,
-        "lora_alpha": args.lora_alpha,
-        "max_length": args.max_length,
-        "truncate_after_bad": args.truncate_after_bad,
-        "data_mode": "combined" if use_combined else "legacy",
-        "input_files": [str(p) for p in args.input] if use_combined else [
-            str(args.trajectories), str(args.critic_scores)
-        ],
-        "num_samples": len(dataset),
-        "completed_at": datetime.now().isoformat(),
-    }
-    with open(Path(args.output_dir) / "training_info.json", "w") as f:
-        json.dump(info, f, indent=2)
+        info = {
+            "model_name": args.model_name,
+            "beta": args.beta,
+            "lambda0": args.lambda0,
+            "desirable_weight": args.desirable_weight,
+            "learning_rate": args.learning_rate,
+            "lora_r": args.lora_r,
+            "lora_alpha": args.lora_alpha,
+            "max_length": args.max_length,
+            "truncate_after_bad": args.truncate_after_bad,
+            "data_mode": "combined" if use_combined else "legacy",
+            "input_files": [str(p) for p in args.input] if use_combined else [
+                str(args.trajectories), str(args.critic_scores)
+            ],
+            "num_samples": len(dataset),
+            "completed_at": datetime.now().isoformat(),
+        }
+        with open(Path(args.output_dir) / "training_info.json", "w") as f:
+            json.dump(info, f, indent=2)
 
-    print(f"\n{'='*70}")
-    print("KTO TRAINING COMPLETED")
-    print(f"{'='*70}")
-    print(f"Model saved to: {final_path}")
-    print()
-    print("To use the trained model:")
-    print(f"  from peft import PeftModel")
-    print(f"  model = PeftModel.from_pretrained(base_model, '{final_path}')")
-    print()
+        print(f"\n{'='*70}")
+        print("KTO TRAINING COMPLETED")
+        print(f"{'='*70}")
+        print(f"Model saved to: {final_path}")
+        print()
+        print("To use the trained model:")
+        print(f"  from peft import PeftModel")
+        print(f"  model = PeftModel.from_pretrained(base_model, '{final_path}')")
+        print()
 
     # Finish wandb
-    if not args.no_wandb and WANDB_AVAILABLE and wandb.run is not None:
+    if not args.no_wandb and WANDB_AVAILABLE and is_main_process and wandb.run is not None:
         wandb.finish()
 
 

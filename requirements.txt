@@ -28,7 +28,7 @@ peft==0.18.1
 datasets==3.0.1
 accelerate==1.12.0
 bitsandbytes==0.49.1
-
+trl==0.29.0
 # Evaluation & metrics
 scikit-learn==1.5.1
 scipy==1.14.0

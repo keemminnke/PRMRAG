@@ -246,11 +246,68 @@ class PolicyModelVLLM:
         2. Clear structure for easy parsing
         3. Prevents hallucination by requiring Search for uncertain facts
         """
+        system_prompt = self._get_system_prompt()
 
-        system_prompt = """You are an advanced AI agent capable of Adaptive RAG (Retrieval-Augmented Generation).
+        if hasattr(self.tokenizer, 'apply_chat_template'):
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message}
+            ]
+            return self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+        else:
+            # Fallback to manual format
+            return f"""<|im_start|>system
+{system_prompt}<|im_end|>
+<|im_start|>user
+{user_message}<|im_end|>
+<|im_start|>assistant
+"""
+
+    def format_continuation_prompt_for_qwen(self, question: str, previous_contents: List[str]) -> str:
+        """Format continuation prompt for step 2+ — previous steps stay in the assistant turn.
+
+        This matches the KTO training format where ALL steps (including <documents>)
+        are in a single assistant turn. The model continues generating from the end
+        of the last previous step.
+
+        Args:
+            question: The original question
+            previous_contents: List of previous step contents (including <documents> blocks)
+
+        Returns:
+            Formatted prompt ending mid-assistant-turn, ready for continuation
+        """
+        if hasattr(self.tokenizer, 'apply_chat_template'):
+            messages = [
+                {"role": "system", "content": self._get_system_prompt()},
+                {"role": "user", "content": f"Question: {question}"},
+            ]
+            base = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        else:
+            base = f"""<|im_start|>system
+{self._get_system_prompt()}<|im_end|>
+<|im_start|>user
+Question: {question}<|im_end|>
+<|im_start|>assistant
+"""
+        # Join previous steps with newline (matches _build_trajectory_text in kto_trainer)
+        previous_text = "\n".join(previous_contents)
+        return base + previous_text + "\n"
+
+    def _get_system_prompt(self) -> str:
+        """Return the system prompt used for generation."""
+        return """You are an advanced AI agent capable of Adaptive RAG (Retrieval-Augmented Generation).
 Your goal is to answer questions accurately by combining internal reasoning with external retrieval when needed.
 
-# OUTPUT FORMAT 
+# OUTPUT FORMAT
 
 Use these XML tags for your response:
 
@@ -297,25 +354,6 @@ Question: Who directed the movie that won Best Picture at the 2020 Oscars?
 5. Concise answer - Output only the entity name in <answer>
 
 Begin."""
-
-        if hasattr(self.tokenizer, 'apply_chat_template'):
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message}
-            ]
-            return self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True
-            )
-        else:
-            # Fallback to manual format
-            return f"""<|im_start|>system
-{system_prompt}<|im_end|>
-<|im_start|>user
-{user_message}<|im_end|>
-<|im_start|>assistant
-"""
 
     def generate_with_chat_template(
         self,
