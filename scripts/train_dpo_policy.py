@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
-"""Train policy model with step-level DPO loss (document masking).
+"""Train policy model with TRL official DPOTrainer.
 
 Usage:
     # Small test
-    python scripts/train_dpo_policy.py \
-        --trajectories outputs/judge_labels_merged_hotpotqa_musique.jsonl \
-        --critic-scores outputs/critic_scores_v8_binary_per_trajectory.jsonl \
+    torchrun --nproc_per_node=2 scripts/train_dpo_policy.py \
+        --dpo-dataset outputs/dpo_dataset_bva.jsonl \
         --output-dir outputs/dpo_policy_test \
         --limit 50 --no-wandb
 
-    # Full training
-    python scripts/train_dpo_policy.py \
-        --trajectories outputs/judge_labels_merged_hotpotqa_musique.jsonl \
-        --critic-scores outputs/critic_scores_v8_binary_per_trajectory.jsonl \
+    # Full training (best-vs-all)
+    torchrun --nproc_per_node=2 scripts/train_dpo_policy.py \
+        --dpo-dataset outputs/dpo_dataset_bva.jsonl \
+        --model-name outputs/sft_policy_v1/merged_model \
         --output-dir outputs/dpo_policy_v1 \
-        --pairing best-vs-all \
-        --wandb-run-name dpo_policy_v1
+        --wandb-run-name dpo_policy_bva
 
-Key ideas:
-  - Input: trajectory-level pairs (chosen=correct, rejected=incorrect)
-  - Loss: DPO with document masking (<documents>...</documents> tokens excluded)
-  - Custom StepLevelDPOTrainer with separate ref model
+Key changes from custom trainer:
+  - Uses TRL DPOTrainer (official, verified loss computation)
+  - ref_model=None: TRL disables LoRA adapters for reference forward pass
+    (single model copy, memory efficient, correct DPO behavior)
+  - peft_config passed to DPOTrainer (TRL handles LoRA application)
+  - No custom document masking (TRL computes loss on full completion)
 """
 
 import sys
@@ -30,16 +30,13 @@ import argparse
 from pathlib import Path
 from datetime import datetime
 
-# Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import torch
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    TrainingArguments,
-)
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from datasets import Dataset as HFDataset
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from trl import DPOTrainer, DPOConfig
+from peft import LoraConfig
 
 try:
     import wandb
@@ -47,28 +44,18 @@ try:
 except ImportError:
     WANDB_AVAILABLE = False
 
-from prmrag.training.dpo_trainer import (
-    DPODataPreparer,
-    StepLevelDPOTrainer,
-    DPODebugCallback,
-)
-
 HF_CACHE_DIR = "/home/work/.conda/storage/MINKEON_KIM/external_cache/huggingface"
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Train policy model with step-level DPO loss"
+        description="Train policy model with TRL DPOTrainer"
     )
 
     # Data
     parser.add_argument(
-        "--trajectories", type=Path, required=True,
-        help="Path to judge_labels JSONL (step content)",
-    )
-    parser.add_argument(
-        "--critic-scores", type=Path, required=True,
-        help="Path to critic_scores per_trajectory JSONL",
+        "--dpo-dataset", type=Path, required=True,
+        help="Pre-built DPO dataset JSONL (prompt/chosen/rejected).",
     )
 
     # Model
@@ -81,17 +68,17 @@ def parse_args():
         help="Output directory",
     )
 
-    # DPO hyperparameters
-    parser.add_argument("--beta", type=float, default=0.1, help="DPO temperature")
+    # DPO
+    parser.add_argument("--beta", type=float, default=0.1, help="DPO beta temperature")
     parser.add_argument(
-        "--pairing", type=str, default="best-vs-all",
-        choices=["best-vs-all", "best-vs-worst", "all-vs-all"],
-        help="Pairing strategy for chosen/rejected",
+        "--loss-type", type=str, default="sigmoid",
+        choices=["sigmoid", "ipo", "hinge", "robust"],
+        help="DPO loss type (sigmoid = standard DPO)",
     )
 
     # Training
-    parser.add_argument("--max-length", type=int, default=4096, help="Max sequence length")
-    parser.add_argument("--num-epochs", type=int, default=1, help="Training epochs")
+    parser.add_argument("--max-length", type=int, default=4096, help="Max full sequence length")
+    parser.add_argument("--num-epochs", type=int, default=3, help="Training epochs")
     parser.add_argument("--batch-size", type=int, default=1, help="Per-device batch size")
     parser.add_argument("--gradient-accumulation", type=int, default=16, help="Gradient accumulation steps")
     parser.add_argument("--learning-rate", type=float, default=5e-7, help="Learning rate")
@@ -100,7 +87,7 @@ def parse_args():
 
     # LoRA
     parser.add_argument("--lora-r", type=int, default=16, help="LoRA rank")
-    parser.add_argument("--lora-alpha", type=int, default=16, help="LoRA alpha")
+    parser.add_argument("--lora-alpha", type=int, default=32, help="LoRA alpha")
     parser.add_argument("--lora-dropout", type=float, default=0.05, help="LoRA dropout")
 
     # Wandb
@@ -111,7 +98,7 @@ def parse_args():
     # Debug
     parser.add_argument("--limit", type=int, default=None, help="Limit data for debugging")
     parser.add_argument("--logging-steps", type=int, default=10, help="Log every N steps")
-    parser.add_argument("--save-steps", type=int, default=500, help="Save checkpoint every N steps")
+    parser.add_argument("--save-steps", type=int, default=200, help="Save checkpoint every N steps")
 
     return parser.parse_args()
 
@@ -119,38 +106,33 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # Validate inputs
-    if not args.trajectories.exists():
-        print(f"Error: Trajectories not found: {args.trajectories}")
-        sys.exit(1)
-    if not args.critic_scores.exists():
-        print(f"Error: Critic scores not found: {args.critic_scores}")
+    if not args.dpo_dataset.exists():
+        print(f"Error: Dataset not found: {args.dpo_dataset}")
         sys.exit(1)
 
-    print("=" * 70)
-    print("DPO POLICY TRAINING (Document-masked Step-level)")
-    print("=" * 70)
-    print()
-    print(f"Trajectories:    {args.trajectories}")
-    print(f"Critic scores:   {args.critic_scores}")
-    print(f"Model:           {args.model_name}")
-    print(f"Output dir:      {args.output_dir}")
-    print(f"Pairing:         {args.pairing}")
-    print(f"Beta:            {args.beta}")
-    print(f"Max length:      {args.max_length}")
-    print(f"Batch size:      {args.batch_size} x {args.gradient_accumulation} accum")
-    print(f"Learning rate:   {args.learning_rate}")
-    print(f"LoRA:            r={args.lora_r}, alpha={args.lora_alpha}")
-    print(f"Wandb:           {'Disabled' if args.no_wandb else args.wandb_project}")
-    if args.limit:
-        print(f"Limit:           {args.limit}")
-    print()
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    os.environ["HF_HOME"] = HF_CACHE_DIR
+
+    if local_rank == 0:
+        print("=" * 70)
+        print("DPO POLICY TRAINING (TRL official DPOTrainer)")
+        print("=" * 70)
+        print(f"Dataset:         {args.dpo_dataset}")
+        print(f"Model:           {args.model_name}")
+        print(f"Output dir:      {args.output_dir}")
+        print(f"Beta:            {args.beta}  |  Loss: {args.loss_type}")
+        print(f"Max length:      {args.max_length}")
+        print(f"Batch size:      {args.batch_size} x {args.gradient_accumulation} accum")
+        print(f"Learning rate:   {args.learning_rate}")
+        print(f"LoRA:            r={args.lora_r}, alpha={args.lora_alpha}")
+        print(f"Wandb:           {'Disabled' if args.no_wandb else args.wandb_project}")
+        if args.limit:
+            print(f"Limit:           {args.limit}")
+        print()
 
     # =========================================================================
     # 1. Load tokenizer
     # =========================================================================
-    print("Loading tokenizer...")
-    os.environ["HF_HOME"] = HF_CACHE_DIR
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_name, trust_remote_code=True, cache_dir=HF_CACHE_DIR
     )
@@ -159,129 +141,90 @@ def main():
     tokenizer.padding_side = "right"
 
     # =========================================================================
-    # 2. Prepare dataset
+    # 2. Load dataset
     # =========================================================================
-    print("\nPreparing DPO dataset...")
-    preparer = DPODataPreparer(tokenizer)
-    dataset = preparer.prepare_dataset(
-        trajectories_path=str(args.trajectories),
-        critic_scores_path=str(args.critic_scores),
-        pairing=args.pairing,
-        limit=args.limit,
-    )
-    print(f"Dataset size: {len(dataset)}")
+    records = []
+    with open(args.dpo_dataset) as f:
+        for line in f:
+            if line.strip():
+                records.append(json.loads(line))
+    if args.limit:
+        records = records[:args.limit]
 
-    if len(dataset) == 0:
-        print("Error: No training pairs produced!")
-        sys.exit(1)
+    # is_conversational() 체크: prompt가 list[dict] 이면 messages format으로 인식
+    # → TRL이 apply_chat_template으로 처리 (tokenization boundary 문제 없음)
+    sample = records[0]
+    if isinstance(sample["prompt"], list):
+        # messages format: prompt/chosen/rejected 모두 list[dict]
+        dataset = HFDataset.from_list([
+            {"prompt": r["prompt"], "chosen": r["chosen"], "rejected": r["rejected"]}
+            for r in records
+        ])
+    else:
+        # text format (fallback)
+        dataset = HFDataset.from_list([
+            {"prompt": r["prompt"], "chosen": r["chosen"], "rejected": r["rejected"]}
+            for r in records
+        ])
 
-    # Show sample
-    print("\n" + "=" * 70)
-    print("SAMPLE TRAINING DATA")
-    print("=" * 70)
-    sample = dataset[0]
-    print(f"Prompt (last 200 chars): ...{sample['prompt'][-200:]}")
-    print(f"Chosen (first 300 chars): {sample['chosen'][:300]}...")
-    print(f"Rejected (first 300 chars): {sample['rejected'][:300]}...")
-    print()
-
-    # Token length distribution
-    print("Analyzing token lengths...")
-    lengths_chosen = []
-    lengths_rejected = []
-    for i in range(min(100, len(dataset))):
-        s = dataset[i]
-        cho_toks = tokenizer.encode(s["prompt"] + s["chosen"], add_special_tokens=False)
-        rej_toks = tokenizer.encode(s["prompt"] + s["rejected"], add_special_tokens=False)
-        lengths_chosen.append(len(cho_toks))
-        lengths_rejected.append(len(rej_toks))
-
-    print(f"Token lengths (first {len(lengths_chosen)} samples):")
-    print(f"  Chosen   - Min: {min(lengths_chosen)}, Max: {max(lengths_chosen)}, "
-          f"Avg: {sum(lengths_chosen)/len(lengths_chosen):.0f}")
-    print(f"  Rejected - Min: {min(lengths_rejected)}, Max: {max(lengths_rejected)}, "
-          f"Avg: {sum(lengths_rejected)/len(lengths_rejected):.0f}")
-    exceeding = sum(1 for l in lengths_chosen + lengths_rejected if l > args.max_length)
-    if exceeding:
-        total = len(lengths_chosen) + len(lengths_rejected)
-        print(f"  Exceeding max_length: {exceeding}/{total} ({100*exceeding/total:.1f}%)")
-    print()
+    if local_rank == 0:
+        print(f"Dataset size: {len(dataset)}")
+        sample = dataset[0]
+        print(f"\nSample prompt (last 100 chars): ...{sample['prompt'][-100:]}")
+        print(f"Sample chosen (first 200 chars): {sample['chosen'][:200]}...")
+        print()
 
     # =========================================================================
-    # 3. Load models
+    # 3. Load model
     # =========================================================================
-    print("Loading policy model (with LoRA)...")
+    if local_rank == 0:
+        print("Loading model...")
+
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name,
-        device_map="auto",
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         trust_remote_code=True,
         attn_implementation="flash_attention_2",
         cache_dir=HF_CACHE_DIR,
     )
-
-    # Enable gradient checkpointing
-    model.gradient_checkpointing_enable()
-    model = prepare_model_for_kbit_training(model)
-
-    # Apply LoRA
-    lora_config = LoraConfig(
-        r=args.lora_r,
-        lora_alpha=args.lora_alpha,
-        lora_dropout=args.lora_dropout,
-        bias="none",
-        task_type="CAUSAL_LM",
-        target_modules=[
-            "q_proj", "v_proj", "k_proj", "o_proj",
-            "gate_proj", "up_proj", "down_proj",
-        ],
-    )
-    model = get_peft_model(model, lora_config)
-    model.print_trainable_parameters()
-
-    print("\nLoading reference model (frozen)...")
-    ref_model = AutoModelForCausalLM.from_pretrained(
-        args.model_name,
-        device_map="auto",
-        torch_dtype=torch.bfloat16,
-        trust_remote_code=True,
-        attn_implementation="flash_attention_2",
-        cache_dir=HF_CACHE_DIR,
-    )
-    ref_model.eval()
 
     # =========================================================================
-    # 4. Setup training
+    # 4. Setup wandb
     # =========================================================================
     report_to = []
     if not args.no_wandb and WANDB_AVAILABLE:
         report_to.append("wandb")
-        run_name = args.wandb_run_name or f"dpo_policy_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        wandb.init(
-            project=args.wandb_project,
-            name=run_name,
-            config={
-                "model_name": args.model_name,
-                "method": "dpo_doc_masked",
-                "beta": args.beta,
-                "pairing": args.pairing,
-                "learning_rate": args.learning_rate,
-                "batch_size": args.batch_size,
-                "gradient_accumulation": args.gradient_accumulation,
-                "effective_batch_size": args.batch_size * args.gradient_accumulation,
-                "max_length": args.max_length,
-                "lora_r": args.lora_r,
-                "lora_alpha": args.lora_alpha,
-                "num_epochs": args.num_epochs,
-                "num_pairs": len(dataset),
-            },
-            tags=["dpo", "prmrag", "doc-masked"],
-        )
-        print(f"Wandb initialized: {args.wandb_project}/{run_name}")
+        if local_rank == 0:
+            run_name = args.wandb_run_name or f"dpo_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            wandb.init(
+                project=args.wandb_project,
+                name=run_name,
+                config={
+                    "model_name": args.model_name,
+                    "method": "dpo_trl",
+                    "beta": args.beta,
+                    "loss_type": args.loss_type,
+                    "dataset": str(args.dpo_dataset),
+                    "num_pairs": len(dataset),
+                    "learning_rate": args.learning_rate,
+                    "batch_size": args.batch_size,
+                    "gradient_accumulation": args.gradient_accumulation,
+                    "effective_batch_size": args.batch_size * args.gradient_accumulation * 2,
+                    "max_length": args.max_length,
+                    "lora_r": args.lora_r,
+                    "lora_alpha": args.lora_alpha,
+                    "num_epochs": args.num_epochs,
+                },
+                tags=["dpo", "trl", "prmrag"],
+            )
+            print(f"Wandb initialized: {args.wandb_project}/{run_name}")
     else:
         report_to.append("tensorboard")
 
-    training_args = TrainingArguments(
+    # =========================================================================
+    # 5. DPOConfig
+    # =========================================================================
+    training_args = DPOConfig(
         output_dir=args.output_dir,
         num_train_epochs=args.num_epochs,
         per_device_train_batch_size=args.batch_size,
@@ -294,29 +237,47 @@ def main():
         save_steps=args.save_steps,
         bf16=True,
         gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         save_total_limit=2,
         report_to=report_to,
-        remove_unused_columns=False,  # We need custom columns
-        dataloader_pin_memory=True,
+        remove_unused_columns=False,
+        ddp_find_unused_parameters=False,
+        # DPO-specific
+        beta=args.beta,
+        loss_type=args.loss_type,
+        max_length=args.max_length,
     )
 
     # =========================================================================
-    # 5. Train
+    # 6. LoRA config
     # =========================================================================
-    debug_callback = DPODebugCallback()
+    lora_config = LoraConfig(
+        r=args.lora_r,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
+        bias="none",
+        task_type="CAUSAL_LM",
+        target_modules=[
+            "q_proj", "v_proj", "k_proj", "o_proj",
+            "gate_proj", "up_proj", "down_proj",
+        ],
+    )
 
-    trainer = StepLevelDPOTrainer(
+    # =========================================================================
+    # 7. DPOTrainer
+    #   ref_model=None: TRL uses adapter-disabled model as reference
+    #   (no extra GPU memory for a separate ref model)
+    # =========================================================================
+    trainer = DPOTrainer(
         model=model,
-        ref_model=ref_model,
-        tokenizer=tokenizer,
-        beta=args.beta,
-        max_length=args.max_length,
+        ref_model=None,
         args=training_args,
         train_dataset=dataset,
-        callbacks=[debug_callback],
+        processing_class=tokenizer,
+        peft_config=lora_config,
     )
 
-    # Check for checkpoint resume
+    # Resume from checkpoint if available
     checkpoint_dir = Path(args.output_dir)
     checkpoints = sorted(
         checkpoint_dir.glob("checkpoint-*"),
@@ -326,50 +287,47 @@ def main():
     resume_checkpoint = None
     if checkpoints:
         resume_checkpoint = str(checkpoints[-1])
-        print(f"\nResuming from checkpoint: {resume_checkpoint}")
+        if local_rank == 0:
+            print(f"Resuming from checkpoint: {resume_checkpoint}")
 
-    print(f"\n{'='*70}")
-    print("STARTING DPO TRAINING")
-    print(f"{'='*70}\n")
+    if local_rank == 0:
+        print(f"\n{'='*70}")
+        print("STARTING DPO TRAINING")
+        print(f"{'='*70}\n")
 
     trainer.train(resume_from_checkpoint=resume_checkpoint)
 
     # =========================================================================
-    # 6. Save
+    # 8. Save
     # =========================================================================
     final_path = Path(args.output_dir) / "final_model"
     trainer.save_model(str(final_path))
-    tokenizer.save_pretrained(str(final_path))
+    if local_rank == 0:
+        tokenizer.save_pretrained(str(final_path))
 
-    # Save training info
-    info = {
-        "model_name": args.model_name,
-        "method": "dpo_doc_masked",
-        "beta": args.beta,
-        "pairing": args.pairing,
-        "learning_rate": args.learning_rate,
-        "lora_r": args.lora_r,
-        "lora_alpha": args.lora_alpha,
-        "max_length": args.max_length,
-        "num_pairs": len(dataset),
-        "completed_at": datetime.now().isoformat(),
-    }
-    with open(Path(args.output_dir) / "training_info.json", "w") as f:
-        json.dump(info, f, indent=2)
+        info = {
+            "model_name": args.model_name,
+            "method": "dpo_trl_official",
+            "beta": args.beta,
+            "loss_type": args.loss_type,
+            "dataset": str(args.dpo_dataset),
+            "learning_rate": args.learning_rate,
+            "lora_r": args.lora_r,
+            "lora_alpha": args.lora_alpha,
+            "max_length": args.max_length,
+            "num_pairs": len(dataset),
+            "completed_at": datetime.now().isoformat(),
+        }
+        with open(Path(args.output_dir) / "training_info.json", "w") as f:
+            json.dump(info, f, indent=2)
 
-    print(f"\n{'='*70}")
-    print("DPO TRAINING COMPLETED")
-    print(f"{'='*70}")
-    print(f"Model saved to: {final_path}")
-    print()
-    print("To use the trained model:")
-    print(f"  python scripts/generate_trajectories.py \\")
-    print(f"      --lora_adapter {final_path} ...")
-    print()
+        print(f"\n{'='*70}")
+        print("DPO TRAINING COMPLETED")
+        print(f"{'='*70}")
+        print(f"Model saved to: {final_path}")
 
-    # Finish wandb
-    if not args.no_wandb and WANDB_AVAILABLE and wandb.run is not None:
-        wandb.finish()
+        if not args.no_wandb and WANDB_AVAILABLE and wandb.run is not None:
+            wandb.finish()
 
 
 if __name__ == "__main__":

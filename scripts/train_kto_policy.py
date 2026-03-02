@@ -89,7 +89,7 @@ def parse_args():
     # Model
     parser.add_argument(
         "--model-name", type=str, default="Qwen/Qwen2.5-7B-Instruct",
-        help="Base model to fine-tune",
+        help="Base model to fine-tune (can be a local merged model path)",
     )
     parser.add_argument(
         "--output-dir", type=str, default="outputs/kto_policy_v1",
@@ -297,8 +297,8 @@ def main():
         cache_dir=HF_CACHE_DIR,
     )
 
-    # Enable gradient checkpointing
-    model.gradient_checkpointing_enable()
+    # Enable gradient checkpointing (use_reentrant=False required for DDP + LoRA)
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     model = prepare_model_for_kbit_training(model)
 
     # Apply LoRA
@@ -377,6 +377,8 @@ def main():
         max_steps=args.max_steps,
         bf16=True,
         gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
+        ddp_find_unused_parameters=False,
         save_total_limit=2 if not sweep_mode else 0,
         report_to=report_to,
         remove_unused_columns=False,  # We need custom columns

@@ -16,6 +16,7 @@ Usage:
 import argparse
 import json
 import os
+import random
 import subprocess
 import sys
 import tempfile
@@ -68,10 +69,10 @@ def parse_args():
     return args
 
 
-def _build_launcher(num_gpus: int) -> list:
+def _build_launcher(num_gpus: int, port: int = 29500) -> list:
     """Return the command prefix: torchrun for multi-GPU, python for single."""
     if num_gpus > 1:
-        return ["torchrun", f"--nproc_per_node={num_gpus}"]
+        return ["torchrun", f"--nproc_per_node={num_gpus}", f"--master_port={port}"]
     return [sys.executable]
 
 
@@ -84,7 +85,9 @@ def run_probe(config: dict, args, tmp_dir: Path) -> dict:
     result_file = tmp_dir / f"result_b{beta}_l{lambda0}_lr{lr}.json"
     out_dir     = tmp_dir / f"run_b{beta}_l{lambda0}_lr{lr}"
 
-    cmd = _build_launcher(args.num_gpus) + [
+    # Use a random port per probe to avoid EADDRINUSE between sequential runs
+    port = random.randint(29600, 30000)
+    cmd = _build_launcher(args.num_gpus, port=port) + [
         "scripts/train_kto_policy.py",
         "--input", args.input,
         "--output-dir", str(out_dir),

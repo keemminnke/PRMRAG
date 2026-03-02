@@ -1,23 +1,70 @@
-# PRMRAG KTO Training — Progress Log
+# PRMRAG Training — Progress Log
 
-Last updated: 2026-02-26
+Last updated: 2026-02-27
 
 ---
 
 ## 현재 상태 (브랜치: no-rpe)
 
+### 전략 변경: KTO → DPO
+
+KTO z0 self-reference 버그 수정 완료했으나, 학습 방향을 **DPO**로 전환.
+기존 N=16 critic-scored 궤적을 활용해 DPO 데이터셋 구성.
+
 ### 핵심 구현 완료
-- **Step-level KTO trainer**: `src/prmrag/training/kto_trainer.py`
-- **학습 스크립트**: `scripts/train_kto_policy.py`
-- **자동 Sweep 스크립트**: `scripts/sweep_kto.py` ← 신규
+- **KTO z0 버그 수정**: `src/prmrag/training/kto_trainer.py` (lagged EMA로 교체)
+- **DPO trainer**: `src/prmrag/training/dpo_trainer.py`
+- **DPO 데이터셋 빌더**: `scripts/build_dpo_dataset.py` ← 신규
+- **Eval 궤적 재생성 파이프라인**: `scripts/regenerate_val_trajectories.py`
+
+### 현재 실행 중 (2026-02-27)
+```bash
+# DPO 재생성 파이프라인 (PID 483102)
+python scripts/build_dpo_dataset.py --regen-only \
+    --policy-model outputs/sft_policy_v1/merged_model \
+    --critic-gpu 0.80 --policy-gpu 0.80
+# 로그: logs/build_dpo.log
+```
 
 ### 다음 할 일
-1. **Hyperparameter sweep 실행** → best (beta, lambda0) 자동 탐색
+1. **재생성 완료 대기** → `outputs/dpo_regen_scored.jsonl`
+2. **DPO 데이터셋 최종 빌드**:
    ```bash
-   python scripts/sweep_kto.py --run-winner
+   python scripts/build_dpo_dataset.py --build-only
    ```
-2. sweep winner로 풀 학습
-3. `scripts/run_train_and_eval.sh`로 평가
+3. **DPO 학습 실행**: `scripts/train_kto_policy.py` → DPO 학습 스크립트 작성
+4. 평가
+
+---
+
+## DPO 데이터셋 구성 전략
+
+### 페어링 방식
+- **Chosen**: all-GOOD 궤적 (모든 critic_step_label == 1)
+- **Rejected**: has-BAD 궤적 (any critic_step_label == 0)
+- **전략**: all-vs-all (M chosen × N rejected 모든 조합)
+
+### 데이터 통계 (재생성 전)
+
+| 데이터셋 | 궤적 수 | all-GOOD | has-BAD | DPO 가능 질문 |
+|---|---|---|---|---|
+| hotpotqa | 15,728 | 9,336 (59.4%) | 6,392 (40.6%) | 707 / 1000 |
+| musique  | 16,000 | 6,124 (38.3%) | 9,876 (61.7%) | 710 / 1000 |
+| **합계** | 31,728 | 15,460 (48.7%) | 16,268 (51.3%) | **1,417 / 2,000** |
+
+- 기존 all-vs-all 페어: **57,052개**
+- DPO 불가 583개 질문 중: 302개는 all-GOOD 없음 (재생성 대상), 281개는 has-BAD 없음
+
+### 재생성으로 Chosen 풀 확장
+0 all-GOOD인 302개 질문의 has-BAD 궤적 4,811개를 재생성:
+```
+has-BAD: [step1✓, step2✗, step3✗]
+    → truncate at first BAD (step2)
+    → regenerate with critic_reasoning feedback
+    → (if all-GOOD) new chosen trajectory
+```
+
+**기대 효과**: DPO 가능 질문 1,417 → 최대 1,719개로 확대
 
 ---
 
@@ -102,15 +149,23 @@ z0 = max(0, mean(batch logratios))           논문 수식, 음수 방지
 
 ```
 scripts/
-  train_kto_policy.py      # 학습 진입점
-  sweep_kto.py             # 자동 하이퍼파라미터 탐색
-  run_train_and_eval.sh    # 학습 + 평가 통합 (v3 설정 하드코딩됨, 업데이트 필요)
+  train_kto_policy.py              # KTO 학습 진입점
+  sweep_kto.py                     # KTO 자동 하이퍼파라미터 탐색
+  build_dpo_dataset.py             # DPO 데이터셋 빌더 (regen 포함) ← 신규
+  regenerate_val_trajectories.py   # Eval 궤적 재생성 파이프라인
 
 src/prmrag/training/
-  kto_trainer.py           # KTO 핵심 구현
+  kto_trainer.py           # KTO 핵심 구현 (z0 lagged EMA 수정됨)
+  dpo_trainer.py           # DPO 핵심 구현
 
 outputs/
-  hotpotqa_critic_results_v8_per_trajectory.jsonl  # 학습 데이터
-  kto_sweep_tmp/           # sweep 임시 결과
-  kto_policy_*/            # 학습된 모델
+  hotpotqa_critic_results_v8_per_trajectory.jsonl  # hotpotqa 학습 데이터 (critic 채점 완료)
+  musique_critic_results_v8_per_trajectory.jsonl   # musique 학습 데이터 (critic 채점 완료)
+  sft_policy_v1/merged_model                       # SFT 정책 모델 (재생성용)
+  dpo_regen_trajectories.jsonl                     # 재생성된 궤적 (생성 중)
+  dpo_regen_scored.jsonl                           # 재생성 궤적 critic 채점 결과
+  dpo_dataset.jsonl                                # 최종 DPO 데이터셋
+
+logs/
+  build_dpo.log            # 현재 실행 중인 재생성 로그
 ```

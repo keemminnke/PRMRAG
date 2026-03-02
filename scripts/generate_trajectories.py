@@ -37,6 +37,7 @@ from prmrag.generation.adaptive_generator import SimpleTrajectoryGenerator
 from prmrag.retrieval.bge_retriever import BGERetriever
 from prmrag.retrieval.bge_reranker import BGEReranker
 from prmrag.retrieval import BM25Retriever
+from prmrag.retrieval.e5_retriever import E5Retriever
 
 
 class DenseRetrieverWithReranker:
@@ -259,6 +260,9 @@ def main():
                         help='Use HotpotQA context as corpus instead of KILT')
     parser.add_argument('--no_rerank', action='store_true',
                         help='Disable reranking (use BM25 only for HotpotQA)')
+    parser.add_argument('--retriever', type=str, default='bm25',
+                        choices=['bm25', 'bge', 'e5'],
+                        help='Retriever type for HotpotQA corpus mode (default: bm25)')
 
     # LoRA adapter
     parser.add_argument('--lora_adapter', type=str, default=None,
@@ -280,11 +284,11 @@ def main():
     print(f"Batch size: {args.batch_size}")
     print(f"Temperature: {args.temperature}")
     if args.use_hotpotqa_corpus:
-        print(f"Retriever: BM25 (HotpotQA corpus)")
-        if args.no_rerank:
-            print(f"Reranking: Disabled")
-        else:
+        print(f"Retriever: {args.retriever.upper()} (HotpotQA corpus)")
+        if args.retriever == 'bm25' and not args.no_rerank:
             print(f"Reranking: Enabled")
+        else:
+            print(f"Reranking: Disabled")
     else:
         if args.no_rerank:
             print(f"Retriever: Dense (BGE-M3 only) - No Reranker")
@@ -311,12 +315,21 @@ def main():
 
     # [2] Initialize Retriever
     if args.use_hotpotqa_corpus:
-        # HotpotQA mode: BM25 with optional reranking
-        print(f"\n[2/4] Initializing BM25 retriever (HotpotQA mode)...")
-        retriever = BM25Retriever(corpus)
-        print(f"  ✓ BM25 retriever initialized")
+        retriever_type = args.retriever
+        print(f"\n[2/4] Initializing {retriever_type.upper()} retriever (HotpotQA mode)...")
 
-        if not args.no_rerank:
+        if retriever_type == 'e5':
+            retriever = E5Retriever(corpus)
+            print(f"  ✓ E5 retriever initialized")
+        elif retriever_type == 'bge':
+            retriever = BGERetriever(corpus)
+            print(f"  ✓ BGE retriever initialized")
+        else:
+            # BM25 (default)
+            retriever = BM25Retriever(corpus)
+            print(f"  ✓ BM25 retriever initialized")
+
+        if retriever_type == 'bm25' and not args.no_rerank:
             try:
                 print(f"  Initializing reranker...")
                 reranker = BGEReranker(device="cuda", batch_size=64)
@@ -328,8 +341,8 @@ def main():
                 print(f"  ✓ Reranker enabled")
             except Exception as e:
                 print(f"  ⚠ Reranker not available: {e}")
-        else:
-            print(f"  ✓ Reranking disabled (BM25 only)")
+        elif retriever_type != 'bm25':
+            print(f"  ✓ Dense retriever (no reranker)")
     else:
         # KILT mode: Dense (BGE, optionally with Reranker)
         if args.no_rerank:

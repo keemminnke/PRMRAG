@@ -746,10 +746,19 @@ class StepLevelKTOTrainer(Trainer):
             ref_token_logps = _get_per_token_logps(ref_outputs.logits, input_ids)
 
         # --- Phase 1: Compute batch-level z0 (KTO 논문 수식) ---
-        # 논문: z0 = max(0, (1/m) * Σ log(π_θ(yj|xi) / π_ref(yj|xi)))
-        # 논문은 mismatched pair (xi, yj)를 쓰지만 추가 forward pass가 필요하므로
-        # matched pair로 근사. max(0,...) 클램핑은 논문과 동일하게 적용.
-        # z0는 Python float — backprop 없음.
+        # 핵심 수정: z0를 현재 배치가 아닌 이전 배치의 running EMA로 계산.
+        #
+        # 기존 구현의 문제: z0 = max(0, batch_kl_of_current_batch)
+        #   → GOOD steps만 있는 배치에서 z0 ≈ mean(logratio) ≈ logratio
+        #   → logratio - z0 ≈ 0 → sigmoid(0) = 0.5 → loss = 0.5 forever
+        #   → 모델이 학습해도 z0가 함께 올라가서 loss가 변하지 않음 (self-reference loop)
+        #
+        # 수정: z0 = self._running_kl (이전 배치들의 EMA, 현재 배치와 독립)
+        #   → 현재 배치 KL은 EMA 업데이트에만 사용 (다음 배치의 z0로 활용)
+        #   → logratio - z0가 실질적인 값을 가짐 → loss가 학습에 반응
+        #
+        # 논문과의 관계: 논문은 mismatched pair로 z0를 계산하지만 extra forward pass 필요.
+        # Lagged EMA는 matched pair 근사이지만 self-reference를 제거한다는 점에서 더 올바름.
         all_step_logratios = []
 
         with torch.no_grad():
@@ -779,15 +788,14 @@ class StepLevelKTOTrainer(Trainer):
                           ref_token_logps[b, start:end][keep_mask]).sum().item() / n_tokens
                     all_step_logratios.append(kl)
 
+        # z0 = lagged EMA (이전 배치의 running KL) — self-reference loop 제거
+        z0 = max(0.0, self._running_kl)
+
+        # EMA 업데이트: 현재 배치 KL로 running_kl 갱신 (다음 배치의 z0에 반영됨)
         if all_step_logratios:
             batch_kl = sum(all_step_logratios) / len(all_step_logratios)
-            # EMA: 로깅용
             self._running_kl = (1 - self._running_kl_alpha) * self._running_kl + \
                                 self._running_kl_alpha * batch_kl
-            # z0 = max(0, batch KL) — 논문과 동일한 clamped estimate
-            z0 = max(0.0, batch_kl)
-        else:
-            z0 = 0.0
 
         self._current_z0 = z0
 

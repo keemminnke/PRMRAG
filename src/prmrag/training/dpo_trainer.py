@@ -412,15 +412,20 @@ class StepLevelDPOTrainer(Trainer):
         rej_logits = model(input_ids=rej_ids, attention_mask=rej_attn).logits
 
         # Forward: ref model (no grad)
+        # In DDP, ref_model is on same device as inputs (local_rank GPU)
+        ref_device = next(self.ref_model.parameters()).device
+        if ref_device != device:
+            self.ref_model = self.ref_model.to(device)
+            ref_device = device
         with torch.no_grad():
             cho_ref_logits = self.ref_model(
-                input_ids=cho_ids.to(self.ref_model.device),
-                attention_mask=cho_attn.to(self.ref_model.device),
-            ).logits.to(device)
+                input_ids=cho_ids,
+                attention_mask=cho_attn,
+            ).logits
             rej_ref_logits = self.ref_model(
-                input_ids=rej_ids.to(self.ref_model.device),
-                attention_mask=rej_attn.to(self.ref_model.device),
-            ).logits.to(device)
+                input_ids=rej_ids,
+                attention_mask=rej_attn,
+            ).logits
 
         # Per-token log probs (shifted: logps[i] predicts token at position i+1)
         cho_logps = _get_per_token_logps(cho_logits, cho_ids)
