@@ -208,7 +208,7 @@ def main():
         'max_tokens': 8192,
         'max_model_len': 32768,
         'gpu_memory_utilization': 0.95,
-        'tensor_parallel_size': 1,
+        'tensor_parallel_size': 2,
         'prompt_style': 'versaprm',
         'use_gold_answer': True,
         'use_supporting_facts': False,

@@ -443,7 +443,7 @@ def load_policy_model(config: dict) -> PolicyModelVLLM:
     """
     return PolicyModelVLLM(
         model_name=config.get('model_name', 'Qwen/Qwen2.5-7B-Instruct'),
-        tensor_parallel_size=config.get('tensor_parallel_size', 1),
+        tensor_parallel_size=config.get('tensor_parallel_size', 2),
         gpu_memory_utilization=config.get('gpu_memory_utilization', 0.9),
         max_new_tokens=config.get('max_tokens', 200),
         temperature=config.get('temperature', 0.8),
@@ -451,4 +451,5 @@ def load_policy_model(config: dict) -> PolicyModelVLLM:
         seed=config.get('seed', 42),
         max_model_len=config.get('max_model_len', None),
         device=config.get('device', 'cuda'),
+        lora_adapter=config.get('lora_adapter', None),
     )

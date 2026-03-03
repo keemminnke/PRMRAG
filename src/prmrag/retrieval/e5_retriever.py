@@ -51,15 +51,24 @@ class E5Retriever:
         else:
             self.device = device
 
-        print(f"Loading E5 model ({model_name}) on {self.device}...")
+        self.num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+
+        print(f"Loading E5 model ({model_name}) on {self.device} ({self.num_gpus} GPUs)...")
         from transformers import AutoTokenizer, AutoModel
         HF_CACHE_DIR = "/home/work/.conda/storage/MINKEON_KIM/external_cache/huggingface"
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=HF_CACHE_DIR)
-        self.model = AutoModel.from_pretrained(
+        self._base_model = AutoModel.from_pretrained(
             model_name, cache_dir=HF_CACHE_DIR, torch_dtype=torch.float16
         ).to(self.device)
-        self.model.eval()
-        print(f"✓ E5 model loaded")
+        self._base_model.eval()
+
+        # Use DataParallel if multiple GPUs available
+        if self.num_gpus >= 2:
+            self.model = torch.nn.DataParallel(self._base_model)
+            print(f"✓ E5 model loaded (DataParallel on {self.num_gpus} GPUs)")
+        else:
+            self.model = self._base_model
+            print(f"✓ E5 model loaded")
 
         # Load or build index
         if faiss_index_path and Path(faiss_index_path).exists() and FAISS_AVAILABLE:
@@ -134,9 +143,12 @@ class E5Retriever:
         return np.vstack(all_embeddings)
 
     def _free_model(self):
-        """Move model to CPU and free GPU memory after index is built."""
+        """Free GPU memory after index is built."""
         if hasattr(self, "model") and self.model is not None:
-            self.model.cpu()
+            if hasattr(self, "_base_model") and self._base_model is not None:
+                self._base_model.cpu()
+                del self._base_model
+                self._base_model = None
             del self.model
             self.model = None
             import gc; gc.collect()
