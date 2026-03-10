@@ -35,56 +35,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 HF_CACHE = "/home/work/.conda/storage/MINKEON_KIM/external_cache/huggingface"
 
-SYSTEM_PROMPT = """You are an advanced AI agent capable of Adaptive RAG (Retrieval-Augmented Generation).
-Your goal is to answer questions accurately by combining internal reasoning with external retrieval when needed.
-
-# OUTPUT FORMAT
-
-Use these XML tags for your response:
-
-1. <think>Your reasoning</think>
-   - Analyze the question, plan next action, evaluate evidence
-   - ALWAYS start each step with <think>
-
-2. <search>query</search>
-   - Query external knowledge base
-   - Use when you need factual information
-
-3. <answer>final answer</answer>
-   - Provide final answer (entity name or short answer only)
-   - Use when you have sufficient evidence
-
-After <search>, you will receive:
-<documents>Retrieved passages</documents>
-
-# STEP TYPES
-
-- Search step: <think>...</think> followed by <search>...</search>
-- Reason step: <think>...</think> only (no search)
-- Finish step: <think>...</think> followed by <answer>...</answer>
-
-# EXAMPLE
-
-Question: Who directed the movie that won Best Picture at the 2020 Oscars?
-
-<think>I need to find which movie won Best Picture at the 2020 Oscars, then identify its director.</think>
-<search>Best Picture winner 2020 Oscars</search>
-<documents>
-[1] 92nd Academy Awards: "Parasite" won Best Picture at the 92nd Academy Awards (2020)...
-[2] Parasite (2019 film): Directed by Bong Joon-ho, the film also won Best Director...
-</documents>
-<think>The observation states "Parasite" won and was directed by Bong Joon-ho. I have sufficient evidence.</think>
-<answer>Bong Joon-ho</answer>
-
-# RULES
-
-1. One action per step - Either <search> or <answer>, not both
-2. Always <think> first - Explain your reasoning before action
-3. Search before guessing - If uncertain, use <search>
-4. Trust observations - Retrieved information takes priority
-5. Concise answer - Output only the entity name in <answer>
-
-Begin."""
+SYSTEM_PROMPT = """You are a helpful assistant who is good at answering questions with multi-turn search engine calling. To answer questions, you must first reason through the available information using <think> and </think>. If you identify missing knowledge, you may issue a search request using <search> query </search> at any time. The retrieval system will provide you with relevant documents enclosed in <documents> and </documents>. You can search as many times as you want. Once you have sufficient information or if you find no further external knowledge is needed, directly provide a concise final answer using <answer> and </answer> without detailed illustrations."""
 
 
 def get_question_id(trajectory_id: str) -> str:
@@ -297,7 +248,7 @@ def regenerate_steps(
     critic_model: str,
     critic_base: str,
     regen_k: int = 3,
-    gpu_memory: float = 0.45,
+    gpu_memory: float = 0.88,
 ) -> List[Dict]:
     """Regenerate steps at BAD points and score with critic.
 
@@ -564,7 +515,7 @@ def parse_args():
                    default="outputs/critic_model_v9_3000q/final_model")
     p.add_argument("--critic-base", type=str,
                    default="deepseek-ai/DeepSeek-R1-0528-Qwen3-8B")
-    p.add_argument("--gpu-memory", type=float, default=0.45)
+    p.add_argument("--gpu-memory", type=float, default=0.88)
 
     return p.parse_args()
 

@@ -23,7 +23,7 @@
 | 6 | SFT v2 + DPO v2 (ep1, prompt 통일) | 34.2% | 45.5% | 3,000q, 19,209 pairs | 1 | DPO 효과 없음 |
 | 7 | DPO only (base, 5,000q) | - | - | 5,000q, 27,323 pairs | 1 | 중단 (loss 미감소) |
 | 8 | SFT v2 + traj-DPO (5,000q) | - | - | 5,000q, 27,323 pairs | 1 | 중단 → step-level DPO로 전환 |
-| 9 | SFT v2 + **Step-level DPO** | - | - | 5,000q, ~130K pairs | 1 | **진행 예정** |
+| 9 | Step-level DPO (base) | 33.7% | 44.8%| 5,000q, 41,007 pairs | 1 | Base + step-level, 기준선과 비슷 |
 
 ---
 
@@ -93,9 +93,24 @@
 - **중단 사유**: Step-level DPO로 전환
 - **DPO 데이터**: 27,323 pairs (5,000q, Best-vs-All)
 
-### Exp 9: SFT v2 + Step-level DPO (5,000q) — 진행 예정
-- **핵심 변경**: Trajectory-level → Step-level DPO
-- **방법론**: 아래 "Step-level DPO" 섹션 참조
+### Exp 9: Step-level DPO on Base (5,000q, epoch 1)
+- **결과**: EM 33.7%, F1 44.8%
+- **Base model**: `Qwen/Qwen2.5-7B-Instruct` (SFT 없이 base 위에 직접 DPO)
+- **핵심 변경**: Trajectory-level → Step-level DPO (GOOD vs BAD critic labels)
+- **DPO 데이터**: 41,007 pairs (Source 1 only, 기존 데이터 step-level 추출)
+  - Step 1: 1,410 pairs
+  - Step 2: 29,495 pairs (주력)
+  - Step 3: 9,676 pairs
+  - Step 4-6: 426 pairs
+  - 3,430 unique questions
+- **학습 지표** (최종):
+  - Loss: 0.693 → 0.583
+  - Rewards accuracy: 41% → 70%
+  - Rewards margin: 0.003 → 0.345
+- **하이퍼파라미터**: beta=0.1, lr=5e-7, LoRA r=16, epoch=1
+- **모델 경로**: `outputs/dpo_step_level_v1_base/merged_model`
+- **평가 경로**: `outputs/flashrag_step_dpo_v1_base/`
+- **분석**: 학습 지표는 크게 개선 (기존 traj-DPO 대비 loss, accuracy 모두 양호), 하지만 평가 성능은 base(29.7%)보다 +4%p, SFT(34.9%)보다 -1.2%p. SFT 없이 base 위에서 DPO만으로는 SFT 수준 도달 어려움. → **SFT 위에 step-level DPO 실험 필요**
 
 ---
 

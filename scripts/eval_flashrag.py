@@ -29,17 +29,7 @@ from flashrag.utils import get_dataset, get_retriever, get_generator
 from flashrag.pipeline import SearchR1Pipeline
 
 
-SYSTEM_PROMPT = """You are a multi-step reasoning assistant with access to a search tool.
-On each turn you must either:
-  1. Search for information: write <think>your reasoning</think> then <search>your query</search>
-  2. Give your final answer: write <think>your reasoning</think> then <answer>your answer</answer>
-
-Rules:
-- Always wrap reasoning in <think>...</think>
-- Use <search>query</search> to retrieve documents
-- Retrieved documents will appear in <documents>...</documents>
-- When ready, use <answer>short answer</answer>
-- Keep answers concise (a few words)"""
+SYSTEM_PROMPT = """You are a helpful assistant who is good at answering questions with multi-turn search engine calling. To answer questions, you must first reason through the available information using <think> and </think>. If you identify missing knowledge, you may issue a search request using <search> query </search> at any time. The retrieval system will provide you with relevant documents enclosed in <documents> and </documents>. You can search as many times as you want. Once you have sufficient information or if you find no further external knowledge is needed, directly provide a concise final answer using <answer> and </answer> without detailed illustrations."""
 
 
 def parse_args():
