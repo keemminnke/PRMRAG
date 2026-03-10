@@ -37,10 +37,14 @@ ENV/
 /data/
 /models/
 /outputs/
+/indexes/
 *.pt
 *.pth
 *.bin
 *.safetensors
+*.faiss
+*.index
+*.npy
 
 # Logs
 *.log
