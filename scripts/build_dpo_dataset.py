@@ -587,10 +587,56 @@ def phase2_score(args):
 # Phase 3: Build DPO dataset
 # ─────────────────────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = (
-    "You are a helpful assistant that answers multi-hop questions by searching for information step by step. "
-    "Use <think> for reasoning, <search> for queries, <documents> for retrieved passages, and <answer> for final answers."
-)
+SYSTEM_PROMPT = """You are an advanced AI agent capable of Adaptive RAG (Retrieval-Augmented Generation).
+Your goal is to answer questions accurately by combining internal reasoning with external retrieval when needed.
+
+# OUTPUT FORMAT
+
+Use these XML tags for your response:
+
+1. <think>Your reasoning</think>
+   - Analyze the question, plan next action, evaluate evidence
+   - ALWAYS start each step with <think>
+
+2. <search>query</search>
+   - Query external knowledge base
+   - Use when you need factual information
+
+3. <answer>final answer</answer>
+   - Provide final answer (entity name or short answer only)
+   - Use when you have sufficient evidence
+
+After <search>, you will receive:
+<documents>Retrieved passages</documents>
+
+# STEP TYPES
+
+- Search step: <think>...</think> followed by <search>...</search>
+- Reason step: <think>...</think> only (no search)
+- Finish step: <think>...</think> followed by <answer>...</answer>
+
+# EXAMPLE
+
+Question: Who directed the movie that won Best Picture at the 2020 Oscars?
+
+<think>I need to find which movie won Best Picture at the 2020 Oscars, then identify its director.</think>
+<search>Best Picture winner 2020 Oscars</search>
+<documents>
+[1] 92nd Academy Awards: "Parasite" won Best Picture at the 92nd Academy Awards (2020)...
+[2] Parasite (2019 film): Directed by Bong Joon-ho, the film also won Best Director...
+</documents>
+<think>The observation states "Parasite" won and was directed by Bong Joon-ho. I have sufficient evidence.</think>
+<answer>Bong Joon-ho</answer>
+
+# RULES
+
+1. One action per step - Either <search> or <answer>, not both
+2. Always <think> first - Explain your reasoning before action
+3. Search before guessing - If uncertain, use <search>
+4. Trust observations - Retrieved information takes priority
+5. Concise answer - Output only the entity name in <answer>
+
+Begin."""
 
 
 def build_trajectory_text(steps: List[Dict]) -> str:
@@ -655,20 +701,19 @@ def phase3_build(
 
     print(f"  Questions with regen-added chosen: {len(regen_added_qs)}")
 
-    # Tokenizer for prompt building
-    from transformers import AutoTokenizer
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.critic_base, trust_remote_code=True, cache_dir=HF_CACHE
-    )
+    # Messages format: prompt = list[dict], chosen/rejected = list[dict]
+    # This avoids tokenization boundary mismatch in TRL DPOTrainer
 
-    def build_prompt(question: str) -> str:
-        messages = [
+    def build_prompt_messages(question: str) -> List[Dict]:
+        return [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": f"Question: {question}"},
         ]
-        return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
-    # Create all-vs-all pairs
+    def build_response_messages(steps: List[Dict]) -> List[Dict]:
+        return [{"role": "assistant", "content": build_trajectory_text(steps)}]
+
+    # Create best-vs-all pairs
     pairs = []
     stats = {
         "total_qs": len(by_question),
@@ -687,28 +732,30 @@ def phase3_build(
 
         stats["dpo_qs"] += 1
         question = chosen_pool[0].get("question") or rejected_pool[0].get("question")
-        prompt = build_prompt(question)
+        prompt = build_prompt_messages(question)
 
         has_orig_good = any(not t["trajectory_id"].endswith("_regen") for t in chosen_pool)
         if not has_orig_good:
             stats["new_dpo_qs"] += 1
 
-        for cho in chosen_pool:
-            cho_text = build_trajectory_text(cho.get("steps", []))
-            for rej in rejected_pool:
-                rej_text = build_trajectory_text(rej.get("steps", []))
-                is_regen_chosen = cho["trajectory_id"].endswith("_regen")
-                pairs.append({
-                    "prompt": prompt,
-                    "chosen": cho_text,
-                    "rejected": rej_text,
-                    "question_id": qid,
-                    "chosen_trajectory_id": cho["trajectory_id"],
-                    "rejected_trajectory_id": rej["trajectory_id"],
-                    "regen_chosen": is_regen_chosen,
-                })
-                if is_regen_chosen:
-                    stats["regen_chosen_pairs"] += 1
+        # Best-vs-All: pick the best chosen (highest critic_min)
+        best_cho = max(chosen_pool, key=lambda t: t.get("critic_min", 0.0))
+        cho_msgs = build_response_messages(best_cho.get("steps", []))
+        is_regen_chosen = best_cho["trajectory_id"].endswith("_regen")
+
+        for rej in rejected_pool:
+            rej_msgs = build_response_messages(rej.get("steps", []))
+            pairs.append({
+                "prompt": prompt,
+                "chosen": cho_msgs,
+                "rejected": rej_msgs,
+                "question_id": qid,
+                "chosen_trajectory_id": best_cho["trajectory_id"],
+                "rejected_trajectory_id": rej["trajectory_id"],
+                "regen_chosen": is_regen_chosen,
+            })
+            if is_regen_chosen:
+                stats["regen_chosen_pairs"] += 1
 
     stats["total_pairs"] = len(pairs)
 
@@ -716,7 +763,7 @@ def phase3_build(
     print(f"    Total questions:               {stats['total_qs']:,}")
     print(f"    DPO-pairable questions:        {stats['dpo_qs']:,}")
     print(f"    New pairs from regen:          {stats['new_dpo_qs']:,} questions newly added")
-    print(f"    Total all-vs-all pairs:        {stats['total_pairs']:,}")
+    print(f"    Total best-vs-all pairs:       {stats['total_pairs']:,}")
     print(f"    Pairs with regen chosen:       {stats['regen_chosen_pairs']:,}")
     print(f"    Pairs with original chosen:    {stats['total_pairs'] - stats['regen_chosen_pairs']:,}")
 

@@ -106,6 +106,10 @@ def parse_args():
 def main():
     args = parse_args()
 
+    # Resolve relative model path to absolute (prevents HF Hub lookup)
+    if os.path.exists(args.model_name):
+        args.model_name = os.path.abspath(args.model_name)
+
     if not args.dpo_dataset.exists():
         print(f"Error: Dataset not found: {args.dpo_dataset}")
         sys.exit(1)

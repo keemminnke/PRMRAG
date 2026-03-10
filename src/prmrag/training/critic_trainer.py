@@ -584,7 +584,6 @@ class CriticTrainer:
         print(f"\nLoading model: {self.config.model_name}")
         self.model = AutoModelForCausalLM.from_pretrained(
             self.config.model_name,
-            device_map="auto",
             torch_dtype=torch.bfloat16 if self.config.bf16 else torch.float16,
             trust_remote_code=True,
             attn_implementation="flash_attention_2" # Highly recommended for GH200

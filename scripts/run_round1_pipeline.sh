@@ -167,11 +167,17 @@ else
     cat "$HOTPOTQA_TRAJS_V1" "$MUSIQUE_TRAJS_V1" "$NEW_TRAJECTORIES" > "$MERGED_TRAJS"
     echo "  Merged: $(wc -l < "$MERGED_TRAJS") trajectories"
 
-    python scripts/evaluate_with_critic.py \
+    python scripts/compare_voting_methods.py \
         --trajectories "$MERGED_TRAJS" \
         --critic-model "${CRITIC_MODEL}/final_model" \
-        --base-model "$CRITIC_BASE" \
-        --output "$SCORED_ALL"
+        --critic-base "$CRITIC_BASE" \
+        --skip-versaprm \
+        --gpu-memory 0.90 \
+        --output outputs/critic_v9_voting_results.json
+
+    # compare_voting_methods.py outputs JSONL to {output}.replace('.json','_per_trajectory.jsonl')
+    mv outputs/critic_v9_voting_results_per_trajectory.jsonl "$SCORED_ALL"
+    echo "  Renamed → $SCORED_ALL"
 
     touch "$STEP5_DONE"
     echo "[Step 5/9] 완료: $(wc -l < "$SCORED_ALL") trajectories → $SCORED_ALL"
@@ -185,26 +191,21 @@ STEP6_DONE="${DPO_DATASET}.done"
 if [ -f "$STEP6_DONE" ]; then
     echo "[Step 6/9] Regen + 데이터 구축 — SKIP (이미 완료)"
 else
-    echo "[Step 6/9] Regeneration + DPO/SFT 데이터 구축..."
-    echo "  예상 시간: 3-4시간"
+    echo "[Step 6/9] DPO 데이터 구축 (Best-vs-All, build-only)..."
 
-    # 통합 파일을 --hotpotqa로 전달, --musique는 사용 안함
+    # Regen + scoring은 이미 완료 → --build-only로 Phase 3만 실행
     python scripts/build_dpo_dataset.py \
         --hotpotqa "$SCORED_ALL" \
         --musique /dev/null \
         --regen-out "$REGEN_TRAJS" \
         --scored-out "$SCORED_WITH_REGEN" \
         --dpo-out "$DPO_DATASET" \
-        --policy-model "$BASE_MODEL" \
-        --critic-model "${CRITIC_MODEL}/final_model" \
         --critic-base "$CRITIC_BASE" \
-        --policy-gpu 0.45 \
-        --critic-gpu 0.45
+        --build-only
 
     touch "$STEP6_DONE"
     echo "[Step 6/9] 완료:"
     echo "  DPO pairs: $(wc -l < "$DPO_DATASET")"
-    echo "  Scored+Regen: $(wc -l < "$SCORED_WITH_REGEN")"
 fi
 echo ""
 
@@ -218,15 +219,75 @@ else
     echo "[Step 7/9] SFT 학습 (Qwen base, 3,000q)..."
     echo "  예상 시간: 2-3시간"
 
+    # 원본 scored + regen scored 합쳐서 SFT 입력 생성
+    SFT_INPUT="outputs/all_3000q_sft_input.jsonl"
+    cat "$SCORED_ALL" "$SCORED_WITH_REGEN" > "$SFT_INPUT"
+    echo "  SFT input: $(wc -l < "$SFT_INPUT") trajectories (original + regen)"
+
     torchrun --nproc_per_node=2 scripts/train_sft_policy.py \
-        --input "$SCORED_WITH_REGEN" \
+        --input "$SFT_INPUT" \
         --model-name "$BASE_MODEL" \
         --output-dir "$SFT_OUTPUT" \
         --num-epochs 1 \
         --wandb-run-name sft_v2_3000q
 
     touch "$STEP7_DONE"
-    echo "[Step 7/9] 완료: ${SFT_OUTPUT}/merged_model"
+    echo "[Step 7/9] 완료: ${SFT_OUTPUT}/final_model"
+fi
+
+# Merge SFT LoRA into base model (if not done yet)
+SFT_MERGED="${SFT_OUTPUT}/merged_model"
+if [ -d "$SFT_MERGED" ]; then
+    echo "[Step 7.5] SFT LoRA merge — SKIP (이미 완료)"
+else
+    echo "[Step 7.5] SFT LoRA → merged_model 생성..."
+    python -c "
+from peft import PeftModel
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch, os
+
+base = '$BASE_MODEL'
+lora = '${SFT_OUTPUT}/final_model'
+out = '$SFT_MERGED'
+cache = os.environ.get('HF_HOME', '')
+
+print(f'Loading base: {base}')
+model = AutoModelForCausalLM.from_pretrained(base, torch_dtype=torch.bfloat16, cache_dir=cache, trust_remote_code=True)
+print(f'Loading LoRA: {lora}')
+model = PeftModel.from_pretrained(model, lora)
+print('Merging...')
+model = model.merge_and_unload()
+print(f'Saving to: {out}')
+model.save_pretrained(out)
+tokenizer = AutoTokenizer.from_pretrained(lora, trust_remote_code=True, cache_dir=cache)
+tokenizer.save_pretrained(out)
+print('Done!')
+"
+    echo "[Step 7.5] 완료: $SFT_MERGED"
+fi
+echo ""
+
+# ---------------------------------------------------------------
+# [Step 7.6] SFT-only 평가
+# ---------------------------------------------------------------
+SFT_EVAL_TAG="sft_v2_3000q"
+SFT_EVAL_DONE="outputs/flashrag_${SFT_EVAL_TAG}/.done"
+if [ -f "$SFT_EVAL_DONE" ]; then
+    echo "[Step 7.6] SFT 평가 — SKIP (이미 완료)"
+else
+    echo "[Step 7.6] SFT-only FlashRAG 평가 (7,405q)..."
+    echo "  예상 시간: ~1시간"
+
+    python scripts/eval_flashrag.py \
+        --model "${SFT_OUTPUT}/merged_model" \
+        --tag "$SFT_EVAL_TAG" \
+        --top-k 3 \
+        --limit 7405 \
+        --temperature 0.8 \
+        --gpu-util 0.85
+
+    touch "$SFT_EVAL_DONE"
+    echo "[Step 7.6] 완료: outputs/flashrag_${SFT_EVAL_TAG}/"
 fi
 echo ""
 
@@ -256,7 +317,7 @@ echo ""
 # [Step 9/9] 평가
 # ---------------------------------------------------------------
 EVAL_TAG="dpo_v2_3000q_full"
-STEP9_DONE="outputs/eval/flashrag_${EVAL_TAG}/.done"
+STEP9_DONE="outputs/flashrag_${EVAL_TAG}/.done"
 if [ -f "$STEP9_DONE" ]; then
     echo "[Step 9/9] 평가 — SKIP (이미 완료)"
 else
@@ -273,7 +334,7 @@ else
         --gpu-util 0.85
 
     touch "$STEP9_DONE"
-    echo "[Step 9/9] 완료: outputs/eval/flashrag_${EVAL_TAG}/"
+    echo "[Step 9/9] 완료: outputs/flashrag_${EVAL_TAG}/"
 fi
 
 # ---------------------------------------------------------------

@@ -3,292 +3,250 @@
 ## 목표
 데이터를 점진적으로 추가하면서 성능 변화를 관찰하여 최적의 데이터 구성을 찾는다.
 
-## 현재 상태 (Baseline)
+---
 
-| 항목 | 값 |
-|------|-----|
-| 학습 데이터 | HotpotQA 1,000q + MusiQue 1,000q = **2,000q** |
-| Trajectory | 질문당 16개 path (총 32,000 trajectories) |
-| Critic model | `outputs/critic_model_v8_2000q` (2,000q로 학습) |
-| SFT data | all-GOOD trajectories 10,871개 |
-| DPO pairs | 13,467 pairs (1,543 questions, regen 126q 포함) |
-| **평가 결과** | DPO v1: EM 34.83%, F1 46.10%, Cover EM 57.46% |
-| **Base 대비** | EM +5.17%, F1 +5.27%, Cover EM +5.32% |
+## 주요 원칙
 
-### 현재 파일 경로 (정리 후)
+- **Policy base**: 항상 `Qwen/Qwen2.5-7B-Instruct` 사용
+- **Critic base**: `deepseek-ai/DeepSeek-R1-0528-Qwen3-8B` + LoRA
+- **System prompt 통일**: SFT / DPO / eval 모두 동일한 prompt 사용 (kto_trainer.py의 SYSTEM_PROMPT)
+- **SFT**: Qwen base 위에 LoRA 학습 → merge → DPO base로 사용
+- **DPO**: SFT merged model 위에 LoRA 학습, **messages format (list[dict])**, **Best-vs-All** pairing
+- **SFT 입력**: 원본 scored + regen scored 합친 전체 데이터 (all-GOOD만 학습)
+- **불량 trajectory 필터링**: final answer 없는 것, max_step(10) 도달하여 잘린 것은 제외
+- **GPU 2개 항상 사용** (vLLM TP=2 또는 DP=2, torchrun nproc=2)
+- **평가**: FlashRAG, temp=0.8, gpu_util=0.85, top_k=3, limit=7405
+- **Re-scoring**: `compare_voting_methods.py` 사용 (`evaluate_with_critic.py` 사용 금지 — 535시간)
 
-```
-# Trajectory 데이터 (judge label 포함)
-outputs/trajectories/hotpotqa_1000q_v1.jsonl   (1,000q × 16 = 15,728 trajs, SFT model 생성)
-outputs/trajectories/musique_1000q_v1.jsonl    (1,000q × 16 = 16,000 trajs, SFT model 생성)
+---
 
-# Critic model
-outputs/critic_model_v8_2000q/
+## 실험 결과 요약
 
-# DPO 학습 데이터
-outputs/training_data/dpo_dataset_v1_bva_messages.jsonl  (13,467 pairs)
-outputs/training_data/dpo_regen_scored.jsonl              (regen 데이터)
+| # | Model | EM | F1 | 데이터 | 비고 |
+|---|-------|-----|-----|--------|------|
+| 0 | Qwen Base | 29.7% | 40.8% | - | 기준선 |
+| 0.5 | DPO only (SFT 없이) | 29.5% | 41.2% | 2,000q | 효과 없음 |
+| 1 | SFT v1 | 34.9% | 46.0% | 2,000q | SFT만 |
+| 2 | SFT v1 + DPO v1 (ep3) | 34.8% | 46.1% | 2,000q | DPO 효과 없음 |
+| 3 | SFT v2 | 34.5% | 45.7% | 3,000q | 데이터 늘려도 개선 없음 |
+| 4 | SFT v2 + DPO v2 (ep3) | 34.4% | 45.9% | 3,000q | DPO 과적합 (acc 82.8%) |
+| 5 | SFT v2 + DPO v2 (ep1, prompt 불일치) | - | - | 3,000q | 중단 |
+| 6 | SFT v2 + DPO v2 (ep1, prompt 통일) | 34.2% | 45.5% | 3,000q | DPO 효과 없음 |
 
-# Policy models
-outputs/sft_policy_v1/merged_model      (SFT LoRA merged)
-outputs/dpo_policy_v1/final_model       (DPO LoRA on SFT)
-
-# Raw questions
-data/raw/questions/hotpotqa_train.jsonl      (90,447q)  ← 1,000q 사용됨
-data/raw/questions/musique_train.jsonl       (19,938q)  ← 1,000q 사용됨
-
-# 평가 결과
-outputs/eval/flashrag_dpo_bva_full/     (DPO v1 full eval)
-outputs/eval/flashrag_qwen_base_full/   (Base full eval)
-outputs/eval/flashrag_full_comparison.json
-```
+### 핵심 관찰
+- **SFT만으로 base 대비 +5%p EM 개선** (v1, v2 모두)
+- **DPO는 어떤 설정에서도 추가 효과 없음** (ep1/ep3, prompt 통일/불일치 무관)
+- **데이터 2,000q → 3,000q 확장해도 성능 정체**
+- **System prompt 불일치**: Round 1에서 SFT/DPO/eval 각각 다른 prompt 사용 → Round 2+3에서 통일
 
 ---
 
 ## 실험 계획
 
-### Round 1: HotpotQA +1,000q (2,000q → 3,000q)
+### Round 1: HotpotQA +1,000q (2,000q → 3,000q) — ✅ 완료
 
-기존 2,000q에 HotpotQA 1,000q를 추가. 동일 도메인 데이터 증가 효과 확인.
+기존 2,000q에 HotpotQA 1,000q를 추가.
 
-### Round 2: MusiQue +1,000q (3,000q → 4,000q)
+### Round 2+3: 데이터 한번에 생성, 학습만 다르게 실험 — 진행 중
 
-다른 도메인 데이터 추가 효과 확인.
+- **Round 2**: MusiQue +1,000q (3,000q → 4,000q)
+- **Round 3**: 2WikiMultihopQA +1,000q (4,000q → 5,000q)
 
-### Round 3: 2WikiMultihopQA +1,000q (4,000q → 5,000q)
+**데이터 생성**: `scripts/run_round2_3_data.sh`
+**학습 실험**: `scripts/run_training_experiments.sh`
 
-새로운 도메인 데이터 추가. (데이터 준비 필요)
+#### 데이터 생성 파이프라인 (한번에)
+```
+Step 1: 질문 샘플링 (MusiQue 1,000q + 2Wiki 1,000q)
+Step 2: Trajectory 생성 (각 1,000q × 16)
+Step 3: QwQ-32B Judge Labeling
+Step 4: Critic 재학습 (5,000q 전체)
+Step 5: 전체 Re-scoring (5,000q, vLLM batch)
+Step 5.5: 불량 trajectory 필터링 (no answer, max_step>=10)
+Step 6: Regeneration + DPO 데이터 구축
+Step 6.5: SFT 입력 준비 (4,000q / 5,000q)
+Step 6.6: 4,000q DPO 데이터 (2Wiki 제외)
+```
+
+#### 학습 실험 (데이터 고정)
+| Exp | 설정 | 데이터 | DPO | 목적 |
+|-----|------|--------|-----|------|
+| 7 | SFT only | 4,000q | - | 데이터 스케일링 |
+| 8 | SFT only | 5,000q | - | 데이터 스케일링 |
+| 9 | SFT + DPO ep1 | 5,000q | 1 | DPO + prompt 통일 |
+| 10 | SFT + DPO ep3 | 5,000q | 3 | DPO epoch 비교 |
+| 11 | SFT + DPO ep1 | 4,000q | 1 | 데이터 × DPO 조합 |
 
 ---
 
-## Round 1 상세 파이프라인
+## 파이프라인 아키텍처
 
-### Step 1. 새 질문 1,000개 샘플링
-
-기존 HotpotQA 1,000q와 **겹치지 않는** 새 1,000q를 `hotpotqa_train.jsonl`에서 추출.
-
-```bash
-python scripts/sample_new_questions.py \
-    --source data/raw/questions/hotpotqa_train.jsonl \
-    --existing outputs/trajectories/hotpotqa_1000q_v1.jsonl \
-    --output data/raw/questions/hotpotqa_train_round2.jsonl \
-    --num 1000 \
-    --seed 42
+```
+Step 1: 질문 샘플링
+Step 2: Trajectory 생성 (Qwen base, BGE+Reranker, 16 paths)
+Step 3: QwQ-32B Judge Labeling (critic 학습용 ground truth)
+Step 4: Critic Model 재학습 (기존 + 새 judge labels)
+Step 5: 전체 Re-scoring (vLLM batch, compare_voting_methods.py)
+Step 5.5: 불량 trajectory 필터링
+Step 6: Regeneration + DPO 데이터 구축 (Best-vs-All)
+Step 7: SFT 학습 + LoRA merge
+Step 8: DPO 학습 (SFT merged model 위에)
+Step 9: FlashRAG 평가
 ```
 
-**출력**: `data/raw/questions/hotpotqa_train_round2.jsonl` (1,000q)
+- 각 Step마다 `.done` 마커 파일로 체크포인트
+- 중간에 중단되어도 완료된 Step은 SKIP하고 재개
 
-### Step 2. Trajectory 생성 (16 paths per question)
-
-**Qwen2.5-7B-Instruct** base model로 16개 trajectory 생성. **BGE-M3 + Reranker** 사용.
-(SFT 모델 아님 — Qwen base에서 직접 생성)
+### 자동화 스크립트
 
 ```bash
-python scripts/generate_trajectories.py \
-    --data_path data/raw/questions/hotpotqa_train_round2.jsonl \
-    --output_path outputs/hotpotqa_round2_trajectories.jsonl \
-    --num_samples 16 \
-    --retriever bge \
-    --batch_size 500 \
-    --policy-model Qwen/Qwen2.5-7B-Instruct \
-    --gpu-memory-utilization 0.85 \
-    --gpu-num 2
+# Round 1 (완료)
+nohup bash scripts/run_round1_pipeline.sh > logs/round1_pipeline.log 2>&1 &
+
+# Round 2+3 데이터 생성
+nohup bash scripts/run_round2_3_data.sh > logs/round2_3_data.log 2>&1 &
+
+# 학습 실험 (개별 또는 전체)
+bash scripts/run_training_experiments.sh exp7
+bash scripts/run_training_experiments.sh all
 ```
-
-**출력**: `outputs/hotpotqa_round2_trajectories.jsonl` (~16,000 trajs)
-**예상 시간**: ~4-6시간
-
-### Step 3. QwQ-32B Judge Labeling
-
-**QwQ-32B** 모델로 새 trajectories의 각 step에 대해 **judge_label (GOOD/BAD)** + **judge_reasoning** 생성.
-이것이 critic model 학습의 **ground truth** 데이터가 된다.
-
-```bash
-python scripts/judge_label_qwq.py \
-    --input outputs/hotpotqa_round2_trajectories.jsonl \
-    --output outputs/hotpotqa_round2_judge_labeled.jsonl \
-    --batch-size 500 \
-    --gpu-num 2 \
-    --resume
-```
-
-**출력**: `outputs/hotpotqa_round2_judge_labeled.jsonl`
-- 각 trajectory의 각 step에 `judge_label` (GOOD/BAD) + `judge_reasoning` 포함
-- QwQ-32B가 step의 reasoning 품질, 검색 쿼리 적절성, 답변 정확성 등을 평가
-
-**예상 시간**: ~6-8시간 (QwQ-32B은 32B 모델이라 느림)
-
-### Step 4. Critic Model 재학습 (3,000q)
-
-기존 2,000q judge 데이터 + 새 1,000q judge 데이터 = **3,000q**로 critic 재학습.
-Critic model은 QwQ-32B의 judge 판단을 distill하여 빠르게 step-level 평가하는 경량 모델.
-
-**학습 데이터 구성:**
-- `outputs/training_data/judge_labels_2000q_v1.jsonl` — 기존 2,000q (HotpotQA 1,000q + MusiQue 1,000q, 31,728 trajs, judge_label+judge_reasoning 포함)
-- `outputs/hotpotqa_round2_judge_labeled.jsonl` — **새로운** HotpotQA 1,000q (Step 3에서 QwQ-32B로 라벨링)
-
-```bash
-torchrun --nproc_per_node=2 scripts/train_critic_model.py \
-    --train-data outputs/training_data/judge_labels_2000q_v1.jsonl \
-    --train-data outputs/hotpotqa_round2_judge_labeled.jsonl \
-    --output-dir outputs/critic_model_v9_3000q \
-    --model-name Qwen/Qwen2.5-7B-Instruct \
-    --num-epochs 1
-```
-
-**출력**: `outputs/critic_model_v9_3000q/`
-**예상 시간**: ~3-4시간
-
-### Step 5. 새 Critic으로 전체 Re-scoring → 통합 파일 생성
-
-재학습된 critic (v9)으로 전체 3,000q trajectories 재평가 → **하나의 통합 파일**로 출력.
-이후 Step 6~8 모두 이 통합 파일 하나만 사용.
-
-```bash
-python scripts/evaluate_with_critic.py \
-    --trajectories outputs/trajectories/hotpotqa_1000q_v1.jsonl \
-    --trajectories outputs/trajectories/musique_1000q_v1.jsonl \
-    --trajectories outputs/hotpotqa_round2_trajectories.jsonl \
-    --critic-model outputs/critic_model_v9_3000q \
-    --output outputs/all_3000q_critic_v9_scored.jsonl \
-    --gpu-num 2
-```
-
-**출력**: `outputs/all_3000q_critic_v9_scored.jsonl` (3,000q 전체 통합, critic step labels 포함)
-**예상 시간**: ~4-5시간
-
-### Step 6. Regeneration + DPO/SFT 데이터 구축
-
-통합 파일에서 all-GOOD trajectory 없는 질문 → Regenerate → DPO pairs + SFT 데이터 구축.
-
-```bash
-python scripts/build_dpo_dataset.py \
-    --input outputs/all_3000q_critic_v9_scored.jsonl \
-    --regen-out outputs/dpo_regen_v2_trajectories.jsonl \
-    --scored-out outputs/all_3000q_with_regen.jsonl \
-    --dpo-out outputs/dpo_dataset_v2_bva_messages.jsonl \
-    --policy-model Qwen/Qwen2.5-7B-Instruct \
-    --gpu-num 2
-```
-
-**출력**:
-- `outputs/all_3000q_with_regen.jsonl` — 통합 scored 데이터 (regen 포함)
-- `outputs/dpo_dataset_v2_bva_messages.jsonl` — DPO pairs (best-vs-all, ~20,000+ 예상)
-- SFT data: all-GOOD trajectories (~15,000+ 예상)
-**예상 시간**: ~3-4시간
-
-### Step 7. SFT 학습
-
-Qwen2.5-7B-Instruct 위에 SFT LoRA 학습.
-
-```bash
-torchrun --nproc_per_node=2 scripts/train_sft_policy.py \
-    --input outputs/all_3000q_with_regen.jsonl \
-    --model-name Qwen/Qwen2.5-7B-Instruct \
-    --output-dir outputs/sft_policy_v2 \
-    --epoch 1 \
-    --wandb-run-name sft_v2_3000q
-```
-
-**출력**: `outputs/sft_policy_v2/merged_model`
-**예상 시간**: ~2-3시간
-
-### Step 8. DPO 학습
-
-SFT v2 위에 DPO LoRA 학습.
-
-```bash
-torchrun --nproc_per_node=2 scripts/train_dpo_policy.py \
-    --dpo-dataset outputs/dpo_dataset_v2_bva_messages.jsonl \
-    --model-name outputs/sft_policy_v2/merged_model \
-    --output-dir outputs/dpo_policy_v2 \
-    --wandb-run-name dpo_v2_3000q \
-    --epoch 3
-```
-
-**출력**: `outputs/dpo_policy_v2/final_model`
-**예상 시간**: ~13시간
-
-### Step 9. 평가
-
-FlashRAG로 HotpotQA 전체 7,405q 평가. Base / DPO v1 / DPO v2 비교.
-
-```bash
-python scripts/eval_flashrag.py \
-    --model outputs/sft_policy_v2/merged_model \
-    --lora outputs/dpo_policy_v2/final_model \
-    --tag dpo_v2_3000q_full \
-    --top-k 3 --limit 7405 --temperature 0.8
-```
-
-**출력**: `outputs/eval/flashrag_dpo_v2_3000q_full/`
 
 ---
 
-## 예상 소요 시간
+## Round 2+3 예상 시간
 
-| Step | 작업 | 예상 시간 |
-|------|------|----------|
-| 1 | 질문 샘플링 | ~1분 |
-| 2 | Trajectory 생성 (1,000q × 16, GPU×2) | 4-6시간 |
-| 3 | QwQ-32B Judge Labeling (GPU×2) | 6-8시간 |
-| 4 | Critic 재학습 (3,000q, GPU×2) | 3-4시간 |
-| 5 | 전체 Re-scoring → 통합 파일 (GPU×2) | 4-5시간 |
-| 6 | Regen + 데이터 구축 (GPU×2) | 3-4시간 |
-| 7 | SFT 학습 (GPU×2) | 2-3시간 |
-| 8 | DPO 학습 (GPU×2) | ~13시간 |
-| 9 | 평가 (GPU×2) | ~1시간 |
-| **Total** | | **~36-44시간** |
-
----
-
-## 기대 결과
-
-| Model | EM | F1 | Cover EM |
-|-------|---:|---:|--------:|
-| Qwen Base | 29.66% | 40.83% | 52.14% |
-| DPO v1 (2,000q) | 34.83% | 46.10% | 57.46% |
-| **DPO v2 (3,000q)** | **?** | **?** | **?** |
-
-핵심 가설:
-1. 동일 도메인(HotpotQA) 데이터 증가 → critic 품질 향상 → 더 좋은 SFT/DPO 데이터
-2. Regeneration 대상 질문 증가 → chosen pool 확대 → DPO pair 수 증가
-3. SFT를 Qwen base 위에서 제대로 학습 → DPO도 SFT 위에서 학습 → on-policy 효과
+| Step | 작업 | 시간 |
+|------|------|------|
+| 1 | 질문 샘플링 (2,000q) | ~1분 |
+| 2 | Trajectory 생성 (2,000q × 16) | ~8시간 |
+| 3 | QwQ-32B Judge Labeling (2,000q) | ~20시간 |
+| 4 | Critic 재학습 (5,000q) | ~5시간 |
+| 5 | 전체 Re-scoring (5,000q, ~80K trajs) | ~8시간 |
+| 5.5 | 불량 trajectory 필터링 | ~1분 |
+| 6 | Regen + DPO 데이터 구축 | ~6시간 |
+| **Total (데이터)** | | **~47시간** |
+| 7~9 | 학습 + 평가 (per experiment) | ~6시간 |
 
 ---
 
-## 주요 원칙
+## 데이터 통계
 
-- **SFT는 반드시 `Qwen/Qwen2.5-7B-Instruct` 위에 학습** (잘못된 SFT 모델 사용 금지)
-- **DPO는 반드시 SFT merged model 위에 학습** (on-policy 보장)
-- **GPU 2개 항상 사용** (vLLM TP=2, DDP nproc=2)
-- **평가: temp=0.8, gpu_util=0.85, e5-base, top_k=3**
-- **겹치지 않는 질문 사용** (question ID 기반 dedup)
+| 항목 | v1 (2,000q) | v2 (3,000q) | v3 (4,000q) | v4 (5,000q) |
+|------|-------------|-------------|-------------|-------------|
+| 질문 구성 | HotpotQA 1K + MusiQue 1K | + HotpotQA 1K | + MusiQue 1K | + 2Wiki 1K |
+| 원본 trajectories | 31,728 | 47,728 | ~63,728 | ~79,728 |
+| DPO pairs (Best-vs-All) | 13,467 | 19,209 | ? | ? |
 
 ---
 
-## 파일 네이밍 규칙
+## 파일 경로 정리
+
+### 공통 데이터
 
 ```
-Round 1 (3,000q):
-  data/raw/questions/hotpotqa_train_round2.jsonl
-  outputs/hotpotqa_round2_trajectories.jsonl
-  outputs/hotpotqa_round2_critic_scored.jsonl
-  outputs/critic_model_v9_3000q/
-  outputs/sft_policy_v2/
-  outputs/dpo_policy_v2/
+# Raw questions
+data/raw/questions/hotpotqa_train.jsonl          (90,447q)
+data/raw/questions/musique_train.jsonl           (19,938q)
+data/raw/questions/2wikimultihop_train.jsonl     (167,454q)
 
-Round 2 (4,000q):
-  data/raw/questions/musique_train_round2.jsonl
-  outputs/musique_round2_trajectories.jsonl
-  outputs/critic_model_v10_4000q/
-  outputs/sft_policy_v3/
-  outputs/dpo_policy_v3/
+# Baseline trajectories (judge label 포함)
+outputs/trajectories/hotpotqa_1000q_v1.jsonl     (15,728 trajs)
+outputs/trajectories/musique_1000q_v1.jsonl      (16,000 trajs)
 
-Round 3 (5,000q):
-  data/raw/questions/2wikimultihop_train.jsonl
-  outputs/2wiki_round1_trajectories.jsonl
-  outputs/critic_model_v11_5000q/
-  outputs/sft_policy_v4/
-  outputs/dpo_policy_v4/
+# Baseline judge labels (critic 학습용)
+outputs/training_data/judge_labels_2000q_v1.jsonl  (31,728 trajs)
+
+# HF cache
+/home/work/.conda/storage/MINKEON_KIM/external_cache/huggingface
+
+# Retriever
+data/embeddings/kilt_wikipedia_bge_m3.npy        (12GB)
+data/indexes/kilt_wikipedia_bge_m3.faiss         (23GB)
+data/kilt/kilt_knowledgesource_parsed.pkl        (5.9M docs)
 ```
+
+### Round 1 (3,000q) — 완료
+
+```
+data/raw/questions/hotpotqa_train_round2.jsonl   (1,000q)
+outputs/hotpotqa_round2_trajectories.jsonl       (16,000 trajs)
+outputs/hotpotqa_round2_judge_labeled.jsonl      (16,000 trajs)
+outputs/training_data/judge_labels_3000q_merged.jsonl  (47,728 trajs)
+outputs/critic_model_v9_3000q/final_model
+outputs/all_3000q_critic_v9_scored.jsonl         (47,728 trajs)
+outputs/dpo_dataset_v2_bva_messages.jsonl        (19,209 pairs)
+outputs/dpo_dataset_v2_bva_matched.jsonl         (19,209 pairs, prompt 통일)
+outputs/sft_policy_v2/merged_model
+outputs/dpo_policy_v2/final_model                (DPO ep3)
+outputs/dpo_policy_v2_ep1/final_model            (DPO ep1, prompt 통일)
+```
+
+### Round 2 (4,000q) — 진행 중
+
+```
+data/raw/questions/musique_train_round2.jsonl    (1,000q)
+outputs/musique_round2_trajectories.jsonl
+outputs/musique_round2_judge_labeled.jsonl
+outputs/all_4000q_critic_scored.jsonl
+outputs/all_4000q_sft_input.jsonl
+outputs/dpo_dataset_v3_4000q_bva.jsonl
+outputs/sft_policy_v3_4000q/
+outputs/dpo_policy_v3_4000q_ep1/
+```
+
+### Round 3 (5,000q) — 진행 중
+
+```
+data/raw/questions/2wikimultihop_train_round1.jsonl  (1,000q)
+outputs/2wiki_round1_trajectories.jsonl
+outputs/2wiki_round1_judge_labeled.jsonl
+outputs/training_data/judge_labels_5000q_merged.jsonl
+outputs/critic_model_v11_5000q/
+outputs/all_5000q_merged_trajectories.jsonl
+outputs/all_5000q_critic_v11_scored.jsonl
+outputs/dpo_regen_v4_trajectories.jsonl
+outputs/all_5000q_with_regen.jsonl
+outputs/dpo_dataset_v4_5000q_bva.jsonl
+outputs/all_5000q_sft_input.jsonl
+outputs/sft_policy_v4_5000q/
+outputs/dpo_policy_v4_5000q_ep1/
+```
+
+---
+
+## 삽질 기록 (Lessons Learned)
+
+### System Prompt 불일치 (중요!)
+- Round 1에서 SFT/DPO/eval 각각 다른 system prompt 사용 → DPO 효과 측정 불가
+- SFT: `"You are an advanced AI agent capable of Adaptive RAG..."` (kto_trainer.py)
+- DPO: `"You are a helpful assistant..."` (build_dpo_dataset.py) ← **수정 완료**
+- eval: `"You are a multi-step reasoning assistant..."` (eval_flashrag.py) ← **수정 완료**
+- **Round 2+3부터 전부 kto_trainer.py의 SYSTEM_PROMPT로 통일**
+
+### 스크립트 인자
+- `generate_trajectories.py`: underscore args (`--policy_model`), `--limit` 기본값 500
+- `train_critic_model.py`: `--train-data`는 **단일 파일만** → `cat`으로 합치기
+- `train_dpo_policy.py`: 상대 경로 → `os.path.abspath()` 추가됨
+- `build_dpo_dataset.py`: `--hotpotqa`/`--musique` args, 사용 안 하는 쪽은 `/dev/null`
+- `sample_new_questions.py`: `--existing` 필수 — 기존 데이터 없으면 Python 직접 샘플링
+
+### 학습
+- `device_map='auto'`는 torchrun DDP와 호환 안 됨 → 제거
+- SFT 출력은 `final_model` (LoRA) → merge 별도 필요
+- DPO 데이터: **messages format (list[dict])** 필수 — text format은 tokenization mismatch
+- DPO epoch 3 → rewards accuracy 82.8%, 과적합 → epoch 1 권장
+- DPO 어떤 설정에서도 SFT 이상 성능 개선 없음 (현재까지)
+
+### Re-scoring
+- `evaluate_with_critic.py`: 535시간 → **사용 금지**
+- `compare_voting_methods.py`: vLLM batch, ~5시간 → 이것 사용
+
+### 데이터 흐름
+- `scored_out`: **regen scored만** 저장 (원본 미포함)
+- SFT 입력: 반드시 `$SCORED_ALL` + `$SCORED_WITH_REGEN` cat
+- eval_flashrag.py 출력: `outputs/flashrag_{tag}/` (NOT `outputs/eval/`)
+
+### vLLM 프로세스
+- 메인 프로세스 kill 후에도 EngineCore/Worker 남을 수 있음
+- `pkill -f "vllm"` 또는 `/proc/*/fd/*`에서 nvidia device 검색
+
