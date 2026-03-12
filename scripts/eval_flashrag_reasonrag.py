@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
-"""Evaluate policy model using FlashRAG SearchR1Pipeline.
+"""Evaluate ReasonRAG model using FlashRAG SearchR1Pipeline.
+
+Uses ReasonRAG's tokens: <query>, <reference>, <answer>
+and their BEGIN_REASONING system prompt.
 
 Usage:
-    # DPO model
-    python scripts/eval_flashrag.py \
-        --model outputs/sft_policy_v1/merged_model \
-        --lora outputs/dpo_policy_v1/final_model \
-        --tag dpo_bva
-
-    # Qwen base
-    python scripts/eval_flashrag.py \
-        --model Qwen/Qwen2.5-7B-Instruct \
-        --tag qwen_base
+    python scripts/eval_flashrag_reasonrag.py \
+        --model outputs/reasonrag_merged_model \
+        --tag reasonrag_t0 \
+        --temperature 0
 """
 
 import argparse
@@ -30,14 +27,29 @@ from flashrag.pipeline import SearchR1Pipeline
 from flashrag.prompt import PromptTemplate
 
 
-SYSTEM_PROMPT = """You are a helpful assistant who is good at answering questions with multi-turn search engine calling. To answer questions, you must first reason through the available information using <think> and </think>. If you identify missing knowledge, you may issue a search request using <search> query </search> at any time. The retrieval system will provide you with relevant documents enclosed in <documents> and </documents>. You can search as many times as you want. Once you have sufficient information or if you find no further external knowledge is needed, directly provide your final answer. Ensure your answer is concise, using nouns or short phrases whenever possible. Conclude with: "So the answer is <answer>answer</answer>"."""
+# ReasonRAG BEGIN_REASONING system prompt (from their paper/code)
+SYSTEM_PROMPT = """You are an assistant for question answering with access to a retrieval tool. Upon receiving a question, your task is to:
+
+* Analyze and Decompose the Question: Break the question into smaller, manageable sub-questions to ensure all aspects are addressed.
+
+* Evaluate Your Knowledge: Assess each sub-question or component:
+  - Identify parts you can confidently answer based on your existing knowledge.
+  - Pinpoint parts that require additional information or verification through retrieval tools.
+
+* Conciseness: Ensure both queries and answers are concise, using nouns or short phrases whenever possible.
+
+* Respond Format:
+  If your knowledge is sufficient to answer the question, conclude with:
+  "So the answer is <answer>answer</answer>"
+  If retrieval is necessary to provide a complete answer, conclude with:
+  "So the next query is <query>query</query>\""""
 
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--model", type=str, default="Qwen/Qwen2.5-7B-Instruct")
+    p.add_argument("--model", type=str, default="outputs/reasonrag_merged_model")
     p.add_argument("--lora", type=str, default=None)
-    p.add_argument("--tag", type=str, default="eval")
+    p.add_argument("--tag", type=str, default="reasonrag")
 
     # Retriever
     p.add_argument("--index-path", type=str,
@@ -52,7 +64,7 @@ def parse_args():
     p.add_argument("--limit", type=int, default=None)
 
     # Generation
-    p.add_argument("--temperature", type=float, default=0.8)
+    p.add_argument("--temperature", type=float, default=0.0)
     p.add_argument("--max-tokens", type=int, default=4096)
     p.add_argument("--max-retrieval", type=int, default=10)
 
@@ -62,10 +74,8 @@ def parse_args():
 
 
 def resolve_model_path(model_name: str) -> str:
-    """Resolve HuggingFace model ID to local snapshot path if needed."""
     if os.path.isdir(model_name) and os.path.exists(os.path.join(model_name, "config.json")):
         return model_name
-    # Try to resolve via huggingface_hub
     try:
         from huggingface_hub import snapshot_download
         local_path = snapshot_download(model_name, cache_dir=HF_CACHE)
@@ -78,7 +88,6 @@ def resolve_model_path(model_name: str) -> str:
 def main():
     args = parse_args()
 
-    # Resolve model path for FlashRAG (needs local config.json)
     model_path = resolve_model_path(args.model)
 
     output_dir = f"outputs/flashrag_{args.tag}"
@@ -131,18 +140,15 @@ def main():
         "gpu_id": "0,1",
     }
 
-    # LoRA
     if args.lora:
         config_dict["generator_lora_path"] = args.lora
 
     config = Config(config_dict=config_dict)
 
     print("=" * 70)
-    print("FlashRAG Evaluation")
+    print("FlashRAG Evaluation — ReasonRAG Model")
     print("=" * 70)
     print(f"Model:      {model_path}")
-    if args.lora:
-        print(f"LoRA:       {args.lora}")
     print(f"Retriever:  bge-base-en-v1.5 (top_k={args.top_k})")
     print(f"Dataset:    {args.dataset} ({args.limit} questions)")
     print(f"Temp:       {args.temperature}")
@@ -154,7 +160,7 @@ def main():
     test_data = all_split["test"]
     print(f"Loaded {len(test_data)} test questions")
 
-    # Pipeline — use our trained prompt template
+    # ReasonRAG uses <query>/<reference>/<answer> tokens
     prompt_template = PromptTemplate(
         config=config,
         system_prompt=SYSTEM_PROMPT,
@@ -165,10 +171,10 @@ def main():
         config=config,
         prompt_template=prompt_template,
         max_retrieval_num=args.max_retrieval,
-        begin_of_query_token="<search>",
-        end_of_query_token="</search>",
-        begin_of_documents_token="<documents>",
-        end_of_documents_token="</documents>",
+        begin_of_query_token="<query>",
+        end_of_query_token="</query>",
+        begin_of_documents_token="<reference>",
+        end_of_documents_token="</reference>",
         begin_of_answer_token="<answer>",
         end_of_answer_token="</answer>",
     )

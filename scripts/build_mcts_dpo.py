@@ -36,7 +36,7 @@ os.environ["HF_HOME"] = HF_CACHE
 os.environ["NUMEXPR_MAX_THREADS"] = "64"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-SYSTEM_PROMPT = """You are a helpful assistant who is good at answering questions with multi-turn search engine calling. To answer questions, you must first reason through the available information using <think> and </think>. If you identify missing knowledge, you may issue a search request using <search> query </search> at any time. The retrieval system will provide you with relevant documents enclosed in <documents> and </documents>. You can search as many times as you want. Once you have sufficient information or if you find no further external knowledge is needed, directly provide a concise final answer using <answer> and </answer> without detailed illustrations."""
+SYSTEM_PROMPT = """You are a helpful assistant who is good at answering questions with multi-turn search engine calling. To answer questions, you must first reason through the available information using <think> and </think>. If you identify missing knowledge, you may issue a search request using <search> query </search> at any time. The retrieval system will provide you with relevant documents enclosed in <documents> and </documents>. You can search as many times as you want. Once you have sufficient information or if you find no further external knowledge is needed, directly provide your final answer. Ensure your answer is concise, using nouns or short phrases whenever possible. Conclude with: "So the answer is <answer>answer</answer>"."""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -72,7 +72,7 @@ def compute_f1(prediction: str, ground_truth: str) -> float:
 class BGERetriever:
     """BGE retriever using transformers + FAISS. Encoder on GPU for speed (~420MB)."""
 
-    def __init__(self, model_path, index_path, corpus_path, top_k=3, device="cuda:0"):
+    def __init__(self, model_path, index_path, corpus_path, top_k=3, device="cuda:1"):
         import faiss
         import numpy as np
         import torch
@@ -90,8 +90,58 @@ class BGERetriever:
         ).to(device)
         self.model.eval()
 
+        # Load FAISS index — auto-build IVF for faster search if Flat index provided
         print(f"[Retriever] Loading FAISS index: {index_path}")
-        self.index = faiss.read_index(index_path)
+        ivf_path = index_path.replace(".index", "_IVF4096.index")
+        if os.path.exists(ivf_path):
+            print(f"  Using cached IVF index: {ivf_path}")
+            self.index = faiss.read_index(ivf_path)
+        elif "Flat" in index_path:
+            print(f"  Building IVF index from Flat for faster search...")
+            flat_index = faiss.read_index(index_path)
+            d = flat_index.d
+            ntotal = flat_index.ntotal
+            metric = flat_index.metric_type
+            print(f"  Flat index: {ntotal:,} vectors × {d} dim")
+
+            # Reconstruct all vectors
+            print(f"  Reconstructing vectors from Flat index...")
+            xb = flat_index.reconstruct_n(0, ntotal).astype("float32")
+
+            # Build IVF index (nlist=4096 → search probes ~3% of clusters)
+            nlist = 4096
+            if metric == faiss.METRIC_INNER_PRODUCT:
+                quantizer = faiss.IndexFlatIP(d)
+            else:
+                quantizer = faiss.IndexFlatL2(d)
+            ivf_index = faiss.IndexIVFFlat(quantizer, d, nlist, metric)
+
+            # Train on subset (fast)
+            train_size = min(200_000, ntotal)
+            print(f"  Training IVF (nlist={nlist}) on {train_size:,} vectors...")
+            ivf_index.train(xb[:train_size])
+
+            # Add all vectors
+            print(f"  Adding {ntotal:,} vectors to IVF index...")
+            batch = 500_000
+            for start in range(0, ntotal, batch):
+                end = min(start + batch, ntotal)
+                ivf_index.add(xb[start:end])
+                if end < ntotal:
+                    print(f"    {end:,}/{ntotal:,}")
+
+            # Save for future runs
+            print(f"  Saving IVF index → {ivf_path}")
+            faiss.write_index(ivf_index, ivf_path)
+            self.index = ivf_index
+            del flat_index, xb
+        else:
+            self.index = faiss.read_index(index_path)
+
+        # Set nprobe for IVF (128/4096 ≈ 3% → ~97% recall, ~30-50x faster than Flat)
+        if hasattr(self.index, "nprobe"):
+            self.index.nprobe = 128
+            print(f"  IVF nprobe: {self.index.nprobe}")
         print(f"  Index size: {self.index.ntotal:,} vectors")
 
         print(f"[Retriever] Loading corpus: {corpus_path}")
@@ -268,6 +318,17 @@ class MCTSTree:
             self.nodes[cur]["total_value"] += value
             cur = self.nodes[cur]["parent_id"]
 
+    def retroactive_update(self, nid, value_delta):
+        """Add value correction from node to root WITHOUT changing visit counts.
+
+        Used when critic scores arrive after temporary 0.0 backprop.
+        N stays the same, W += delta → Q = W/N gets corrected.
+        """
+        cur = nid
+        while cur is not None:
+            self.nodes[cur]["total_value"] += value_delta
+            cur = self.nodes[cur]["parent_id"]
+
     def get_path(self, nid):
         """Path from root to node (inclusive, root first)."""
         path = []
@@ -327,7 +388,7 @@ CRITIC_SYSTEM_PROMPT = (
 def build_critic_prompt(tree, node, tokenizer):
     """Build critic evaluation prompt for a single node (reusable)."""
     path = tree.get_path(node["id"])
-    input_parts = [f"Question: {tree.question}", ""]
+    input_parts = [f"Question: {tree.question}", f"Gold Answer: {tree.gold_answer}", ""]
 
     # Previous steps
     prev_ids = path[1:-1]  # exclude root and current
@@ -509,6 +570,8 @@ def run_mcts(questions, retriever, args):
     if start_rollout > 0:
         print(f"[MCTS] Resuming from rollout {start_rollout + 1}")
 
+    pending_nonterminal = []  # accumulated unscored nodes between critic rounds
+
     pbar = tqdm(range(start_rollout, args.max_rollouts), desc="MCTS rollouts",
                 unit="rollout", initial=start_rollout, total=args.max_rollouts)
     for rollout in pbar:
@@ -577,30 +640,39 @@ def run_mcts(questions, retriever, args):
             for (qid, nid), docs in zip(search_needed, docs_list):
                 trees[qid].nodes[nid]["documents"] = format_docs(docs)
 
-        # ── Inline Critic Scoring for non-terminal nodes ──
-        if new_nonterminal:
-            if critic_llm is not None:
-                c_prompts = []
-                for qid, nid in new_nonterminal:
-                    cp = build_critic_prompt(
-                        trees[qid], trees[qid].nodes[nid], critic_tokenizer
-                    )
-                    c_prompts.append(cp)
-                c_outputs = critic_llm.generate(
-                    c_prompts, critic_sampling, lora_request=lora_request
+        # ── Temporary backprop 0.0 for non-terminal (N 올리되 W=0) ──
+        for qid, nid in new_nonterminal:
+            trees[qid].backprop(nid, 0.0)
+        pending_nonterminal.extend(new_nonterminal)
+
+        # ── Periodic Critic Scoring → Retroactive Update ──
+        is_critic_round = (
+            critic_llm is not None
+            and pending_nonterminal
+            and ((rollout + 1) % args.critic_interval == 0
+                 or rollout == args.max_rollouts - 1)
+        )
+        if is_critic_round:
+            c_prompts = []
+            for qid, nid in pending_nonterminal:
+                cp = build_critic_prompt(
+                    trees[qid], trees[qid].nodes[nid], critic_tokenizer
                 )
-                for (qid, nid), cout in zip(new_nonterminal, c_outputs):
-                    score, feedback = parse_critic_output(cout.outputs[0].text)
-                    node = trees[qid].nodes[nid]
-                    node["critic_score"] = score
-                    node["critic_feedback"] = feedback
-                    # β^depth discount: 스케일을 terminal F1과 일치시킴
-                    discounted = float(score) * (args.beta ** node["depth"])
-                    trees[qid].backprop(nid, discounted)
-            else:
-                # No critic — fallback to 0.0 (degraded BFS mode)
-                for qid, nid in new_nonterminal:
-                    trees[qid].backprop(nid, 0.0)
+                c_prompts.append(cp)
+            c_outputs = critic_llm.generate(
+                c_prompts, critic_sampling, lora_request=lora_request
+            )
+            for (qid, nid), cout in zip(pending_nonterminal, c_outputs):
+                score, feedback = parse_critic_output(cout.outputs[0].text)
+                node = trees[qid].nodes[nid]
+                node["critic_score"] = score
+                node["critic_feedback"] = feedback
+                # Retroactive: N은 유지, W에 진짜 점수 보정 (0→discounted)
+                discounted = float(score) * (args.beta ** node["depth"])
+                trees[qid].retroactive_update(nid, discounted)
+            pbar.write(f"  [Critic] Scored {len(pending_nonterminal):,} nodes "
+                       f"(rollouts {rollout+2-args.critic_interval}-{rollout+1})")
+            pending_nonterminal = []
 
         # ── Progress ──
         total_nodes = sum(len(t.nodes) for t in trees.values())
@@ -787,6 +859,8 @@ def step_to_text(node):
         parts.append(f"<search>{node['search_query']}</search>")
     elif node["answer_text"]:
         parts.append(f"<answer>{node['answer_text']}</answer>")
+    if node.get("documents"):
+        parts.append(node["documents"].strip())
     return "\n".join(parts)
 
 
@@ -1065,6 +1139,8 @@ def parse_args():
                    help="Critic base model")
     p.add_argument("--critic-alpha", type=float, default=0.3,
                    help="Critic weight: combined = f1_reward + alpha * critic_score")
+    p.add_argument("--critic-interval", type=int, default=4,
+                   help="Score with critic every N rollouts (default: 4)")
 
     # Cache
     p.add_argument("--tree-cache", type=str, default="outputs/mcts_tree_cache.jsonl")

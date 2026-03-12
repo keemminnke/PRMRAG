@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train policy model with TRL official DPOTrainer.
+"""Train policy model with TRL official DPOTrainer + document masking.
 
 Usage:
     # Small test
@@ -8,19 +8,19 @@ Usage:
         --output-dir outputs/dpo_policy_test \
         --limit 50 --no-wandb
 
-    # Full training (best-vs-all)
+    # Full training (MCTS DPO with document masking)
     torchrun --nproc_per_node=2 scripts/train_dpo_policy.py \
-        --dpo-dataset outputs/dpo_dataset_bva.jsonl \
-        --model-name outputs/sft_policy_v1/merged_model \
-        --output-dir outputs/dpo_policy_v1 \
-        --wandb-run-name dpo_policy_bva
+        --dpo-dataset outputs/mcts_dpo_5000q.jsonl \
+        --model-name Qwen/Qwen2.5-7B-Instruct \
+        --output-dir outputs/dpo_policy_mcts_v1 \
+        --num-epochs 1 --wandb-run-name dpo_mcts_v1
 
-Key changes from custom trainer:
-  - Uses TRL DPOTrainer (official, verified loss computation)
+Key design:
+  - Uses TRL DPOTrainer with document masking
+  - <documents>...</documents> spans in completion are masked (label=-100)
+    because documents are retriever output, not model-generated
   - ref_model=None: TRL disables LoRA adapters for reference forward pass
-    (single model copy, memory efficient, correct DPO behavior)
   - peft_config passed to DPOTrainer (TRL handles LoRA application)
-  - No custom document masking (TRL computes loss on full completion)
 """
 
 import sys
@@ -46,6 +46,76 @@ except ImportError:
 
 HF_CACHE_DIR = "/home/work/.conda/storage/MINKEON_KIM/external_cache/huggingface"
 
+# Qwen2.5 token IDs for <documents> / </documents> boundary detection
+_OPEN_LT = 27      # '<'
+_CLOSE_LT = 522    # '</'
+_DOC_TOKEN = 50778  # 'documents'
+
+
+class DocMaskDPOTrainer(DPOTrainer):
+    """DPOTrainer that masks <documents>...</documents> in completion_mask.
+
+    Documents are retriever output (environment), not model-generated text.
+    Masking them prevents the policy from being trained to produce documents.
+    """
+
+    _mask_log_counter = 0
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        if "completion_mask" in inputs and "input_ids" in inputs:
+            before_active = inputs["completion_mask"].sum().item()
+            masked_count = self._mask_document_spans(inputs)
+            after_active = inputs["completion_mask"].sum().item()
+            DocMaskDPOTrainer._mask_log_counter += 1
+            if DocMaskDPOTrainer._mask_log_counter <= 3 or DocMaskDPOTrainer._mask_log_counter % 200 == 0:
+                print(f"[DocMask] step={DocMaskDPOTrainer._mask_log_counter} "
+                      f"before_active={before_active} after_active={after_active} "
+                      f"masked={masked_count} shape={inputs['input_ids'].shape}")
+        return super().compute_loss(
+            model, inputs,
+            return_outputs=return_outputs,
+            num_items_in_batch=num_items_in_batch,
+        )
+
+    @staticmethod
+    def _mask_document_spans(inputs):
+        """Zero out completion_mask for <documents>...</documents> spans."""
+        input_ids = inputs["input_ids"]
+        completion_mask = inputs["completion_mask"]
+        batch_size, seq_len = input_ids.shape
+        masked_total = 0
+
+        for i in range(batch_size):
+            ids = input_ids[i].tolist()
+            in_doc = False
+            j = 0
+            while j < seq_len:
+                # Detect <documents> start: token '<' (27) followed by 'documents' (50778)
+                if (not in_doc and j + 1 < seq_len
+                        and ids[j] == _OPEN_LT and ids[j + 1] == _DOC_TOKEN):
+                    in_doc = True
+
+                if in_doc:
+                    completion_mask[i, j] = 0
+                    masked_total += 1
+                    # Detect </documents> end: '</' (522) followed by 'documents' (50778)
+                    if (j + 1 < seq_len
+                            and ids[j] == _CLOSE_LT and ids[j + 1] == _DOC_TOKEN):
+                        # Mask '</documents>' tokens: </ + documents + >
+                        completion_mask[i, j] = 0
+                        if j + 1 < seq_len:
+                            completion_mask[i, j + 1] = 0
+                            masked_total += 1
+                        if j + 2 < seq_len:
+                            completion_mask[i, j + 2] = 0
+                            masked_total += 1
+                        j += 3
+                        in_doc = False
+                        continue
+                j += 1
+
+        return masked_total
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -62,11 +132,13 @@ def parse_args():
     parser.add_argument(
         "--model-name", type=str, default="Qwen/Qwen2.5-7B-Instruct",
         help="Base model to fine-tune",
+
     )
     parser.add_argument(
         "--output-dir", type=str, default="outputs/dpo_policy_v1",
         help="Output directory",
     )
+
 
     # DPO
     parser.add_argument("--beta", type=float, default=0.1, help="DPO beta temperature")
@@ -77,17 +149,17 @@ def parse_args():
     )
 
     # Training
-    parser.add_argument("--max-length", type=int, default=4096, help="Max full sequence length")
+    parser.add_argument("--max-length", type=int, default=8192, help="Max full sequence length")
     parser.add_argument("--num-epochs", type=int, default=3, help="Training epochs")
     parser.add_argument("--batch-size", type=int, default=1, help="Per-device batch size")
-    parser.add_argument("--gradient-accumulation", type=int, default=16, help="Gradient accumulation steps")
-    parser.add_argument("--learning-rate", type=float, default=5e-7, help="Learning rate")
+    parser.add_argument("--gradient-accumulation", type=int, default=8, help="Gradient accumulation steps")
+    parser.add_argument("--learning-rate", type=float, default=2e-5, help="Learning rate")
     parser.add_argument("--weight-decay", type=float, default=0.01, help="Weight decay")
     parser.add_argument("--warmup-ratio", type=float, default=0.1, help="Warmup ratio")
 
     # LoRA
-    parser.add_argument("--lora-r", type=int, default=16, help="LoRA rank")
-    parser.add_argument("--lora-alpha", type=int, default=32, help="LoRA alpha")
+    parser.add_argument("--lora-r", type=int, default=64, help="LoRA rank")
+    parser.add_argument("--lora-alpha", type=int, default=128, help="LoRA alpha")
     parser.add_argument("--lora-dropout", type=float, default=0.05, help="LoRA dropout")
 
     # Wandb
@@ -268,11 +340,12 @@ def main():
     )
 
     # =========================================================================
-    # 7. DPOTrainer
+    # 7. DPOTrainer with document masking
     #   ref_model=None: TRL uses adapter-disabled model as reference
     #   (no extra GPU memory for a separate ref model)
+    #   DocMaskDPOTrainer: masks <documents>...</documents> in loss
     # =========================================================================
-    trainer = DPOTrainer(
+    trainer = DocMaskDPOTrainer(
         model=model,
         ref_model=None,
         args=training_args,
@@ -311,7 +384,7 @@ def main():
 
         info = {
             "model_name": args.model_name,
-            "method": "dpo_trl_official",
+            "method": "dpo_trl_doc_masked",
             "beta": args.beta,
             "loss_type": args.loss_type,
             "dataset": str(args.dpo_dataset),
@@ -320,6 +393,7 @@ def main():
             "lora_alpha": args.lora_alpha,
             "max_length": args.max_length,
             "num_pairs": len(dataset),
+            "document_masking": True,
             "completed_at": datetime.now().isoformat(),
         }
         with open(Path(args.output_dir) / "training_info.json", "w") as f:

@@ -1,23 +1,15 @@
 #!/usr/bin/env python3
-"""Evaluate policy model using FlashRAG SearchR1Pipeline.
+"""Evaluate with FlashRAG SequentialPipeline (Standard RAG: single retrieve-and-read).
 
 Usage:
-    # DPO model
-    python scripts/eval_flashrag.py \
-        --model outputs/sft_policy_v1/merged_model \
-        --lora outputs/dpo_policy_v1/final_model \
-        --tag dpo_bva
-
-    # Qwen base
-    python scripts/eval_flashrag.py \
+    python scripts/eval_flashrag_standard.py \
         --model Qwen/Qwen2.5-7B-Instruct \
-        --tag qwen_base
+        --tag standard_base_t0 \
+        --temperature 0
 """
 
 import argparse
-import json
 import os
-import sys
 
 os.environ["NUMEXPR_MAX_THREADS"] = "64"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
@@ -25,19 +17,15 @@ HF_CACHE = "/home/work/.conda/storage/MINKEON_KIM/external_cache/huggingface"
 os.environ["HF_HOME"] = HF_CACHE
 
 from flashrag.config import Config
-from flashrag.utils import get_dataset, get_retriever, get_generator
-from flashrag.pipeline import SearchR1Pipeline
+from flashrag.utils import get_dataset
+from flashrag.pipeline import SequentialPipeline
 from flashrag.prompt import PromptTemplate
-
-
-SYSTEM_PROMPT = """You are a helpful assistant who is good at answering questions with multi-turn search engine calling. To answer questions, you must first reason through the available information using <think> and </think>. If you identify missing knowledge, you may issue a search request using <search> query </search> at any time. The retrieval system will provide you with relevant documents enclosed in <documents> and </documents>. You can search as many times as you want. Once you have sufficient information or if you find no further external knowledge is needed, directly provide your final answer. Ensure your answer is concise, using nouns or short phrases whenever possible. Conclude with: "So the answer is <answer>answer</answer>"."""
 
 
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--model", type=str, default="Qwen/Qwen2.5-7B-Instruct")
-    p.add_argument("--lora", type=str, default=None)
-    p.add_argument("--tag", type=str, default="eval")
+    p.add_argument("--tag", type=str, default="standard")
 
     # Retriever
     p.add_argument("--index-path", type=str,
@@ -52,9 +40,8 @@ def parse_args():
     p.add_argument("--limit", type=int, default=None)
 
     # Generation
-    p.add_argument("--temperature", type=float, default=0.8)
-    p.add_argument("--max-tokens", type=int, default=4096)
-    p.add_argument("--max-retrieval", type=int, default=10)
+    p.add_argument("--temperature", type=float, default=0.0)
+    p.add_argument("--max-tokens", type=int, default=256)
 
     # GPU
     p.add_argument("--gpu-util", type=float, default=0.75)
@@ -62,10 +49,8 @@ def parse_args():
 
 
 def resolve_model_path(model_name: str) -> str:
-    """Resolve HuggingFace model ID to local snapshot path if needed."""
     if os.path.isdir(model_name) and os.path.exists(os.path.join(model_name, "config.json")):
         return model_name
-    # Try to resolve via huggingface_hub
     try:
         from huggingface_hub import snapshot_download
         local_path = snapshot_download(model_name, cache_dir=HF_CACHE)
@@ -77,27 +62,21 @@ def resolve_model_path(model_name: str) -> str:
 
 def main():
     args = parse_args()
-
-    # Resolve model path for FlashRAG (needs local config.json)
     model_path = resolve_model_path(args.model)
-
     output_dir = f"outputs/flashrag_{args.tag}"
     os.makedirs(output_dir, exist_ok=True)
 
     config_dict = {
-        # Data
         "data_dir": args.data_dir,
         "dataset_name": args.dataset,
         "split": ["test"],
         "test_sample_num": args.limit,
         "random_sample": False,
 
-        # Save
         "save_dir": output_dir,
         "save_intermediate_data": True,
         "save_metric_score": True,
 
-        # Retriever
         "retrieval_method": "bge",
         "retrieval_model_path": "BAAI/bge-base-en-v1.5",
         "index_path": args.index_path,
@@ -109,7 +88,6 @@ def main():
         "retrieval_pooling_method": "mean",
         "faiss_gpu": True,
 
-        # Generator
         "framework": "vllm",
         "generator_model": model_path,
         "generator_model_path": model_path,
@@ -122,58 +100,33 @@ def main():
             "top_p": 0.95,
         },
 
-        # Metrics
         "metrics": ["em", "f1"],
         "metric_setting": {},
 
-        # Misc
         "seed": 42,
         "gpu_id": "0,1",
     }
 
-    # LoRA
-    if args.lora:
-        config_dict["generator_lora_path"] = args.lora
-
     config = Config(config_dict=config_dict)
 
     print("=" * 70)
-    print("FlashRAG Evaluation")
+    print("FlashRAG Standard RAG Evaluation")
     print("=" * 70)
     print(f"Model:      {model_path}")
-    if args.lora:
-        print(f"LoRA:       {args.lora}")
     print(f"Retriever:  bge-base-en-v1.5 (top_k={args.top_k})")
-    print(f"Dataset:    {args.dataset} ({args.limit} questions)")
+    print(f"Dataset:    {args.dataset}")
     print(f"Temp:       {args.temperature}")
     print(f"Output:     {output_dir}")
     print("=" * 70)
 
-    # Load dataset
     all_split = get_dataset(config)
     test_data = all_split["test"]
     print(f"Loaded {len(test_data)} test questions")
 
-    # Pipeline — use our trained prompt template
-    prompt_template = PromptTemplate(
-        config=config,
-        system_prompt=SYSTEM_PROMPT,
-        user_prompt="Question: {question}\n",
-    )
+    prompt_template = PromptTemplate(config=config)
 
-    pipeline = SearchR1Pipeline(
-        config=config,
-        prompt_template=prompt_template,
-        max_retrieval_num=args.max_retrieval,
-        begin_of_query_token="<search>",
-        end_of_query_token="</search>",
-        begin_of_documents_token="<documents>",
-        end_of_documents_token="</documents>",
-        begin_of_answer_token="<answer>",
-        end_of_answer_token="</answer>",
-    )
+    pipeline = SequentialPipeline(config=config, prompt_template=prompt_template)
 
-    # Run
     result_dataset = pipeline.run(test_data, do_eval=True)
 
     print("\n" + "=" * 70)
