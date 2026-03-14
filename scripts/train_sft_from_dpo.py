@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+"""Train SFT on chosen responses from DPO dataset.
+
+Uses the same DPO data as V1, but trains with SFT loss on chosen only.
+Document masking applied (<documents>...</documents> excluded from loss).
+
+Usage:
+    torchrun --nproc_per_node=2 scripts/train_sft_from_dpo.py \
+        --dpo-dataset outputs/mcts_dpo_5000q_v4b.jsonl \
+        --output-dir outputs/sft_from_dpo_v1 \
+        --wandb-run-name sft_from_dpo_v1
+"""
+
+import sys
+import os
+import json
+import argparse
+from pathlib import Path
+from datetime import datetime
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+import torch
+from datasets import Dataset as HFDataset
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from trl import SFTConfig, SFTTrainer
+from peft import LoraConfig
+
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+
+HF_CACHE_DIR = "/home/work/.conda/storage/MINKEON_KIM/external_cache/huggingface"
+
+# Qwen2.5 token IDs for document masking
+_OPEN_LT = 27       # '<'
+_CLOSE_LT = 522     # '</'
+_DOC_TOKEN = 50778   # 'documents'
+
+
+class DocMaskSFTTrainer(SFTTrainer):
+    """SFTTrainer that masks <documents>...</documents> spans in labels."""
+
+    _mask_log_counter = 0
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        if "labels" in inputs and "input_ids" in inputs:
+            masked_count = self._mask_document_spans(inputs)
+            DocMaskSFTTrainer._mask_log_counter += 1
+            if DocMaskSFTTrainer._mask_log_counter <= 3 or DocMaskSFTTrainer._mask_log_counter % 200 == 0:
+                active = (inputs["labels"] != -100).sum().item()
+                print(f"[DocMask] step={DocMaskSFTTrainer._mask_log_counter} "
+                      f"active_tokens={active} doc_masked={masked_count}")
+        return super().compute_loss(
+            model, inputs,
+            return_outputs=return_outputs,
+            num_items_in_batch=num_items_in_batch,
+        )
+
+    @staticmethod
+    def _mask_document_spans(inputs):
+        input_ids = inputs["input_ids"]
+        labels = inputs["labels"]
+        batch_size, seq_len = input_ids.shape
+        masked_total = 0
+
+        for i in range(batch_size):
+            ids = input_ids[i].tolist()
+            in_doc = False
+            j = 0
+            while j < seq_len:
+                if (not in_doc and j + 1 < seq_len
+                        and ids[j] == _OPEN_LT and ids[j + 1] == _DOC_TOKEN):
+                    in_doc = True
+
+                if in_doc and labels[i, j] != -100:
+                    labels[i, j] = -100
+                    masked_total += 1
+                    if (j + 1 < seq_len
+                            and ids[j] == _CLOSE_LT and ids[j + 1] == _DOC_TOKEN):
+                        labels[i, j] = -100
+                        if j + 1 < seq_len:
+                            labels[i, j + 1] = -100
+                            masked_total += 1
+                        if j + 2 < seq_len:
+                            labels[i, j + 2] = -100
+                            masked_total += 1
+                        j += 3
+                        in_doc = False
+                        continue
+                j += 1
+
+        return masked_total
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description="SFT on DPO chosen responses")
+    p.add_argument("--dpo-dataset", type=Path, required=True)
+    p.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-7B-Instruct")
+    p.add_argument("--output-dir", type=str, default="outputs/sft_from_dpo_v1")
+
+    p.add_argument("--max-length", type=int, default=8192)
+    p.add_argument("--num-epochs", type=int, default=3)
+    p.add_argument("--batch-size", type=int, default=1)
+    p.add_argument("--gradient-accumulation", type=int, default=8)
+    p.add_argument("--learning-rate", type=float, default=2e-5)
+    p.add_argument("--weight-decay", type=float, default=0.01)
+    p.add_argument("--warmup-ratio", type=float, default=0.1)
+
+    p.add_argument("--lora-r", type=int, default=64)
+    p.add_argument("--lora-alpha", type=int, default=128)
+    p.add_argument("--lora-dropout", type=float, default=0.05)
+
+    p.add_argument("--wandb-project", type=str, default="prmrag-sft")
+    p.add_argument("--wandb-run-name", type=str, default=None)
+    p.add_argument("--no-wandb", action="store_true")
+    p.add_argument("--limit", type=int, default=None)
+    p.add_argument("--logging-steps", type=int, default=10)
+    p.add_argument("--save-steps", type=int, default=200)
+    return p.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    if os.path.exists(args.model_name):
+        args.model_name = os.path.abspath(args.model_name)
+
+    if not args.dpo_dataset.exists():
+        print(f"Error: Dataset not found: {args.dpo_dataset}")
+        sys.exit(1)
+
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    os.environ["HF_HOME"] = HF_CACHE_DIR
+
+    # Load DPO data, extract prompt+chosen as conversations
+    records = []
+    with open(args.dpo_dataset) as f:
+        for line in f:
+            if line.strip():
+                d = json.loads(line)
+                # prompt (list[dict]) + chosen (list[dict]) → single conversation
+                messages = d["prompt"] + d["chosen"]
+                records.append({"messages": messages})
+
+    if args.limit:
+        records = records[:args.limit]
+
+    dataset = HFDataset.from_list(records)
+
+    if local_rank == 0:
+        print("=" * 70)
+        print("SFT FROM DPO CHOSEN (Document Masking)")
+        print("=" * 70)
+        print(f"Dataset:     {args.dpo_dataset} ({len(dataset)} samples)")
+        print(f"Model:       {args.model_name}")
+        print(f"Output:      {args.output_dir}")
+        print(f"Max length:  {args.max_length}")
+        num_gpus = int(os.environ.get("WORLD_SIZE", 1))
+        eff = args.batch_size * args.gradient_accumulation * num_gpus
+        print(f"Batch:       {args.batch_size} x {args.gradient_accumulation} x {num_gpus} = {eff} eff")
+        print(f"LR:          {args.learning_rate}")
+        print(f"LoRA:        r={args.lora_r}, alpha={args.lora_alpha}")
+        print(f"Epochs:      {args.num_epochs}")
+        print()
+        sample = records[0]["messages"]
+        print(f"Sample roles: {[m['role'] for m in sample]}")
+        print(f"Sample assistant[:200]: {sample[-1]['content'][:200]}")
+        print()
+
+    # Model
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model_name,
+        torch_dtype=torch.bfloat16,
+        trust_remote_code=True,
+        attn_implementation="flash_attention_2",
+        cache_dir=HF_CACHE_DIR,
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model_name, trust_remote_code=True, cache_dir=HF_CACHE_DIR
+    )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "right"
+
+    # LoRA
+    lora_config = LoraConfig(
+        r=args.lora_r,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
+        bias="none",
+        task_type="CAUSAL_LM",
+        target_modules=[
+            "q_proj", "v_proj", "k_proj", "o_proj",
+            "gate_proj", "up_proj", "down_proj",
+        ],
+    )
+
+    # Wandb
+    report_to = []
+    if not args.no_wandb and WANDB_AVAILABLE:
+        report_to.append("wandb")
+        if local_rank == 0:
+            run_name = args.wandb_run_name or f"sft_dpo_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            wandb.init(
+                project=args.wandb_project,
+                name=run_name,
+                config={
+                    "model_name": args.model_name,
+                    "method": "sft_from_dpo_chosen",
+                    "dataset": str(args.dpo_dataset),
+                    "num_samples": len(dataset),
+                    "learning_rate": args.learning_rate,
+                    "lora_r": args.lora_r,
+                    "lora_alpha": args.lora_alpha,
+                    "num_epochs": args.num_epochs,
+                },
+                tags=["sft", "dpo-chosen", "prmrag"],
+            )
+    else:
+        report_to.append("tensorboard")
+
+    training_args = SFTConfig(
+        output_dir=args.output_dir,
+        num_train_epochs=args.num_epochs,
+        per_device_train_batch_size=args.batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation,
+        learning_rate=args.learning_rate,
+        weight_decay=args.weight_decay,
+        warmup_ratio=args.warmup_ratio,
+        lr_scheduler_type="cosine",
+        logging_steps=args.logging_steps,
+        save_steps=args.save_steps,
+        bf16=True,
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
+        save_total_limit=2,
+        report_to=report_to,
+        ddp_find_unused_parameters=False,
+        max_length=args.max_length,
+    )
+
+    trainer = DocMaskSFTTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=dataset,
+        processing_class=tokenizer,
+        peft_config=lora_config,
+    )
+
+    # Resume
+    checkpoint_dir = Path(args.output_dir)
+    checkpoints = sorted(
+        checkpoint_dir.glob("checkpoint-*"),
+        key=lambda x: int(x.name.split("-")[1])
+    ) if checkpoint_dir.exists() else []
+    resume_checkpoint = str(checkpoints[-1]) if checkpoints else None
+    if resume_checkpoint and local_rank == 0:
+        print(f"Resuming from: {resume_checkpoint}")
+
+    if local_rank == 0:
+        print(f"\n{'='*70}")
+        print("STARTING SFT TRAINING")
+        print(f"{'='*70}\n")
+
+    trainer.train(resume_from_checkpoint=resume_checkpoint)
+
+    # Save
+    final_path = Path(args.output_dir) / "final_model"
+    trainer.save_model(str(final_path))
+    if local_rank == 0:
+        tokenizer.save_pretrained(str(final_path))
+        info = {
+            "model_name": args.model_name,
+            "method": "sft_from_dpo_chosen",
+            "dataset": str(args.dpo_dataset),
+            "learning_rate": args.learning_rate,
+            "lora_r": args.lora_r,
+            "lora_alpha": args.lora_alpha,
+            "max_length": args.max_length,
+            "num_samples": len(dataset),
+            "num_epochs": args.num_epochs,
+            "document_masking": True,
+            "completed_at": datetime.now().isoformat(),
+        }
+        with open(Path(args.output_dir) / "training_info.json", "w") as f:
+            json.dump(info, f, indent=2)
+
+        print(f"\n{'='*70}")
+        print("SFT TRAINING COMPLETED")
+        print(f"Model saved to: {final_path}")
+        print(f"{'='*70}")
+
+    if not args.no_wandb and WANDB_AVAILABLE and local_rank == 0 and wandb.run:
+        wandb.finish()
+
+
+if __name__ == "__main__":
+    main()

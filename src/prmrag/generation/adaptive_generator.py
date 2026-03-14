@@ -464,6 +464,13 @@ class SimpleTrajectoryGenerator:
             # Build prompts for all active trajectories
             # All steps go into the assistant turn (matches KTO training format)
             formatted_prompts = []
+            skipped_for_length = []
+            max_model_len = getattr(self.policy_model, 'max_model_len', None)
+            if max_model_len is None and hasattr(self.policy_model, 'llm'):
+                try:
+                    max_model_len = self.policy_model.llm.llm_engine.model_config.max_model_len
+                except Exception:
+                    pass
             for idx in active_indices:
                 state = states[idx]
                 if step_num == 1:
@@ -475,7 +482,23 @@ class SimpleTrajectoryGenerator:
                         state['question'],
                         state['previous_contents'],
                     )
+                # Check prompt length to avoid exceeding max_model_len
+                if max_model_len is not None:
+                    token_len = len(self.policy_model.tokenizer.encode(prompt))
+                    if token_len >= max_model_len - 10:
+                        skipped_for_length.append(idx)
+                        continue
                 formatted_prompts.append(prompt)
+
+            # Remove skipped indices from active_indices
+            if skipped_for_length:
+                active_indices = [i for i in active_indices if i not in skipped_for_length]
+                for idx in skipped_for_length:
+                    states[idx]['finished'] = True
+                if show_progress:
+                    print(f"    Skipped {len(skipped_for_length)} trajectories (prompt too long)")
+                if not active_indices:
+                    continue
 
             # Batch generate with vLLM
             # Stop before <documents> to prevent model from hallucinating observations

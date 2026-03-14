@@ -45,6 +45,8 @@ def parse_args():
     p.add_argument("--corpus-path", type=str,
                    default="data/kilt/kilt_corpus_flashrag.jsonl")
     p.add_argument("--top-k", type=int, default=3)
+    p.add_argument("--retriever-method", type=str, default="bge")
+    p.add_argument("--retriever-model", type=str, default="BAAI/bge-base-en-v1.5")
 
     # Data
     p.add_argument("--data-dir", type=str, default="data/flashrag")
@@ -52,12 +54,23 @@ def parse_args():
     p.add_argument("--limit", type=int, default=None)
 
     # Generation
-    p.add_argument("--temperature", type=float, default=0.8)
+    p.add_argument("--temperature", type=float, default=0.0)
     p.add_argument("--max-tokens", type=int, default=4096)
     p.add_argument("--max-retrieval", type=int, default=10)
 
+    # Tokens (customize for different models)
+    p.add_argument("--doc-begin", type=str, default="<documents>")
+    p.add_argument("--doc-end", type=str, default="</documents>")
+    p.add_argument("--query-begin", type=str, default="<search>")
+    p.add_argument("--query-end", type=str, default="</search>")
+
+    # Prompt control
+    p.add_argument("--system-prompt", type=str, default=None)
+    p.add_argument("--use-default-prompt", action="store_true",
+                   help="Use SearchR1Pipeline built-in prompt (for Search-R1 model)")
+
     # GPU
-    p.add_argument("--gpu-util", type=float, default=0.75)
+    p.add_argument("--gpu-util", type=float, default=0.70)
     return p.parse_args()
 
 
@@ -98,8 +111,8 @@ def main():
         "save_metric_score": True,
 
         # Retriever
-        "retrieval_method": "bge",
-        "retrieval_model_path": "BAAI/bge-base-en-v1.5",
+        "retrieval_method": args.retriever_method,
+        "retrieval_model_path": args.retriever_model,
         "index_path": args.index_path,
         "corpus_path": args.corpus_path,
         "retrieval_topk": args.top_k,
@@ -154,21 +167,26 @@ def main():
     test_data = all_split["test"]
     print(f"Loaded {len(test_data)} test questions")
 
-    # Pipeline — use our trained prompt template
-    prompt_template = PromptTemplate(
-        config=config,
-        system_prompt=SYSTEM_PROMPT,
-        user_prompt="Question: {question}\n",
-    )
+    # Pipeline
+    if args.use_default_prompt:
+        # Use SearchR1Pipeline built-in prompt (for Search-R1 model)
+        prompt_template = None
+    else:
+        sys_prompt = args.system_prompt if args.system_prompt else SYSTEM_PROMPT
+        prompt_template = PromptTemplate(
+            config=config,
+            system_prompt=sys_prompt,
+            user_prompt="Question: {question}\n",
+        )
 
     pipeline = SearchR1Pipeline(
         config=config,
         prompt_template=prompt_template,
         max_retrieval_num=args.max_retrieval,
-        begin_of_query_token="<search>",
-        end_of_query_token="</search>",
-        begin_of_documents_token="<documents>",
-        end_of_documents_token="</documents>",
+        begin_of_query_token=args.query_begin,
+        end_of_query_token=args.query_end,
+        begin_of_documents_token=args.doc_begin,
+        end_of_documents_token=args.doc_end,
         begin_of_answer_token="<answer>",
         end_of_answer_token="</answer>",
     )

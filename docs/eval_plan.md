@@ -20,9 +20,9 @@
 | 1 | Zero-shot | Naïve Generation | SequentialPipeline (no retrieval) | Qwen2.5-7B-Instruct | |
 | 2 | Zero-shot | Standard RAG | SequentialPipeline | Qwen2.5-7B-Instruct + BGE | |
 | 3 | Active | FLARE | FLAREPipeline | Qwen2.5-7B-Instruct + BGE | |
-| 4 | RAG-CoT | IRCoT | IRCOTPipeline | Qwen2.5-7B-Instruct + BGE | |
+| 4 | RAG-CoT | IRCoT | IRCOTPi
+peline | Qwen2.5-7B-Instruct + BGE | |
 | 5 | RAG-CoT | Iter-RetGen | IterativePipeline | Qwen2.5-7B-Instruct + BGE | |
-| 6 | Summary | Selective-Context | SequentialPipeline + SelectiveContextRefiner | Qwen2.5-7B-Instruct + BGE | |
 
 ### Group 2: Checkpoint 다운로드 필요
 | # | Type | Method | Pipeline | Model | Download |

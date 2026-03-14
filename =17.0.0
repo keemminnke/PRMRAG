@@ -1,0 +1,8 @@
+Defaulting to user installation because normal site-packages is not writeable
+Looking in indexes: https://pypi.org/simple, https://pypi.ngc.nvidia.com
+Requirement already satisfied: pyarrow in /usr/local/lib/python3.10/dist-packages (16.1.0)
+Requirement already satisfied: numpy>=1.16.6 in /home/work/.local/lib/python3.10/site-packages (from pyarrow) (2.2.6)
+WARNING: Error parsing dependencies of devscripts: Invalid version: '2.22.1ubuntu1'
+
+[notice] A new release of pip is available: 24.2 -> 26.0.1
+[notice] To update, run: python -m pip install --upgrade pip

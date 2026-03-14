@@ -394,7 +394,7 @@ def load_policy_model(config: dict) -> PolicyModelVLLM:
     """
     return PolicyModelVLLM(
         model_name=config.get('model_name', 'Qwen/Qwen2.5-7B-Instruct'),
-        tensor_parallel_size=config.get('tensor_parallel_size', 2),
+        tensor_parallel_size=config.get('tensor_parallel_size', 1),
         gpu_memory_utilization=config.get('gpu_memory_utilization', 0.9),
         max_new_tokens=config.get('max_tokens', 200),
         temperature=config.get('temperature', 0.8),

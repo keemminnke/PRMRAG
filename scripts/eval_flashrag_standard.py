@@ -33,6 +33,8 @@ def parse_args():
     p.add_argument("--corpus-path", type=str,
                    default="data/kilt/kilt_corpus_flashrag.jsonl")
     p.add_argument("--top-k", type=int, default=3)
+    p.add_argument("--retriever-method", type=str, default="bge")
+    p.add_argument("--retriever-model", type=str, default="BAAI/bge-base-en-v1.5")
 
     # Data
     p.add_argument("--data-dir", type=str, default="data/flashrag")
@@ -44,7 +46,7 @@ def parse_args():
     p.add_argument("--max-tokens", type=int, default=256)
 
     # GPU
-    p.add_argument("--gpu-util", type=float, default=0.75)
+    p.add_argument("--gpu-util", type=float, default=0.70)
     return p.parse_args()
 
 
@@ -77,8 +79,8 @@ def main():
         "save_intermediate_data": True,
         "save_metric_score": True,
 
-        "retrieval_method": "bge",
-        "retrieval_model_path": "BAAI/bge-base-en-v1.5",
+        "retrieval_method": args.retriever_method,
+        "retrieval_model_path": args.retriever_model,
         "index_path": args.index_path,
         "corpus_path": args.corpus_path,
         "retrieval_topk": args.top_k,

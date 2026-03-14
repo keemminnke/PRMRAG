@@ -33,8 +33,127 @@ from collections import Counter
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch.nn.functional as F
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoModel
 from tqdm import tqdm
+
+
+# ============================================================
+# Method 4: Qwen2.5-Math-PRM
+# ============================================================
+
+def load_mathprm(model_id: str = "Qwen/Qwen2.5-Math-PRM-7B"):
+    """Load Qwen2.5-Math-PRM-7B model."""
+    print(f"Loading MathPRM from {model_id}...")
+
+    download_dir = "/home/work/.conda/storage/MINKEON_KIM/external_cache/huggingface"
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_id, trust_remote_code=True, cache_dir=download_dir
+    )
+    model = AutoModel.from_pretrained(
+        model_id,
+        device_map="auto",
+        torch_dtype=torch.bfloat16,
+        trust_remote_code=True,
+        cache_dir=download_dir,
+    ).eval()
+
+    print("✓ MathPRM loaded")
+    return model, tokenizer
+
+
+def make_step_rewards(logits, token_masks):
+    """Extract per-step reward scores from MathPRM logits."""
+    probabilities = F.softmax(logits, dim=-1)
+    probabilities = probabilities * token_masks.unsqueeze(-1)
+
+    all_scores = []
+    for i in range(probabilities.size(0)):
+        sample = probabilities[i]
+        positive_probs = sample[sample != 0].view(-1, 2)[:, 1]
+        all_scores.append(positive_probs.cpu().tolist())
+    return all_scores
+
+
+def batch_get_mathprm_scores(
+    model, tokenizer, trajectories: List[Dict], batch_size: int = 4
+) -> List[List[float]]:
+    """Batch get MathPRM step-level scores for multiple trajectories.
+
+    Uses <extra_0> token as step separator. Each step's positive probability
+    is extracted at <extra_0> positions.
+    """
+    step_sep = "<extra_0>"
+    step_sep_id = tokenizer.encode(step_sep, add_special_tokens=False)[0]
+
+    # Format all inputs
+    all_messages = []
+    for traj in trajectories:
+        question = traj['question']
+        steps = traj.get('steps', [])
+
+        # Build step texts with <extra_0> separator
+        step_texts = []
+        for i, step in enumerate(steps):
+            parts = []
+            if step.get('think'):
+                parts.append(f"<think>{step['think'][:500]}</think>")
+            if step.get('search'):
+                parts.append(f"<search>{step['search']}</search>")
+            elif step.get('answer'):
+                parts.append(f"<answer>{step['answer']}</answer>")
+            if step.get('documents'):
+                parts.append(f"<documents>{step['documents'][:300]}</documents>")
+            step_texts.append(f"Step {i+1}: " + " ".join(parts))
+
+        # Join with <extra_0> (MathPRM step separator)
+        response_text = (step_sep).join(step_texts) + step_sep
+
+        messages = [
+            {"role": "system", "content": "You are evaluating a multi-step reasoning process."},
+            {"role": "user", "content": f"Question: {question}"},
+            {"role": "assistant", "content": response_text},
+        ]
+        all_messages.append(messages)
+
+    # Batch process
+    all_step_scores = []
+    num_batches = (len(all_messages) + batch_size - 1) // batch_size
+
+    for i in tqdm(range(0, len(all_messages), batch_size), total=num_batches, desc="MathPRM eval"):
+        batch_messages = all_messages[i:i+batch_size]
+
+        # Apply chat template
+        batch_texts = [
+            tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=False)
+            for msgs in batch_messages
+        ]
+
+        inputs = tokenizer(
+            batch_texts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=4096,
+        ).to(model.device)
+
+        with torch.no_grad():
+            outputs = model(input_ids=inputs['input_ids'], attention_mask=inputs['attention_mask'])
+            logits = outputs[0]
+
+            token_masks = (inputs['input_ids'] == step_sep_id).to(logits.device)
+            step_rewards = make_step_rewards(logits, token_masks)
+
+            for j in range(len(batch_texts)):
+                scores = step_rewards[j] if j < len(step_rewards) else []
+                if not scores:
+                    # Fallback: use 0.5 for each step
+                    num_steps = len(all_messages[i + j][2]['content'].split(step_sep)) - 1
+                    scores = [0.5] * max(num_steps, 1)
+                all_step_scores.append(scores)
+
+    return all_step_scores
 
 
 # ============================================================
@@ -517,6 +636,37 @@ def check_answer(predicted: str, gold: str) -> bool:
     return gold_norm in pred_norm
 
 
+def normalize_answer(s: str) -> str:
+    """Normalize answer for token-level F1 (standard QA evaluation)."""
+    import re
+    import string
+    s = s.lower()
+    # Remove articles
+    s = re.sub(r'\b(a|an|the)\b', ' ', s)
+    # Remove punctuation
+    s = ''.join(ch for ch in s if ch not in string.punctuation)
+    # Remove extra whitespace
+    s = ' '.join(s.split())
+    return s
+
+
+def compute_f1(predicted: str, gold: str) -> float:
+    """Compute token-level F1 between predicted and gold answer."""
+    if not predicted or not gold:
+        return 0.0
+    pred_tokens = normalize_answer(predicted).split()
+    gold_tokens = normalize_answer(gold).split()
+    if not pred_tokens or not gold_tokens:
+        return 0.0
+    common = Counter(pred_tokens) & Counter(gold_tokens)
+    num_common = sum(common.values())
+    if num_common == 0:
+        return 0.0
+    precision = num_common / len(pred_tokens)
+    recall = num_common / len(gold_tokens)
+    return 2 * precision * recall / (precision + recall)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Compare voting methods on pre-generated trajectories")
 
@@ -531,6 +681,8 @@ def main():
                         help="Base model for critic")
     parser.add_argument("--versaprm", type=str, default="UW-Madison-Lee-Lab/VersaPRM-Base-8B",
                         help="VersaPRM model ID")
+    parser.add_argument("--mathprm", type=str, default="Qwen/Qwen2.5-Math-PRM-7B",
+                        help="MathPRM model ID")
 
     # Output
     parser.add_argument("--output", type=str, default="outputs/voting_comparison.json",
@@ -541,6 +693,10 @@ def main():
                         help="Skip critic evaluation")
     parser.add_argument("--skip-versaprm", action="store_true",
                         help="Skip VersaPRM evaluation")
+    parser.add_argument("--use-mathprm", action="store_true",
+                        help="Enable MathPRM evaluation")
+    parser.add_argument("--skip-mathprm", action="store_true",
+                        help="Skip MathPRM evaluation (when --use-mathprm is set)")
     parser.add_argument("--gpu-memory", type=float, default=0.9,
                         help="GPU memory utilization for vLLM")
 
@@ -586,16 +742,18 @@ def main():
             'scoring_methods': scoring_methods,
             'soft_scores': args.soft_scores,
         },
-        'majority_voting': {'correct': 0, 'total': 0},
+        'majority_voting': {'correct': 0, 'total': 0, 'f1_sum': 0.0},
         'details': [],
     }
 
     # Initialize result slots for all method x scoring combinations
     for scoring in scoring_methods:
-        results[f'critic_bon_{scoring}'] = {'correct': 0, 'total': 0}
-        results[f'critic_wmv_{scoring}'] = {'correct': 0, 'total': 0}
-        results[f'versaprm_bon_{scoring}'] = {'correct': 0, 'total': 0}
-        results[f'versaprm_wmv_{scoring}'] = {'correct': 0, 'total': 0}
+        results[f'critic_bon_{scoring}'] = {'correct': 0, 'total': 0, 'f1_sum': 0.0}
+        results[f'critic_wmv_{scoring}'] = {'correct': 0, 'total': 0, 'f1_sum': 0.0}
+        results[f'versaprm_bon_{scoring}'] = {'correct': 0, 'total': 0, 'f1_sum': 0.0}
+        results[f'versaprm_wmv_{scoring}'] = {'correct': 0, 'total': 0, 'f1_sum': 0.0}
+        results[f'mathprm_bon_{scoring}'] = {'correct': 0, 'total': 0, 'f1_sum': 0.0}
+        results[f'mathprm_wmv_{scoring}'] = {'correct': 0, 'total': 0, 'f1_sum': 0.0}
 
     print(f"\n{'='*70}")
     print("COMPARING VOTING METHODS")
@@ -615,12 +773,15 @@ def main():
         majority_answer, vote_count = majority_vote(trajs)
         gold_answer = trajs[0].get('gold_answer')
         majority_correct = check_answer(majority_answer, gold_answer)
+        majority_f1 = compute_f1(majority_answer, gold_answer)
         majority_results[qid] = {
             'answer': majority_answer,
             'votes': vote_count,
             'correct': majority_correct,
+            'f1': majority_f1,
         }
         results['majority_voting']['total'] += 1
+        results['majority_voting']['f1_sum'] += majority_f1
         if majority_correct:
             results['majority_voting']['correct'] += 1
 
@@ -673,7 +834,9 @@ def main():
                 best_traj = trajs_and_scores[best_idx][0]
                 bon_answer = best_traj.get('final_answer', best_traj.get('predicted_answer', ''))
                 bon_correct = check_answer(bon_answer, gold_answer)
+                bon_f1 = compute_f1(bon_answer, gold_answer)
                 results[f'critic_bon_{scoring}']['total'] += 1
+                results[f'critic_bon_{scoring}']['f1_sum'] += bon_f1
                 if bon_correct:
                     results[f'critic_bon_{scoring}']['correct'] += 1
 
@@ -695,12 +858,15 @@ def main():
                     wmv_answer = ""
 
                 wmv_correct = check_answer(wmv_answer, gold_answer)
+                wmv_f1 = compute_f1(wmv_answer, gold_answer)
                 results[f'critic_wmv_{scoring}']['total'] += 1
+                results[f'critic_wmv_{scoring}']['f1_sum'] += wmv_f1
                 if wmv_correct:
                     results[f'critic_wmv_{scoring}']['correct'] += 1
 
-    # Free GPU memory
-    if critic_llm and not args.skip_versaprm:
+    # Free GPU memory before loading next model
+    need_next_model = (not args.skip_versaprm) or (args.use_mathprm and not args.skip_mathprm)
+    if critic_llm and need_next_model:
         print("Unloading Critic model...")
         del critic_llm
         torch.cuda.empty_cache()
@@ -743,7 +909,9 @@ def main():
                 best_traj = trajs_and_scores[best_idx][0]
                 bon_answer = best_traj.get('final_answer', best_traj.get('predicted_answer', ''))
                 bon_correct = check_answer(bon_answer, gold_answer)
+                bon_f1 = compute_f1(bon_answer, gold_answer)
                 results[f'versaprm_bon_{scoring}']['total'] += 1
+                results[f'versaprm_bon_{scoring}']['f1_sum'] += bon_f1
                 if bon_correct:
                     results[f'versaprm_bon_{scoring}']['correct'] += 1
 
@@ -765,9 +933,127 @@ def main():
                     wmv_answer = ""
 
                 wmv_correct = check_answer(wmv_answer, gold_answer)
+                wmv_f1 = compute_f1(wmv_answer, gold_answer)
                 results[f'versaprm_wmv_{scoring}']['total'] += 1
+                results[f'versaprm_wmv_{scoring}']['f1_sum'] += wmv_f1
                 if wmv_correct:
                     results[f'versaprm_wmv_{scoring}']['correct'] += 1
+
+    # Save VersaPRM per-trajectory JSONL
+    if versaprm_per_question:
+        versaprm_jsonl_path = args.output.replace('.json', '_per_trajectory.jsonl')
+        print(f"Saving VersaPRM per-trajectory scores to {versaprm_jsonl_path}")
+        with open(versaprm_jsonl_path, 'w') as vf:
+            for qid in qid_list:
+                if qid not in versaprm_per_question:
+                    continue
+                for traj, step_scores in versaprm_per_question[qid]:
+                    rec = {
+                        'trajectory_id': traj.get('trajectory_id', ''),
+                        'question': traj.get('question', ''),
+                        'gold_answer': traj.get('gold_answer', ''),
+                        'predicted_answer': traj.get('final_answer', traj.get('predicted_answer', '')),
+                        'is_correct': traj.get('is_correct', False),
+                        'versaprm_step_scores': step_scores,
+                        'versaprm_min': min(step_scores) if step_scores else 0.0,
+                    }
+                    vf.write(json.dumps(rec, ensure_ascii=False) + '\n')
+        print(f"  ✓ Saved {sum(len(v) for v in versaprm_per_question.values())} trajectories")
+
+    # Free VersaPRM GPU memory before MathPRM
+    if versaprm_model and args.use_mathprm and not args.skip_mathprm:
+        print("Unloading VersaPRM model...")
+        del versaprm_model, versaprm_tokenizer
+        torch.cuda.empty_cache()
+
+    # Method 4: MathPRM (Qwen2.5-Math-PRM-7B)
+    mathprm_per_question = {}  # qid -> [(traj, step_scores), ...]
+
+    if args.use_mathprm and not args.skip_mathprm:
+        mathprm_model, mathprm_tokenizer = load_mathprm(args.mathprm)
+
+        print(f"Evaluating with MathPRM... {len(all_trajs_flat)} trajectories")
+        mathprm_step_scores = batch_get_mathprm_scores(
+            mathprm_model, mathprm_tokenizer, all_trajs_flat, batch_size=4
+        )
+
+        # Group step scores by question
+        score_idx = 0
+        for qid in qid_list:
+            trajs = groups[qid]
+            mathprm_per_question[qid] = []
+            for traj in trajs:
+                step_scores = mathprm_step_scores[score_idx]
+                mathprm_per_question[qid].append((traj, step_scores))
+                score_idx += 1
+
+        # Compute all scoring method combinations
+        for scoring in scoring_methods:
+            for qid in qid_list:
+                trajs_and_scores = mathprm_per_question[qid]
+                gold_answer = groups[qid][0].get('gold_answer')
+
+                # Aggregate step scores -> trajectory scores
+                traj_scores = [aggregate_step_scores(ss, scoring) for _, ss in trajs_and_scores]
+
+                # BoN
+                best_idx = max(range(len(traj_scores)), key=lambda i: traj_scores[i])
+                best_traj = trajs_and_scores[best_idx][0]
+                bon_answer = best_traj.get('final_answer', best_traj.get('predicted_answer', ''))
+                bon_correct = check_answer(bon_answer, gold_answer)
+                bon_f1 = compute_f1(bon_answer, gold_answer)
+                results[f'mathprm_bon_{scoring}']['total'] += 1
+                results[f'mathprm_bon_{scoring}']['f1_sum'] += bon_f1
+                if bon_correct:
+                    results[f'mathprm_bon_{scoring}']['correct'] += 1
+
+                # Weighted Majority Voting
+                weighted_votes = {}
+                original_answers = {}
+                for (traj, _), sc in zip(trajs_and_scores, traj_scores):
+                    ans = traj.get('final_answer', traj.get('predicted_answer', ''))
+                    if ans:
+                        key = ans.strip().lower()
+                        weighted_votes[key] = weighted_votes.get(key, 0.0) + sc
+                        if key not in original_answers:
+                            original_answers[key] = ans
+
+                if weighted_votes:
+                    best_key = max(weighted_votes, key=weighted_votes.get)
+                    wmv_answer = original_answers.get(best_key, best_key)
+                else:
+                    wmv_answer = ""
+
+                wmv_correct = check_answer(wmv_answer, gold_answer)
+                wmv_f1 = compute_f1(wmv_answer, gold_answer)
+                results[f'mathprm_wmv_{scoring}']['total'] += 1
+                results[f'mathprm_wmv_{scoring}']['f1_sum'] += wmv_f1
+                if wmv_correct:
+                    results[f'mathprm_wmv_{scoring}']['correct'] += 1
+
+        # Save MathPRM per-trajectory JSONL
+        mathprm_jsonl_path = args.output.replace('.json', '_per_trajectory.jsonl')
+        print(f"Saving MathPRM per-trajectory scores to {mathprm_jsonl_path}")
+        with open(mathprm_jsonl_path, 'w') as mf:
+            for qid in qid_list:
+                if qid not in mathprm_per_question:
+                    continue
+                for traj, step_scores in mathprm_per_question[qid]:
+                    rec = {
+                        'trajectory_id': traj.get('trajectory_id', ''),
+                        'question': traj.get('question', ''),
+                        'gold_answer': traj.get('gold_answer', ''),
+                        'predicted_answer': traj.get('final_answer', traj.get('predicted_answer', '')),
+                        'is_correct': traj.get('is_correct', False),
+                        'mathprm_step_scores': step_scores,
+                        'mathprm_min': min(step_scores) if step_scores else 0.0,
+                    }
+                    mf.write(json.dumps(rec, ensure_ascii=False) + '\n')
+        print(f"  ✓ Saved {sum(len(v) for v in mathprm_per_question.values())} trajectories")
+
+        # Free MathPRM
+        del mathprm_model, mathprm_tokenizer
+        torch.cuda.empty_cache()
 
     # Build details
     for qid in qid_list:
@@ -806,6 +1092,19 @@ def main():
                         trajs[0].get('gold_answer')
                     ),
                 }
+        if qid in mathprm_per_question:
+            for scoring in scoring_methods:
+                traj_scores = [aggregate_step_scores(ss, scoring) for _, ss in mathprm_per_question[qid]]
+                best_idx = max(range(len(traj_scores)), key=lambda i: traj_scores[i])
+                best_traj = mathprm_per_question[qid][best_idx][0]
+                detail[f'mathprm_{scoring}'] = {
+                    'answer': best_traj.get('final_answer', best_traj.get('predicted_answer', '')),
+                    'score': traj_scores[best_idx],
+                    'correct': check_answer(
+                        best_traj.get('final_answer', best_traj.get('predicted_answer', '')),
+                        trajs[0].get('gold_answer')
+                    ),
+                }
         results['details'].append(detail)
 
     # Summary
@@ -816,19 +1115,21 @@ def main():
     # Print majority first
     data = results['majority_voting']
     acc = 100 * data['correct'] / data['total']
-    print(f"{'Majority Voting':30s}: {data['correct']}/{data['total']} ({acc:.1f}%)")
+    f1 = 100 * data['f1_sum'] / data['total'] if data['total'] > 0 else 0
+    print(f"{'Majority Voting':30s}: EM={acc:.1f}%  F1={f1:.1f}%")
     print()
 
-    # Print Critic and VersaPRM side by side for each scoring method
+    # Print all methods with both EM and F1
     for scoring in scoring_methods:
-        for method_prefix, label_prefix in [('critic', 'Critic'), ('versaprm', 'VersaPRM')]:
+        for method_prefix, label_prefix in [('critic', 'Critic'), ('versaprm', 'VersaPRM'), ('mathprm', 'MathPRM')]:
             for strategy, strategy_label in [('bon', 'BoN'), ('wmv', 'Weighted MV')]:
                 key = f'{method_prefix}_{strategy}_{scoring}'
                 data = results[key]
                 if data['total'] > 0:
                     acc = 100 * data['correct'] / data['total']
+                    f1 = 100 * data['f1_sum'] / data['total']
                     label = f"{label_prefix} ({strategy_label}, {scoring})"
-                    print(f"{label:30s}: {data['correct']}/{data['total']} ({acc:.1f}%)")
+                    print(f"{label:30s}: EM={acc:.1f}%  F1={f1:.1f}%")
 
     # Save results
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
