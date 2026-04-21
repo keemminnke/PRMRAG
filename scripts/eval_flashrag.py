@@ -120,13 +120,13 @@ def main():
         "retrieval_use_fp16": True,
         "retrieval_query_max_length": 256,
         "retrieval_pooling_method": "mean",
-        "faiss_gpu": True,
+        "faiss_gpu": False,
 
         # Generator
         "framework": "vllm",
         "generator_model": model_path,
         "generator_model_path": model_path,
-        "generator_max_input_len": 16384,
+        "generator_max_input_len": 32768,
         "gpu_memory_utilization": args.gpu_util,
         "gpu_num": 2,
         "generation_params": {
@@ -190,6 +190,10 @@ def main():
         begin_of_answer_token="<answer>",
         end_of_answer_token="</answer>",
     )
+
+    if hasattr(pipeline.retriever.index, "nprobe"):
+        pipeline.retriever.index.nprobe = 128
+        print(f"[retriever] Set IVF nprobe = {pipeline.retriever.index.nprobe}")
 
     # Run
     result_dataset = pipeline.run(test_data, do_eval=True)

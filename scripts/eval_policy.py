@@ -70,8 +70,8 @@ def parse_args():
                         help="Limit corpus size for testing")
 
     # Generation
-    parser.add_argument("--limit", type=int, default=500,
-                        help="Number of questions to evaluate (default: 500)")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Number of questions to evaluate (default: all)")
     parser.add_argument("--temperature", type=float, default=0.0,
                         help="Sampling temperature (default: 0.0 = greedy)")
     parser.add_argument("--max-steps", type=int, default=10,
@@ -259,6 +259,7 @@ def main():
         "temperature": args.temperature,
         "gpu_memory_utilization": args.gpu_memory_utilization,
         "max_model_len": args.max_model_len,
+        "tensor_parallel_size": 2,
     }
     if args.lora_adapter:
         policy_config["lora_adapter"] = args.lora_adapter

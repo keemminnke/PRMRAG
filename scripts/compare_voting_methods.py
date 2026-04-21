@@ -184,6 +184,7 @@ def load_critic_model_vllm(critic_path: str, base_model: str, gpu_memory_utiliza
     # Load vLLM with LoRA support
     llm = LLM(
         model=base_model,
+        tensor_parallel_size=2,
         enable_lora=True,
         max_lora_rank=64,
         gpu_memory_utilization=gpu_memory_utilization,

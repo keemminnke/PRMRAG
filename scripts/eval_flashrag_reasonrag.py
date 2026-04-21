@@ -101,7 +101,7 @@ def main():
         "retrieval_use_fp16": True,
         "retrieval_query_max_length": 256,
         "retrieval_pooling_method": "mean",
-        "faiss_gpu": True,
+        "faiss_gpu": False,
 
         # Generator
         "framework": "vllm",
@@ -152,6 +152,10 @@ def main():
         max_children=2,
         max_rollouts=64,
     )
+
+    if hasattr(pipeline.retriever.index, "nprobe"):
+        pipeline.retriever.index.nprobe = 128
+        print(f"[retriever] Set IVF nprobe = {pipeline.retriever.index.nprobe}")
 
     # Run with pred_process_fun for proper answer extraction
     result_dataset = pipeline.run(
