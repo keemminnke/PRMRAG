@@ -139,7 +139,7 @@ def batch_get_mathprm_scores(
         ).to(model.device)
 
         with torch.no_grad():
-            outputs = model(input_ids=inputs['input_ids'], attention_mask=inputs['attention_mask'])
+            outputs = model(input_ids=inputs['input_ids'], attention_mask=inputs['attention_mask'], use_cache=False)
             logits = outputs[0]
 
             token_masks = (inputs['input_ids'] == step_sep_id).to(logits.device)
@@ -626,7 +626,7 @@ def group_trajectories_by_question(trajectories: List[Dict]) -> Dict[str, List[D
 
 
 def check_answer(predicted: str, gold: str) -> bool:
-    """Check if predicted answer matches gold (Cover Exact Match).
+    """Check if predicted answer matches gold (Cover Exact Match — kept for backward compat).
 
     Cover EM: ground truth answer is contained in the predicted answer.
     """
@@ -635,6 +635,16 @@ def check_answer(predicted: str, gold: str) -> bool:
     pred_norm = predicted.strip().lower()
     gold_norm = gold.strip().lower()
     return gold_norm in pred_norm
+
+
+def strict_em(predicted: str, gold) -> bool:
+    """Standard QA strict Exact Match: normalize then equality."""
+    if not predicted or not gold:
+        return False
+    pred = normalize_answer(predicted)
+    if isinstance(gold, list):
+        return any(pred == normalize_answer(g) for g in gold if g)
+    return pred == normalize_answer(gold)
 
 
 def normalize_answer(s: str) -> str:
@@ -793,7 +803,7 @@ def main():
     if critic_llm:
         print(f"Evaluating with Critic (vLLM)... {len(all_trajs_flat)} trajectories")
         # Define output path for incremental saving
-        jsonl_path = args.output.replace('.json', '_per_trajectory.jsonl')
+        jsonl_path = args.output.replace('.json', '_per_trajectory_critic.jsonl')
         
         critic_step_results = batch_evaluate_with_critic_vllm(
             critic_llm, critic_tokenizer, critic_lora_request, all_trajs_flat,
@@ -942,7 +952,7 @@ def main():
 
     # Save VersaPRM per-trajectory JSONL
     if versaprm_per_question:
-        versaprm_jsonl_path = args.output.replace('.json', '_per_trajectory.jsonl')
+        versaprm_jsonl_path = args.output.replace('.json', '_per_trajectory_versaprm.jsonl')
         print(f"Saving VersaPRM per-trajectory scores to {versaprm_jsonl_path}")
         with open(versaprm_jsonl_path, 'w') as vf:
             for qid in qid_list:
@@ -971,6 +981,7 @@ def main():
     mathprm_per_question = {}  # qid -> [(traj, step_scores), ...]
 
     if args.use_mathprm and not args.skip_mathprm:
+      try:
         mathprm_model, mathprm_tokenizer = load_mathprm(args.mathprm)
 
         print(f"Evaluating with MathPRM... {len(all_trajs_flat)} trajectories")
@@ -1033,7 +1044,7 @@ def main():
                     results[f'mathprm_wmv_{scoring}']['correct'] += 1
 
         # Save MathPRM per-trajectory JSONL
-        mathprm_jsonl_path = args.output.replace('.json', '_per_trajectory.jsonl')
+        mathprm_jsonl_path = args.output.replace('.json', '_per_trajectory_mathprm.jsonl')
         print(f"Saving MathPRM per-trajectory scores to {mathprm_jsonl_path}")
         with open(mathprm_jsonl_path, 'w') as mf:
             for qid in qid_list:
@@ -1055,6 +1066,19 @@ def main():
         # Free MathPRM
         del mathprm_model, mathprm_tokenizer
         torch.cuda.empty_cache()
+      except Exception as e:
+        print(f"\n[WARN] MathPRM evaluation failed: {e}")
+        print("[WARN] Continuing without MathPRM scores; aggregate JSON will still be saved.")
+        try:
+            del mathprm_model
+        except: pass
+        try:
+            del mathprm_tokenizer
+        except: pass
+        try:
+            torch.cuda.empty_cache()
+        except: pass
+        mathprm_per_question = {}
 
     # Build details
     for qid in qid_list:

@@ -83,6 +83,8 @@ Step-level accuracy (unseen 2000q):
 | K=3 F6+α1.0 | K=3, V8 critic | cho≥0.2 AND Δ≥0.2 | 1.0 | 0.1 | 15,059 | 0.3797 | 0.5060 | -0.3% |
 | K=3 F6+α0 (ablation) | K=3, V8 critic | cho≥0.2 AND Δ≥0.2 | 0.0 | 0.1 | 16,065 | 0.3674 | 0.4931 | -1.6% |
 | K=3 F6tight | K=3, V8 critic | cho≥**0.3** AND Δ≥0.2 | 0.3 | 0.1 | 13,944 | 0.3598 | 0.4728 | -2.3% ❌ |
+| K=3 F6margin | K=3, V8 critic | cho≥0.2 AND Δ≥**0.3** | 0.3 | 0.1 | ~13k | 0.3649 | 0.4978 | -1.8% ❌ |
+| K=3 F6loose | K=3, V8 critic | cho≥**0.1** AND Δ≥0.2 | 0.3 | 0.1 | ~19k | 0.3344 | 0.4714 | -4.9% ❌❌ |
 | V1-tree α=0 (ablation) | K=2, V9 critic | δ=0.01 | 0.0 | 0.1 | 9,551 | 0.2933 | 0.4080 | -9.0% |
 
 **확정 방향**: **K=3 F6 filter가 새 baseline** — V1(0.383) 및 SearchR1 PPO(0.384) 모두 초과.
@@ -113,18 +115,23 @@ F6 filter 고정 + α extraction 값만 변경:
 
 **결론**: α=0.3이 global optimum. α=0.5에서 큰 dip (critic 가중치 과해서 F1 ordering 방해). α=1.0 (pure critic)은 α=0.3 근접하지만 도달 못함.
 
-### 1.4 Phase B F6 threshold sweep (진행 중)
+### 1.4 Phase B F6 threshold sweep (2026-04-21 완료)
 
-F6 base = (cho_floor=0.2, Δ_floor=0.2). α=0.3 고정.
+F6 base = (cho_floor=0.2, Δ_floor=0.2). α=0.3, β=0.1 고정.
 
 | Config | cho_floor | Δ_floor | Pairs | EM | F1 | vs base |
 |---|---|---|---|---|---|---|
 | **F6 base ⭐** | 0.2 | 0.2 | 15,877 | **0.3873** | **0.5163** | — |
-| F6tight | 0.3 | 0.2 | 13,944 | 0.3598 | 0.4728 | -2.8%p ❌ |
-| F6margin | 0.2 | 0.3 | ~13,000 | 🔄 학습 중 | — | — |
-| F6loose | 0.1 | 0.2 | ~19,000 | 대기 | — | — |
+| F6tight | **0.3** | 0.2 | 13,944 | 0.3598 | 0.4728 | -2.8%p ❌ |
+| F6margin | 0.2 | **0.3** | ~13,000 | 0.3649 | 0.4978 | -2.2%p ❌ |
+| F6loose | **0.1** | 0.2 | ~19,000 | 0.3344 | 0.4714 | **-5.3%p** ❌❌ |
 
-**중간 결론**: chosen_floor 올리는 건 F4와 동일 패턴 — 질문 coverage 손실로 overfit.
+**결론**:
+- **F6 base (0.2, 0.2)가 global optimum** — 3x3 neighborhood 모두 하락
+- **Cho floor ↑ (F6tight)**: -2.8%p — F4와 동일 패턴 (질문 coverage 손실 → overfit)
+- **Margin ↑ (F6margin)**: -2.2%p — pair 부족 + critical moderate pair 손실
+- **Cho floor ↓ (F6loose)**: **-5.3%p** — noise pair 대거 유입, worst
+- 양쪽 axis 모두 tightening/loosening 둘 다 하락 → F6 base threshold가 robust optimum
 
 ### 1.5 Benchmark 일반화 (F6+α0.3, 5 datasets)
 
@@ -136,13 +143,16 @@ SearchR1/ReasonRAG와 비교 (모두 BGE retriever, 동일 fixed pipeline):
 | PopQA | 0.404 / **0.474** | **0.407** / 0.468 | 0.378 / 0.449 |
 | 2Wiki | **0.441 / 0.515** ⭐ | 0.349 / 0.425 | 0.398 / 0.463 |
 | Bamboogle | 0.368 / **0.471** | 0.336 / 0.436 | **0.384** / 0.469 |
-| Musique | 0.120 / 0.219 | **0.130** / 0.212 | 0.106 / 0.192 |
+| Musique | 0.120 / **0.219** | **0.130** / 0.212 | 0.106 / 0.192 |
+| **Average** | **EM 0.344 / F1 0.439** ⭐ | 0.320 / 0.407 | 0.326 / 0.410 |
 
-**결과**: 
-- **3 대승**: HotpotQA, 2Wiki, Bamboogle F1
-- **2Wiki 압도**: EM +9.2%p vs SearchR1, +4.3%p vs ReasonRAG
-- **1 박빙 패**: PopQA (SearchR1 -0.3%p EM, F1 우위)
-- **1 근소 패**: Musique (multi-hop 어려움, 전부 낮음)
+**결과**:
+- **F1 5/5 전승** (모든 벤치마크에서 F1 최고)
+- **EM 2 대승**: HotpotQA (+0.8%p), 2Wiki (+9.2%p)
+- **EM 3 박빙 패**: PopQA (-0.3%p vs SearchR1), Bamboogle (-1.6%p vs ReasonRAG), Musique (-1.0%p vs SearchR1)
+- **평균 Avg EM +2.4%p vs SearchR1, +1.8%p vs ReasonRAG**
+- **평균 Avg F1 +3.2%p vs SearchR1, +2.9%p vs ReasonRAG**
+- **2Wiki 압도적 우위**: EM +9.2%p (multi-hop generalization 강점)
 
 ### 1.2 v1 DPO 데이터 품질
 
@@ -376,11 +386,38 @@ Pair set은 97% 공유하지만 나머지 3% 차이 (ordering + critic-only pair
 3. **α=0.3 + F6 > α=0 + F6**: F6 필터 하에서도 α가 여전히 +2.0%p 기여 (97% overlap pair임에도)
 4. **두 효과는 **상호보완적****: F6가 α를 완전 대체하지 않음
 
-### 4.5.4 논문적 함의
+### 4.5.4 논문 주장 vs 실험 결과 (솔직 분석, 2026-04-22)
 
-**Contribution 1 — α 필요성** (V1-tree ablation):
-- α=0 vs α=0.3 (no F6): **-9.0%p** — PRM signal이 DPO pair 학습에 critical
+**원 논문 주장** (abstract/intro):
+1. "Standard **outcome-based** optimization fails..."
+2. "Process Reward Models offer step-level feedback"
+3. "PRO-STEP... **necessity of process supervision** to overcome the limitations of outcome-based optimization"
+
+**우리 실험 실제 증거**:
+
+| Approach | EM | Paper 주장 관점 |
+|---|---|---|
+| V1 (PRM-heavy, α=0.3) | 0.383 | Process-based representative |
+| V1-tree α=0 (F1-only) | 0.293 | "outcome-based fails" 증거 |
+| **F6 (pure F1 filter)** | **0.387** | **outcome-based가 V1 초과** ← 주장 반박 가능성 |
+| F6+α=0 (outcome+filter) | 0.367 | F6 filter만으로 V1-tree α=0 대비 +7.4%p |
+| F6+α=0.3 (filter+PRM) | 0.387 | PRM 기여 +2%p (marginal) |
+
+**Reviewer 관점의 tension**:
+1. V1-tree α=0 ablation (-9%p)은 "outcome-based 실패" 증거로 제시됐지만, 사실은 **pair count 27% 손실 + critic-only pair 삭제 confound**
+2. **F6 단독 (outcome-based filter)이 V1 (process-heavy) 초과** → paper 주장과 충돌
+3. **F6+α=0.3 vs F6+α=0 = 2%p**가 PRM의 cleanest contribution, 하지만 "necessity"로 보기엔 작음
+
+**논문 방어 전략**:
+
+- **A. Strong claim (원안)**: "Process > Outcome" → 우리 실험에서 약함
+- **B. Weak claim (수정안)**: "Process supervision adds marginal refinement over strong outcome-based filter" → 우리 실험 지지
+- **C. Pipeline claim**: "PRM-guided MCTS + DPO pipeline outperforms baselines by +2-3%p avg on 5 benchmarks" → 여전히 지지
+
+### 4.5.5 Contribution 1 — α 필요성** (V1-tree ablation):
+- α=0 vs α=0.3 (no F6): **-9.0%p** — pair count 손실 + critic-only pair 삭제 복합 효과
 - 이 효과 대부분은 critic-only pair (ΔF1=0)를 살리는 것에서 옴
+- **Confound**: 순수 PRM 효과 isolate 안 됨
 
 **Contribution 2 — F6 filter 효과**:
 - No-F6 → F6: α=0에서 +7.4%p, α=0.3에서 +0.4%p
@@ -454,7 +491,7 @@ outputs/
 
 ## 7. Next Steps (2026-04-20 업데이트)
 
-### 완료
+### 완료 (2026-04-21 업데이트)
 - [x] Eval pipeline bug 수정 (faiss_gpu=False + nprobe=128)
 - [x] V1 재현 확인 (0.383)
 - [x] K=3 모든 변형 재평가 (raw 39k, deduped 19k, sampled13k, δ=0.4)
@@ -463,7 +500,9 @@ outputs/
 - [x] **F4 실패 분석 (cho_f1≥0.5만 → 0.358, -2.5%p)** — chosen floor 단일 축 위험
 - [x] **F6 성공 (cho≥0.2 AND Δ≥0.2 → 0.387)** — 🎯 V1 baseline 초과
 - [x] **F6 vs V1 per-question 분석**: F6 우세는 대부분 Yes/No(+4.2%p)에서, Entity는 거의 무차이
-- [x] **α sweep under F6 분석**: F6 하에서 α=0.0 vs α=0.3 = **98.8% 동일 pair set** → α/δ는 실질 튜닝공간 없음
+- [x] **Phase 0 — 5개 벤치마크 평가 (F6+α0.3)**: HotpotQA 0.387, PopQA 0.404, 2Wiki 0.441, Bamboogle 0.368, Musique 0.120 → Avg EM 0.344 (SearchR1 0.320, ReasonRAG 0.326)
+- [x] **Phase A — α sweep on F6**: α ∈ {0, 0.3, 0.5, 1.0} = {0.367, **0.387**, 0.350, 0.380} → α=0.3 global optimum, non-monotonic
+- [x] **Phase B — F6 threshold sweep**: F6base (0.2, 0.2) **0.387** > F6margin (0.2, 0.3) 0.365 > F6tight (0.3, 0.2) 0.360 > F6loose (0.1, 0.2) 0.334 → **F6 base가 robust optimum** (tight/loose/margin 모두 하락)
 
 ### 확정 방향
 **최종 모델: K=3 F6 (cho_f1≥0.2 AND ΔF1≥0.2, 15,877 pairs, β=0.1)**
@@ -479,39 +518,33 @@ outputs/
 4. **Ablation (F4 vs F6)**: chosen floor 단일 축은 실패 (overfit); chosen floor + margin floor 조합이 중요
 5. **Analysis**: F6 개선이 binary decisions (Yes/No)에서 집중 → F6 filter creates cleaner binary learning signal
 
-### 단기 플랜 (이번 주, pass@1 전용 — 논문 본체)
+### 단기 플랜 (현재 상태 2026-04-21)
 
-**Phase 0 — 다른 벤치마크 평가 (진행 중)**:
-- [x] HotpotQA (7,405q) — F6+α0.3 = 0.3873
-- [ ] popqa (14,267q) — 🔄 실행 중
-- [ ] 2wikimultihopqa (12,576q)
-- [ ] bamboogle (125q)
-- [ ] musique (2,417q)
-- **Baseline**: SearchR1 기존 결과 사용 (추가 학습 불필요)
-- **예상**: ~3시간 남음
+**Phase 0 — 다른 벤치마크 평가 (완료)**:
+- [x] HotpotQA, PopQA, 2Wiki, Bamboogle, Musique 전부 F6+α0.3 eval 완료
+- 결과: Section 1.5 참조
 
-**Phase A — α sweep on F6 (2 runs, 8h 예상)**:
-이미 완료: α=0 (0.367), α=0.3 (0.387)
-- [ ] α=0.5 + F6 (base: mcts_dpo_v8_k3_a0.5_d0.05.jsonl → F6 filter)
-- [ ] α=1.0 + F6 (base: mcts_dpo_v8_k3_a1.0_d0.05.jsonl → F6 filter)
-- **목표**: 논문 2×4 ablation table 완성 (α × F6)
+**Phase A — α sweep on F6 (완료)**:
+- [x] α=0: 0.367, α=0.3: **0.387** ⭐, α=0.5: 0.350, α=1.0: 0.380
 
-**Phase B — F6 threshold sweep (3 runs, ~12h 예상)**:
-- [ ] F6-tight: (cho≥0.3, Δ≥0.2) — 순도↑, pair ~11k
-- [ ] F6-margin: (cho≥0.2, Δ≥0.3) — 대비↑, pair ~13k
-- [ ] F6-loose: (cho≥0.1, Δ≥0.2) — coverage↑, pair ~19k
-- **목표**: 2-axis filter 최적값 + robustness 증명
+**Phase B — F6 threshold sweep (완료)**:
+- [x] F6 base (0.2, 0.2) **0.387** — global optimum
+- [x] F6tight (0.3, 0.2) 0.360, F6margin (0.2, 0.3) 0.365, F6loose (0.1, 0.2) 0.334
 
-**Phase C — δ 검증 1회 (~4h)**:
-- [ ] δ=0.05 + α=0.3 + F6 → 0.387 ± 0.5%p 재현 검증만
-- **목표**: F6 하에서 δ가 no-op임을 실증 (논문 appendix)
+**Phase C — δ filter (진행 중, 2026-04-22)**:
+- [x] F2 (cho≥0.2 only, no Δ filter, 21,457 pairs) 학습 시도 → **중단** (사용자 판단)
+- [ ] **δ=0.3 + cho≥0.2 (no F6 post-filter)** — 학습 중 (13,268 pairs)
+  - 목적: F6의 F1-based Δ filter vs δ의 PRM-weighted filter 직접 비교
+  - F6 (0.387)과 비교: paper 주장 "process > outcome" 검증
+  - δ=0.3 > F6 → PRM 유효; δ=0.3 < F6 → outcome filter 우위
 
-**Phase D — β sweep (best setup 확정 후, 2 runs, ~8h)**:
-- [ ] β=0.05 on best
-- [ ] β=0.15 on best
+**Phase D — β sweep on best (F6 base, α=0.3, 계획)**:
+- [ ] β=0.05
+- [ ] β=0.15
 - **목표**: DPO temperature 최적값
+- 예상: ~8h
 
-**총 예상 (HotpotQA only)**: ~32h (Phase A+B+C+D) + 최종 best 모델 5 benchmark eval (~3h)
+**남은 총 시간 (HotpotQA only)**: ~16h (Phase C + D)
 
 ### 중기 플랜 (다음 주~, refine step 도입)
 

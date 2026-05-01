@@ -490,9 +490,9 @@ def run_mcts(questions, retriever, args):
     # Determine GPU memory split
     has_critic = args.critic_model is not None
     if has_critic:
-        policy_gpu_mem = 0.50
-        critic_gpu_mem = 0.35
-        # 합계 0.85 per GPU — 두 모델 모두 같은 GPU 2개에 올라감
+        policy_gpu_mem = 0.45
+        critic_gpu_mem = 0.30
+        # 합계 0.75 per GPU — leave headroom for BGE retriever + fragmentation
         print(f"\n[MCTS] Dual-model mode: policy={policy_gpu_mem}, critic={critic_gpu_mem}")
     else:
         policy_gpu_mem = args.gpu_memory
