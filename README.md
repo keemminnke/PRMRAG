@@ -1,158 +1,115 @@
-# PRMRAG: Consensus-Based Auto-Labeling Pipeline for RAG-CoT
+# PRO-STEP: Step-level Process Reward Optimization for Retrieval-Augmented Generation
 
-자동 라벨링 파이프라인: MC/RPE 신호(작은 모델) + LLM Judge 신호(큰 모델)를 결합하여 consensus 기반으로 고품질 학습 데이터를 생성합니다.
+> A self-improving framework for agentic Retrieval-Augmented Generation, using only open-source supervision (no closed-API teacher). Trains a Qwen2.5-7B-Instruct policy on its own MCTS trajectories, scored by an open-source 8B Process Reward Model, via step-level Direct Preference Optimization.
 
-## 목표
+## 🤗 Released artifacts
 
-사람 개입 없이:
-- 작은 모델의 MC/RPE 신호 + 큰 모델의 judge 신호를 합쳐서
-- 서로 동의하는 step만 남기고 (consensus)
-- 남은 step들에는 이미 0/1 라벨이 자동으로 붙어 있는 상태까지 가는 파이프라인
+### Models
+- **Policy**: [DORAEMONG/PRO-STEP-Policy-7B](https://huggingface.co/DORAEMONG/PRO-STEP-Policy-7B) — Qwen2.5-7B-Instruct + DPO + outcome filter + α=0.3 PRM
+- **Process Reward Model**: [DORAEMONG/PRO-STEP-PRM-8B](https://huggingface.co/DORAEMONG/PRO-STEP-PRM-8B) — LoRA over DeepSeek-R1-0528-Qwen3-8B
 
-**핵심**: "필터링 과정 = 라벨링 과정"
+### Datasets
+- **DPO Preference Pairs**: [DORAEMONG/PRO-STEP-Preference-Data](https://huggingface.co/datasets/DORAEMONG/PRO-STEP-Preference-Data) — 15,877 step-level outcome-filtered pairs
+- **PRM Training Annotations**: [DORAEMONG/PRO-STEP-PRM-Data](https://huggingface.co/datasets/DORAEMONG/PRO-STEP-PRM-Data) — ~109K step labels across 31,728 trajectories
 
-## 파이프라인 구조
+## Performance (5-dataset, identical FlashRAG eval pipeline)
 
-```
-RAG-CoT Trajectories (HotpotQA)
-    ↓
-┌─────────────────────────────────────┐
-│  MC-based RPE Labeler               │
-│  - 작은 모델로 rollout              │
-│  - Monte Carlo estimation           │
-│  - RPE 계산 및 threshold 기반 라벨  │
-└─────────────────────────────────────┘
-    ↓
-┌─────────────────────────────────────┐
-│  LLM Judge Labeler                  │
-│  - 큰 모델 (70B+)                   │
-│  - VersaPRM 스타일 평가             │
-│  - GOOD/BAD 라벨                    │
-└─────────────────────────────────────┘
-    ↓
-┌─────────────────────────────────────┐
-│  Consensus Module                   │
-│  - 두 신호 비교                     │
-│  - 합의된 step만 유지               │
-│  - 자동 라벨 확정 (0/1)             │
-│  - 충돌/애매한 step 제거            │
-└─────────────────────────────────────┘
-    ↓
-고품질 라벨 완비 데이터셋
-```
+| Method | Train data | HotpotQA | PopQA | 2Wiki | Bamboogle | Musique | **AVG** |
+|---|---|---|---|---|---|---|---|
+| Search-R1 | ~90,000 | 37.88 / 49.56 | **40.65** / 46.78 | 34.87 / 42.50 | 33.60 / 43.55 | 12.99 / 21.23 | 32.00 / 40.72 |
+| ReasonRAG | ~5,000 | 36.37 / 47.51 | 37.78 / 44.87 | 39.80 / 46.32 | **38.40** / 46.86 | 10.59 / 19.22 | 32.59 / 40.96 |
+| StepSearch | ~19,000 | 38.72 / 50.67 | 39.24 / 44.97 | 40.38 / 47.12 | 33.60 / 44.16 | **13.82 / 23.06** | 33.15 / 42.00 |
+| **PRO-STEP (ours)** ★ | **5,000** | **38.73 / 51.63** | 40.47 / **47.37** | **44.07 / 51.43** | 36.80 / **47.63** | 12.49 / 22.41 | **34.51 / 44.09** |
 
-## 주요 특징
+EM / F1 (Strict EM, token-F1). Bootstrap 95% CI: vs Search-R1 +2.51 EM [+1.01, +4.06], vs ReasonRAG +1.93 EM [+0.46, +3.36]. Strongest result on **2WikiMultiHopQA**: +9.20 EM over Search-R1 (p<10⁻⁷⁵).
 
-### 1. MC-based RPE Labeling (작은 모델)
-- Prefix 고정 후 K번 rollout
-- MC(s_t, a_t) / MC(s_t) 계산
-- Binary threshold 기반 자동 라벨링 (GOOD/BAD)
-
-### 2. LLM Judge Labeling (큰 모델)
-- VersaPRM 스타일 평가
-- Gold answer + supporting facts 활용
-- Step별 GOOD/BAD 판정
-
-### 3. Consensus-based Filtering
-- **합의된 긍정**: RPE=GOOD + Judge=GOOD → label=1
-- **합의된 부정**: RPE=BAD + Judge=BAD → label=0
-- **불일치**: RPE와 Judge가 다르면 → 제거 (데이터셋에서 제외)
-
-## 설치
-
-```bash
-pip install -e .
-```
-
-또는:
-
-```bash
-pip install -r requirements.txt
-```
-
-## 사용법
-
-### 1. 전체 파이프라인 실행
-
-```bash
-python scripts/label_dataset.py \
-    --config configs/default.yaml \
-    --input data/raw/hotpotqa_trajectories.jsonl \
-    --output data/labeled/consensus_labeled.jsonl
-```
-
-### 2. RPE 라벨링만
-
-```bash
-python scripts/rpe_labeling.py \
-    --config configs/rpe_labeling.yaml \
-    --input data/raw/trajectories.jsonl \
-    --output data/processed/rpe_labels.jsonl
-```
-
-### 3. Judge 라벨링만
-
-```bash
-python scripts/judge_labeling.py \
-    --config configs/judge_labeling.yaml \
-    --input data/raw/trajectories.jsonl \
-    --output data/processed/judge_labels.jsonl
-```
-
-### 4. Consensus 분석
-
-```bash
-python scripts/consensus_analysis.py \
-    --rpe data/processed/rpe_labels.jsonl \
-    --judge data/processed/judge_labels.jsonl \
-    --output outputs/metrics/consensus_analysis.json
-```
-
-## 설정
-
-`configs/default.yaml`에서 파라미터 조정:
-
-```yaml
-labeling:
-  rpe:
-    model_name: "llama-2-7b"
-    num_rollouts: 5
-    threshold: 0.5  # Binary: >= 0.5 → GOOD, < 0.5 → BAD
-
-  judge:
-    model_name: "llama-2-70b"
-    temperature: 0.3
-    max_retries: 3
-
-  consensus:
-    strategy: "strict"  # Both must agree
-    min_agreement: 0.8
-    trajectory_level: true  # trajectory 전체 버리기
-```
-
-## 프로젝트 구조
+## Pipeline overview
 
 ```
-PRMRAG/
-├── src/prmrag/
-│   ├── data/           # 데이터 처리 및 스키마
-│   ├── models/         # 모델 래퍼
-│   ├── labeling/       # 핵심 라벨링 로직
-│   │   ├── rpe_labeler.py
-│   │   ├── judge_labeler.py
-│   │   └── consensus.py
-│   ├── evaluation/     # 평가 도구
-│   └── utils/          # 유틸리티
-├── scripts/            # 실행 스크립트
-├── configs/            # 설정 파일
-└── tests/              # 테스트
+                          ┌──────────────────────┐
+                          │  Qwen2.5-7B-Instruct │  ← policy backbone
+                          └──────────┬───────────┘
+                                     │ MCTS rollout
+                                     │ (K=3 branching, depth 7, 64 rollouts/q)
+                                     ↓
+                  ┌────────────────────────────────┐
+                  │  Open-source 8B PRM (ours)     │  ← step-level scoring
+                  │  (DeepSeek-R1-0528-Qwen3-8B    │     V(s) = Q̄(s) + α·r̂(s)
+                  │  fine-tuned on QwQ-32B labels) │
+                  └────────────────┬───────────────┘
+                                   │
+                                   │ Outcome filter
+                                   │ (chosen_F1 ≥ 0.2 AND Δf1 ≥ 0.2)
+                                   ↓
+                  ┌────────────────────────────────┐
+                  │  15,877 step-level pref pairs  │
+                  └────────────────┬───────────────┘
+                                   │ Step-level DPO
+                                   │ (β=0.1, doc-token masking)
+                                   ↓
+                          ┌─────────────────┐
+                          │  PRO-STEP Policy│  ← released model
+                          └─────────────────┘
 ```
 
-## 참고 논문 & 코드
+## Quick start
 
-- [VersaPRM](https://github.com/UW-Madison-Lee-Lab/VersaPRM)
-- [GenPRM](https://github.com/RyanLiu112/GenPRM)
+### Inference with the policy
 
-## 라이선스
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-MIT
+model = AutoModelForCausalLM.from_pretrained("DORAEMONG/PRO-STEP-Policy-7B", torch_dtype="auto", device_map="auto")
+tokenizer = AutoTokenizer.from_pretrained("DORAEMONG/PRO-STEP-Policy-7B")
+
+# Use with FlashRAG SearchR1Pipeline or any agentic-RAG inference loop
+# System prompt: see paper Appendix A
+```
+
+### Inference with the PRM
+
+```python
+from peft import PeftModel
+from transformers import AutoModelForCausalLM
+
+base = AutoModelForCausalLM.from_pretrained("deepseek-ai/DeepSeek-R1-0528-Qwen3-8B", torch_dtype="auto", device_map="auto")
+prm  = PeftModel.from_pretrained(base, "DORAEMONG/PRO-STEP-PRM-8B")
+# See paper Appendix A for the MCTS scoring prompt
+```
+
+## Repository structure
+
+```
+scripts/
+  generate_trajectories.py      # Stage 1: PRM training data generation
+  build_mcts_dpo.py             # Stage 2: PRM-guided MCTS rollout + pair extraction
+  train_dpo_policy.py           # Stage 3: step-level DPO training
+  eval_flashrag.py              # FlashRAG-based evaluation
+src/
+  prmrag/                       # Core library
+PAPER_RESULTS.md                # Full results, ablations, statistical tests
+REVIEWER_RESPONSE.md            # Detailed reviewer responses
+```
+
+## Key contributions
+
+1. **Self-improving framework with open-source supervision** — uses only Qwen2.5-7B-Instruct and an open-source 8B PRM, no closed-API teacher
+2. **PRM directly inside the MCTS value function** — V(s) = Q̄(s) + α·r̂(s), unlike ReasonRAG's UCB-only auxiliary use
+3. **Sample efficiency** — 5,000 training questions vs Search-R1's ~90,000 (18× less data)
+4. **Multi-hop dominance** — +9.20 EM on 2WikiMultiHopQA over Search-R1 (p<10⁻⁷⁵)
+5. **PRM dominates learned baselines** — beats VersaPRM by +15.0 EM and Math-PRM by +8.4 EM on 2Wiki BoN at K=128
+6. **Open release** — full pipeline (model weights, PRM, preference data, training labels) on Hugging Face
+
+## Citation
+
+```bibtex
+@article{prostep2026,
+  title={PRO-STEP: Step-level Process Reward Optimization for Retrieval-Augmented Generation},
+  author={...},
+  year={2026}
+}
+```
+
+## License
+
+MIT for code and models; CC-BY-SA-4.0 for derived datasets.
